@@ -1,11 +1,8 @@
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple
 
-import matplotlib.patches as patches
-import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
-from matplotlib.lines import Line2D
 
 # Set global font settings for better aesthetics
 plt.rcParams["font.size"] = 11
@@ -22,7 +19,7 @@ plt.rcParams["legend.fontsize"] = 10
 # Primary Brand Colors
 ANTHRO_SLATE = "#141413"
 ANTHRO_IVORY = "#FAF9F5"
-ANTHRO_CLAY = "#D97757"
+ANTHRO_CLAY = "#C0392B"
 
 # Secondary Brand Colors
 ANTHRO_OAT = "#E3DACC"
@@ -91,37 +88,113 @@ ANTHRO_YELLOW_500 = "#FAA72A"
 ANTHRO_MAGENTA_600 = "#B54369"
 ANTHRO_MAGENTA_500 = "#E05A87"
 
+# Common plot accent colors
+SALMON = "#E8927C"
+PURPLE = "#9B72CF"
 
-def compute_mean_and_ci(
-    values: List[float], confidence: float = 0.95
-) -> Tuple[float, float]:
-    """Compute mean and confidence interval for a list of values.
+
+# =============================================================================
+# Utilities
+# =============================================================================
+
+
+# Pre-computed bar statistic: (mean, ci_lo, ci_hi).
+# Plotting functions expect this — all statistics should be computed by callers.
+BarStat = Tuple[float, float, float]
+
+
+def _style_ax(ax, ylim=None, grid=True):
+    """Apply standard axis styling: remove top/right spines, add grid."""
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    if grid:
+        ax.grid(axis="y", alpha=0.3, linestyle="--")
+    ax.set_axisbelow(True)
+    if ylim:
+        ax.set_ylim(ylim)
+
+
+def _save_fig(fig, save_path, dpi=300):
+    """Save figure with standard settings."""
+    if save_path:
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight", facecolor="white")
+
+
+def _apply_row_labels(
+    fig,
+    row_labels: Optional[List[str]] = None,
+    row_colors: Optional[List[str]] = None,
+    row_ylabel: Optional[str] = None,
+    remove_legends: bool = True,
+    keep_first_legend: bool = False,
+    remove_split_labels: bool = True,
+    label_offset: int = -60,
+    ylabel_offset: int = -38,
+):
+    """Apply row labels, row colors, and cleanup to a multi-row hierarchical bar chart.
 
     Args:
-        values: List of numeric values
-        confidence: Confidence level (default 0.95 for 95% CI)
-
-    Returns:
-        Tuple of (mean, ci_half_width) where ci_half_width is the +/- value
+        fig: matplotlib Figure returned by plot_hierarchical_bars
+        row_labels: Left-side labels for each row (e.g., ["Base Models", "Chat"])
+        row_colors: If provided, recolor all bars in row i to row_colors[i].
+        row_ylabel: Secondary ylabel text placed closer to axis (e.g., "Accuracy (%)")
+        remove_legends: Remove legends from all axes
+        keep_first_legend: If True, keep the legend on the first axis
+        remove_split_labels: Remove the split labels below x-axis
+        label_offset: Horizontal offset for row labels in points
+        ylabel_offset: Horizontal offset for secondary ylabel in points
     """
-    arr = np.array(values)
-    n = len(arr)
-    if n == 0:
-        return 0.0, 0.0
-    mean = np.mean(arr)
-    if n == 1:
-        return mean, 0.0
+    axes = fig.get_axes()
+    for i, ax in enumerate(axes):
+        if remove_legends and ax.get_legend():
+            if not (keep_first_legend and i == 0):
+                ax.get_legend().remove()
+        if remove_split_labels:
+            for txt in ax.texts[:]:
+                if txt.get_position()[1] < 0:
+                    txt.remove()
+        if row_labels and i < len(row_labels):
+            ax.set_ylabel("")
+            ax.annotate(
+                row_labels[i],
+                xy=(0, 0.5),
+                xycoords="axes fraction",
+                xytext=(label_offset, 0),
+                textcoords="offset points",
+                ha="center",
+                va="center",
+                fontsize=9,
+                fontweight="bold",
+                rotation=90,
+            )
+            if row_ylabel:
+                ax.annotate(
+                    row_ylabel,
+                    xy=(0, 0.5),
+                    xycoords="axes fraction",
+                    xytext=(ylabel_offset, 0),
+                    textcoords="offset points",
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    fontweight="normal",
+                    rotation=90,
+                )
+        if row_colors and i < len(row_colors):
+            for patch in ax.patches:
+                if patch is not None:
+                    patch.set_facecolor(row_colors[i])
+                    patch.set_alpha(0.85)
 
-    # Use z-score for 95% CI (1.96)
-    z = 1.96 if confidence == 0.95 else 1.645 if confidence == 0.90 else 2.576
-    std_err = np.std(arr, ddof=1) / np.sqrt(n)
-    ci = z * std_err
-    return mean, ci
+
+# =============================================================================
+# Hierarchical bar chart
+# =============================================================================
 
 
 def _plot_single_row(
     ax,
-    data: Dict[str, Dict[str, Dict[str, List[float]]]],
+    data: Dict[str, Dict[str, Dict[str, BarStat]]],
     splits: List[str],
     all_groups: List[str],
     all_categories: List[str],
@@ -175,14 +248,16 @@ def _plot_single_row(
     for cat_idx, category in enumerate(all_categories):
         offset = (cat_idx - num_categories / 2 + 0.5) * bar_width
         means = []
-        cis = []
+        err_lo = []
+        err_hi = []
 
         for split in splits:
             for group in split_group_order[split]:
-                values = data[split][group].get(category, [])
-                mean, ci = compute_mean_and_ci(values)
+                stat = data[split][group].get(category, (0.0, 0.0, 0.0))
+                mean, ci_lo, ci_hi = stat
                 means.append(mean)
-                cis.append(ci)
+                err_lo.append(mean - ci_lo)
+                err_hi.append(ci_hi - mean)
 
         bars = ax.bar(
             x_positions + offset,
@@ -190,7 +265,7 @@ def _plot_single_row(
             bar_width,
             label=category if show_legend else None,
             color=colors[cat_idx % len(colors)],
-            yerr=cis,
+            yerr=[err_lo, err_hi],
             capsize=4,
             error_kw={"linewidth": 1.5, "capthick": 1.5},
             alpha=0.85,
@@ -198,14 +273,17 @@ def _plot_single_row(
         )
 
         if show_values:
-            for bar, mean, ci in zip(bars, means, cis):
+            n_cats = len(all_categories)
+            val_fontsize = 9 if n_cats <= 1 else max(6, 10 - n_cats)
+            for bar, mean, ehi in zip(bars, means, err_hi):
+                y_pad = ehi + (ylim[1] - ylim[0]) * 0.01 if ylim else ehi + 0.01
                 ax.text(
                     bar.get_x() + bar.get_width() / 2.0,
-                    bar.get_height() + ci + 0.1,
+                    bar.get_height() + y_pad,
                     f"{mean:.2f}",
                     ha="center",
                     va="bottom",
-                    fontsize=9,
+                    fontsize=val_fontsize,
                 )
 
     # Add vertical separators between splits
@@ -239,17 +317,11 @@ def _plot_single_row(
 
     if show_legend and legend_loc != "outside right":
         ax.legend(loc=legend_loc, frameon=True)
-    ax.grid(axis="y", alpha=0.3, linestyle="--")
-    ax.set_axisbelow(True)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
-    if ylim:
-        ax.set_ylim(ylim)
+    _style_ax(ax, ylim=ylim)
 
 
 def plot_hierarchical_bars(
-    data: Dict[str, Dict[str, Dict[str, List[float]]]],
+    data: Dict[str, Dict[str, Dict[str, BarStat]]],
     title: str = "",
     xlabel: str = "",
     ylabel: str = "",
@@ -267,13 +339,19 @@ def plot_hierarchical_bars(
     split_label_offset: float = -0.2,
     splits_per_row: Optional[int] = None,
     n_cols: int = 1,
+    row_labels: Optional[List[str]] = None,
+    row_colors: Optional[List[str]] = None,
+    row_ylabel: Optional[str] = None,
+    hlines: Optional[List[Dict]] = None,
+    keep_first_legend: bool = False,
 ):
     """
-    Create a grouped bar chart with means and 95% confidence intervals.
+    Create a grouped bar chart with error bars.
 
     Args:
-        data: Three-level dict: {split: {group: {category: [list of values]}}}
-              Pass raw values - means and 95% CIs are computed automatically.
+        data: Three-level dict: ``{split: {group: {category: (mean, ci_lo, ci_hi)}}}``.
+              Each leaf is a ``BarStat`` tuple of pre-computed statistics.
+              Use ``bootstrap_ci`` from ``src.utils`` to compute these.
         title: Chart title
         xlabel: X-axis label
         ylabel: Y-axis label
@@ -290,6 +368,12 @@ def plot_hierarchical_bars(
         split_spacing: Spacing between splits
         split_label_offset: Vertical offset for split labels
         splits_per_row: If set, splits data across multiple rows with this many splits per row
+        row_labels: Left-side labels for each row (replaces ylabel, removes split labels)
+        row_colors: Recolor bars in each row
+        row_ylabel: Secondary ylabel text next to row labels (e.g., "Accuracy (%)")
+        hlines: List of dicts for horizontal reference lines on all axes.
+                Each dict: {"y": value, "color": ..., "linestyle": ..., "linewidth": ..., "alpha": ...}
+        keep_first_legend: If True, keep the legend on the first axis when row_labels removes others
     """
     if colors is None:
         colors = [
@@ -391,11 +475,247 @@ def plot_hierarchical_bars(
                 frameon=True,
             )
 
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches="tight", facecolor="white")
+    # Apply horizontal reference lines
+    if hlines:
+        for ax_obj in fig.get_axes():
+            for hl in hlines:
+                ax_obj.axhline(
+                    y=hl["y"],
+                    color=hl.get("color", "red"),
+                    linestyle=hl.get("linestyle", "--"),
+                    linewidth=hl.get("linewidth", 1.5),
+                    alpha=hl.get("alpha", 0.5),
+                    zorder=2,
+                )
+
+    # Apply row labels and row colors if provided
+    if row_labels or row_colors:
+        _apply_row_labels(
+            fig,
+            row_labels=row_labels,
+            row_colors=row_colors,
+            row_ylabel=row_ylabel,
+            remove_legends=row_labels is not None,
+            keep_first_legend=keep_first_legend,
+            remove_split_labels=row_labels is not None,
+        )
+
+    _save_fig(fig, save_path)
 
     return fig
 
+
+# =============================================================================
+# Scatter plot with trend line
+# =============================================================================
+
+
+def plot_scatter_with_trend(
+    x: np.ndarray,
+    y: np.ndarray,
+    groups: Optional[Dict[str, np.ndarray]] = None,
+    group_colors: Optional[Dict[str, str]] = None,
+    xlabel: str = "",
+    ylabel: str = "",
+    title: str = "",
+    reference_lines: Optional[List[Dict]] = None,
+    jitter: Tuple[float, float] = (0.0, 0.0),
+    alpha: float = 0.25,
+    point_size: int = 18,
+    trend_color: str = ANTHRO_CLAY,
+    figsize: Tuple[float, float] = (6, 5),
+    ax: Optional[plt.Axes] = None,
+    save_path: Optional[str] = None,
+) -> plt.Figure:
+    """Scatter plot with OLS trend line and optional group coloring.
+
+    Args:
+        x, y: Data arrays (same length).
+        groups: Optional dict {label: boolean_mask} for coloring subsets.
+        group_colors: Dict {label: color_hex} for each group.
+        reference_lines: List of dicts with keys "x" (value), "color", "label",
+                         "linestyle" (default ":") for vertical reference lines.
+        jitter: (jitter_x_std, jitter_y_std) for adding random noise.
+        ax: If provided, plot on this axes instead of creating a new figure.
+    """
+    from scipy import stats as sp_stats
+
+    own_fig = ax is None
+    if own_fig:
+        fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=150)
+        fig.patch.set_facecolor("white")
+    else:
+        fig = ax.get_figure()
+
+    rng = np.random.default_rng(42)
+    jx = rng.normal(0, jitter[0], len(x)) if jitter[0] else 0
+    jy = rng.normal(0, jitter[1], len(y)) if jitter[1] else 0
+
+    # Plot groups or all points
+    if groups and group_colors:
+        for label, mask in groups.items():
+            color = group_colors.get(label, ANTHRO_BLUE_500)
+            ax.scatter(
+                x[mask] + (jx[mask] if isinstance(jx, np.ndarray) else 0),
+                y[mask] + (jy[mask] if isinstance(jy, np.ndarray) else 0),
+                alpha=alpha,
+                s=point_size,
+                color=color,
+                edgecolors="none",
+                label=f"{label} (n={mask.sum()})",
+            )
+    else:
+        ax.scatter(
+            x + jx,
+            y + jy,
+            alpha=alpha,
+            s=point_size,
+            color=ANTHRO_BLUE_500,
+            edgecolors="none",
+            label=f"n={len(x)}",
+        )
+
+    # OLS trend line
+    slope, intercept, r_value, _, _ = sp_stats.linregress(x, y)
+    x_line = np.linspace(x.min(), x.max(), 100)
+    ax.plot(
+        x_line,
+        slope * x_line + intercept,
+        color=trend_color,
+        linewidth=2.5,
+        linestyle="--",
+        label=f"OLS (r={r_value:.2f})",
+    )
+
+    # Spearman for title
+    rho, rho_p = sp_stats.spearmanr(x, y)
+
+    # Reference lines
+    if reference_lines:
+        for ref in reference_lines:
+            ax.axvline(
+                ref["x"],
+                color=ref.get("color", ANTHRO_GRAY_500),
+                linewidth=1.5,
+                linestyle=ref.get("linestyle", ":"),
+                alpha=0.8,
+                label=ref.get("label", ""),
+            )
+
+    ax.set_xlabel(xlabel, fontsize=11)
+    ax.set_ylabel(ylabel, fontsize=11)
+    full_title = title or "Scatter"
+    ax.set_title(
+        f"{full_title}\nSpearman {chr(961)}={rho:.3f} (p={rho_p:.3f})",
+        fontsize=11,
+        color=ANTHRO_CLAY,
+    )
+    ax.legend(fontsize=8, frameon=True, loc="upper right")
+    _style_ax(ax)
+
+    if own_fig:
+        plt.tight_layout()
+        _save_fig(fig, save_path)
+    return fig
+
+
+# =============================================================================
+# Binned bar chart (percentile bins)
+# =============================================================================
+
+
+def plot_binned_bars(
+    x: np.ndarray,
+    y: np.ndarray,
+    percentiles: List[float] = [0, 15, 35, 55, 75, 90, 100],
+    xlabel: str = "",
+    ylabel: str = "",
+    title: str = "",
+    gradient_colors: Tuple[str, str] = (ANTHRO_BLUE_200, ANTHRO_BLUE_700),
+    figsize: Tuple[float, float] = (6, 5),
+    ax: Optional[plt.Axes] = None,
+    save_path: Optional[str] = None,
+) -> plt.Figure:
+    """Bar chart with percentile-based bins showing mean y per bin of x.
+
+    Args:
+        x, y: Data arrays (same length).
+        percentiles: Percentile edges for binning x values.
+        gradient_colors: (light, dark) hex colors for gradient from low to high bins.
+    """
+    own_fig = ax is None
+    if own_fig:
+        fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=150)
+        fig.patch.set_facecolor("white")
+    else:
+        fig = ax.get_figure()
+
+    bin_edges = np.percentile(x, percentiles)
+    bin_edges = sorted(set(bin_edges))
+    if len(bin_edges) < 3:
+        bin_edges = np.linspace(x.min() - 0.01, x.max() + 0.01, 8)
+
+    bin_labels, bin_means, bin_cis, bin_counts = [], [], [], []
+
+    for i in range(len(bin_edges) - 1):
+        lo, hi = bin_edges[i], bin_edges[i + 1]
+        mask = (x >= lo) & (x <= hi) if i == 0 else (x > lo) & (x <= hi)
+        if mask.sum() < 3:
+            continue
+        vals = y[mask]
+        arr_vals = vals.astype(float)
+        mean = float(np.mean(arr_vals))
+        std_err = float(np.std(arr_vals, ddof=1) / np.sqrt(len(arr_vals)))
+        ci = 1.96 * std_err
+        bin_labels.append(f"{lo:.2f}\u2013{hi:.2f}")
+        bin_means.append(mean)
+        bin_cis.append(ci)
+        bin_counts.append(int(mask.sum()))
+
+    x_pos = np.arange(len(bin_labels))
+    n = len(bin_labels)
+    cmap = LinearSegmentedColormap.from_list("", list(gradient_colors))
+    bar_colors = [cmap(i / max(n - 1, 1)) for i in range(n)]
+
+    bars = ax.bar(
+        x_pos,
+        bin_means,
+        yerr=bin_cis,
+        capsize=4,
+        width=0.7,
+        color=bar_colors,
+        alpha=0.9,
+        error_kw={"linewidth": 1.5, "capthick": 1.5, "color": ANTHRO_SLATE},
+    )
+
+    for i, (bar, count) in enumerate(zip(bars, bin_counts)):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + bin_cis[i] + 0.008,
+            f"n={count}",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color=ANTHRO_GRAY_400,
+        )
+
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(bin_labels, rotation=25, ha="right", fontsize=9)
+    ax.set_xlabel(xlabel, fontsize=11)
+    ax.set_ylabel(ylabel, fontsize=11)
+    if title:
+        ax.set_title(title, fontsize=11, color=ANTHRO_CLAY)
+    _style_ax(ax)
+
+    if own_fig:
+        plt.tight_layout()
+        _save_fig(fig, save_path)
+    return fig
+
+
+# =============================================================================
+# Line series
+# =============================================================================
 
 # Default line series palette — visually distinct brand colors
 LINE_COLORS = [
@@ -492,9 +812,7 @@ def plot_line_series(
         raw_x = panel["series"][0]["x"]
         ax.set_xticks(raw_x)
         ax.set_xticklabels([str(v) for v in raw_x])
-        ax.grid(axis="y", alpha=0.3, linestyle="--")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
+        _style_ax(ax)
 
     # Legend on first panel only
     axes[0, 0].legend(loc=legend_loc, frameon=True, fontsize=10)
@@ -503,8 +821,251 @@ def plot_line_series(
         fig.suptitle(title, fontsize=15, color=ANTHRO_CLAY, y=1.01)
 
     plt.tight_layout()
+    _save_fig(fig, save_path)
 
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches="tight", facecolor="white")
+    return fig
 
+
+# =============================================================================
+# Confusion heatmaps
+# =============================================================================
+
+
+def plot_confusion_heatmaps(
+    matrices: List[Dict],
+    title: str = "",
+    figsize: Tuple[int, int] = (6, 5),
+    cmap: str = "Blues",
+    vmin: float = 0.0,
+    vmax: float = 1.0,
+    vertical: bool = False,
+    save_path: Optional[str] = None,
+):
+    """Plot one or more confusion matrices as heatmaps.
+
+    Parameters
+    ----------
+    matrices : list of dict
+        Each dict must contain:
+        - "title": str — subplot title
+        - "labels": list[str] — class labels (rows = true, cols = predicted)
+        - "matrix": 2-D array-like — confusion counts or probabilities
+        - "normalize": bool — if True, row-normalize before plotting
+    title : str
+        Figure suptitle.
+    figsize : tuple
+        Per-panel figure size (width, height).
+    cmap : str
+        Matplotlib colormap name.
+    vmin, vmax : float
+        Color scale bounds.
+    vertical : bool
+        If True, stack panels vertically instead of horizontally.
+    save_path : str or None
+        If given, save the figure to this path.
+    """
+    import numpy as np
+
+    n = len(matrices)
+    if vertical:
+        nrows, ncols = n, 1
+        total_w, total_h = figsize[0], figsize[1] * n
+    else:
+        nrows, ncols = 1, n
+        total_w, total_h = figsize[0] * n, figsize[1]
+
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(total_w, total_h),
+        squeeze=False,
+        facecolor="white",
+        constrained_layout=True,
+    )
+    axes_flat = axes[:, 0] if vertical else axes[0]
+
+    for ax, panel in zip(axes_flat, matrices):
+        mat = np.array(panel["matrix"], dtype=float)
+        labels = panel["labels"]
+        if panel.get("normalize", False):
+            row_sums = mat.sum(axis=1, keepdims=True)
+            row_sums[row_sums == 0] = 1
+            mat = mat / row_sums
+
+        im = ax.imshow(mat, cmap=cmap, vmin=vmin, vmax=vmax, aspect="equal")
+        ax.set_xticks(range(len(labels)))
+        ax.set_yticks(range(len(labels)))
+        ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=7)
+        ax.set_yticklabels(labels, fontsize=7)
+        ax.set_xlabel("Predicted", fontsize=9)
+        ax.set_ylabel("True", fontsize=9)
+        ax.set_title(panel["title"], fontsize=10, fontweight="bold", pad=8)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+    # Shared colorbar
+    cbar = fig.colorbar(im, ax=axes_flat.tolist(), fraction=0.02, pad=0.04)
+    cbar.ax.tick_params(labelsize=8)
+
+    if title:
+        # Center title over the heatmap axes, not the full figure (colorbar shifts it)
+        ax0 = axes_flat[0]
+        bbox = ax0.get_position()
+        title_x = (bbox.x0 + bbox.x1) / 2
+        fig.suptitle(title, fontsize=14, color=ANTHRO_CLAY, x=title_x, ha="center")
+
+    _save_fig(fig, save_path)
+
+    return fig
+
+
+# =============================================================================
+# Scaling curves (e.g. best-of-N)
+# =============================================================================
+
+
+def plot_scaling_curves(
+    scaling_by_series: Dict[str, Dict[int, Dict[str, float]]],
+    panels: List[Dict[str, str]],
+    reference_lines: Optional[Dict[str, List[Dict]]] = None,
+    title: str = "",
+    figsize: Optional[Tuple[float, float]] = None,
+    colors: Optional[Dict[str, str]] = None,
+    labels: Optional[Dict[str, str]] = None,
+    log_x: bool = True,
+    legend_loc: str = "best",
+    dodge: float = 0.0,
+    save_path: Optional[str] = None,
+):
+    """Plot scaling curves across one or more metric panels.
+
+    Args:
+        scaling_by_series: {series_name: {n: {metric: val, metric_ci: (lo, hi), ...}}}
+        panels: List of panel specs, each with keys:
+            - "metric": key in the scaling dicts
+            - "ylabel": y-axis label
+            - "ci_key": optional key for (lo, hi) CI tuples
+        reference_lines: {metric: [{label, value, color?, linestyle?}, ...]}
+        title: Overall figure title.
+        colors: {series_name: color} override.
+        labels: {series_name: display_label} override.
+        log_x: Use log2 x-axis.
+        legend_loc: Legend location string.
+        save_path: Path to save figure.
+    """
+    n_panels = len(panels)
+    if figsize is None:
+        figsize = (7 * n_panels, 5.5)
+
+    series_colors = colors or {}
+    series_labels = labels or {}
+    default_colors = LINE_COLORS
+    markers = LINE_MARKERS
+    refs = reference_lines or {}
+
+    fig, axes = plt.subplots(1, n_panels, figsize=figsize, dpi=150, squeeze=False)
+    fig.patch.set_facecolor("white")
+
+    for panel_idx, panel in enumerate(panels):
+        ax = axes[0, panel_idx]
+        metric = panel["metric"]
+        ci_key = panel.get("ci_key")
+
+        # Reference lines (behind curves)
+        for ref in refs.get(metric, []):
+            ax.axhline(
+                ref["value"],
+                color=ref.get("color", ANTHRO_GRAY_500),
+                linestyle=ref.get("linestyle", "--"),
+                linewidth=1.5,
+                alpha=0.6,
+                label=ref["label"],
+                zorder=1,
+            )
+
+        # Scaling curves
+        all_ns: set = set()
+        n_series = len(scaling_by_series)
+        for s_idx, (series_name, scaling) in enumerate(scaling_by_series.items()):
+            ns = sorted(scaling.keys())
+            all_ns.update(ns)
+            vals = [scaling[n][metric] for n in ns]
+            color = series_colors.get(
+                series_name, default_colors[s_idx % len(default_colors)]
+            )
+            label = series_labels.get(series_name, series_name)
+            marker = markers[s_idx % len(markers)]
+
+            # Apply dodge: shift each series symmetrically
+            offset = (s_idx - (n_series - 1) / 2) * dodge
+            ns_dodged = [n * (2**offset) for n in ns] if log_x and dodge else [n + offset for n in ns]
+
+            yerr = None
+            if ci_key:
+                lo = [scaling[n].get(ci_key, (v, v))[0] for n, v in zip(ns, vals)]
+                hi = [scaling[n].get(ci_key, (v, v))[1] for n, v in zip(ns, vals)]
+                if any(l != h for l, h in zip(lo, hi)):
+                    yerr = [
+                        [v - l for v, l in zip(vals, lo)],
+                        [h - v for v, h in zip(vals, hi)],
+                    ]
+
+            # Plot line + markers first, then error bars separately with lower alpha
+            ax.plot(
+                ns_dodged,
+                vals,
+                color=color,
+                marker=marker,
+                linewidth=2.2,
+                markersize=7,
+                label=label,
+                zorder=4,
+            )
+            if yerr is not None:
+                ax.errorbar(
+                    ns_dodged,
+                    vals,
+                    yerr=yerr,
+                    fmt="none",
+                    ecolor=color,
+                    capsize=4,
+                    capthick=1.5,
+                    elinewidth=1.5,
+                    alpha=0.4,
+                    zorder=3,
+                )
+
+        ax.set_title(panel.get("title", ""), fontsize=13, fontweight="bold")
+        ax.set_xlabel(panel.get("xlabel", "N (samples)"), fontsize=11)
+        ax.set_ylabel(panel["ylabel"], fontsize=11)
+        if log_x:
+            ax.set_xscale("log", base=2)
+        ns_sorted = sorted(all_ns)
+        ax.set_xticks(ns_sorted)
+        ax.set_xticklabels([str(n) for n in ns_sorted])
+        if "ylim" in panel:
+            ax.set_ylim(panel["ylim"])
+        _style_ax(ax)
+
+    # Legend
+    if legend_loc == "below":
+        handles, labels = axes[0, 0].get_legend_handles_labels()
+        if handles:
+            fig.legend(
+                handles,
+                labels,
+                loc="upper center",
+                bbox_to_anchor=(0.5, -0.02),
+                ncol=min(len(handles), 5),
+                frameon=True,
+                fontsize=10,
+            )
+    else:
+        axes[0, 0].legend(loc=legend_loc, frameon=True, fontsize=10)
+
+    if title:
+        fig.suptitle(title, fontsize=15, color=ANTHRO_CLAY, y=1.01)
+
+    plt.tight_layout()
+    _save_fig(fig, save_path)
     return fig

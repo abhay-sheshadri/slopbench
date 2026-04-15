@@ -9,6 +9,7 @@ from .training_utils import (
     add_common_training_args,
     create_lora_config,
     disable_wandb,
+    fsdp_training_args,
     load_and_concatenate_datasets,
     load_model,
     load_tokenizer,
@@ -98,7 +99,8 @@ def build_and_run_trainer(
 
     if tokenizer is None:
         tokenizer = load_tokenizer(args.model_name, args.tokenizer_name)
-    model = load_model(args.model_name, args.is_peft_model)
+    use_fsdp = getattr(args, "fsdp", False)
+    model = load_model(args.model_name, args.is_peft_model, fsdp=use_fsdp)
     peft_config = create_lora_config(rank=args.lora_rank)
 
     def process_dataset(examples):
@@ -140,6 +142,7 @@ def build_and_run_trainer(
             per_device_train_batch_size=args.batch_size,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             gradient_checkpointing=not args.disable_gradient_checkpointing,
+            gradient_checkpointing_kwargs={"use_reentrant": False},
             warmup_steps=100,
             learning_rate=args.learning_rate,
             bf16=True,
@@ -149,10 +152,15 @@ def build_and_run_trainer(
             save_total_limit=1,
             remove_unused_columns=False,
             report_to="none",
+            use_liger_kernel=True,
             optim="adamw_torch",
+            adam_beta1=0.9,
+            adam_beta2=0.95,
+            adam_epsilon=1e-8,
             lr_scheduler_type="cosine",
             max_length=args.max_length,
             completion_only_loss=True,
+            **fsdp_training_args(use_fsdp),
         ),
         train_dataset=train_dataset,
         processing_class=tokenizer,
@@ -167,7 +175,7 @@ def build_and_run_trainer(
     if args.is_peft_model:
         merge_adapters(trainer.model, args.model_name)
     if args.push_to_hub:
-        push_to_hub(trainer.model, tokenizer, args.hub_model_id, dataset_ids)
+        push_to_hub(args.output_dir, args.hub_model_id, dataset_ids)
 
     print("Done.")
 

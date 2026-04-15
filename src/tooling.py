@@ -13,13 +13,28 @@ Providers & model routing:
     Reasoning effort can be appended with a colon, e.g. "gpt-5:medium".
     Unknown model IDs fall back to Anthropic.
 
+There are two modes of calling complete():
+
+    1. Chat completion (list of message dicts) — for all providers:
+       text = await complete([
+           {"role": "user", "content": "What is 2+2?"},
+       ], model="claude-sonnet-4-6")
+
+    2. Base model text completion (raw string) — tinker/vllm/together only:
+       text = await complete("Once upon a time", model="tinker://path/to/checkpoint")
+
+    String prompts to chat providers (Anthropic, OpenAI, OpenRouter) will raise
+    a TypeError. Always use message dicts for chat models.
+
 Usage:
     from src.tooling import complete, complete_batch
 
-    # Single-turn — pass a string prompt:
-    text = await complete("Say hello", model="claude-sonnet-4-6")
+    # Chat completion — always pass a list of message dicts:
+    text = await complete([
+        {"role": "user", "content": "Say hello"},
+    ], model="claude-sonnet-4-6")
 
-    # Multi-turn — pass a list of message dicts:
+    # Multi-turn:
     text = await complete([
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "What is 2+2?"},
@@ -27,48 +42,49 @@ Usage:
         {"role": "user", "content": "Now multiply that by 3."},
     ], model="claude-sonnet-4-6")
 
-    # Base model sampling — string prompts use the /completions endpoint
-    # (raw text in, raw text out) for Tinker and vLLM providers:
-    text = await complete("Once upon a time", model="tinker://path/to/checkpoint")
-    text = await complete("Once upon a time", model="vllm/meta-llama/Llama-3-8B")
-
-    # Message lists fall back to /chat/completions for these providers:
-    text = await complete([
-        {"role": "user", "content": "Hello"},
-    ], model="vllm/my-model")
-
-    # Prefills — end with an assistant message to continue from a prefix.
-    # Works with Anthropic and vLLM/Tinker chat endpoints:
+    # Prefills — end with an assistant message to continue from a prefix:
     text = await complete([
         {"role": "user", "content": "What is 2+2?"},
         {"role": "assistant", "content": "The answer is"},
     ], model="claude-sonnet-4-6")
     # → " 4."
 
-    # For base models, just include the prefix in the string prompt directly:
-    text = await complete("Question: 2+2?\nAnswer:", model="vllm/meta-llama/Llama-3-8B")
+    # Reasoning/thinking traces — always captured and cached. Use
+    # include_reasoning=True to prepend them as <think>...</think>:
+    text = await complete([
+        {"role": "user", "content": "Hard problem"},
+    ], model="claude-sonnet-4-6",
+       thinking={"type": "enabled", "budget_tokens": 5000},
+       include_reasoning=True)
+    # → "<think>\n..reasoning..\n</think>\n\nThe answer is..."
+    # By default (include_reasoning=False), <think> blocks are stripped.
 
-    # Extended thinking (Anthropic):
-    text = await complete("Hard problem", model="claude-sonnet-4-6",
-                          thinking={"type": "enabled", "budget_tokens": 5000})
+    # Base model sampling — string prompt, tinker/vllm/together only:
+    text = await complete("Once upon a time", model="tinker://path/to/checkpoint")
+    text = await complete("Once upon a time", model="vllm/meta-llama/Llama-3-8B")
 
-    # Batch completion (Anthropic only) — works with strings or message lists:
-    texts = await complete_batch(["Say 1", "Say 2"], model="claude-sonnet-4-6")
+    # Batch completion (Anthropic + OpenAI — ~50% cost savings):
     texts = await complete_batch([
-        [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"}, {"role": "user", "content": "Bye"}],
-        [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "What is Python?"}],
-    ], model="claude-sonnet-4-6")
+        [{"role": "user", "content": "Say 1"}],
+        [{"role": "user", "content": "Say 2"}],
+    ], model="claude-sonnet-4-6")  # or model="gpt-4.1"
 
     # Caching is on by default; disable per-call with use_cache=False:
-    text = await complete("Say hello", use_cache=False)
+    text = await complete([{"role": "user", "content": "Say hello"}], use_cache=False)
 """
 
 import asyncio
+import atexit
 import hashlib
 import json
 import os
+import re
+import signal
 import sqlite3
+import tempfile
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import anthropic
@@ -76,6 +92,50 @@ import openai
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+# ── Types ────────────────────────────────────────────────────────────
+
+
+@dataclass
+class LLMResponse:
+    """Full response from an LLM call, including optional reasoning trace.
+
+    Attributes:
+        text: The completion text (always present).
+        thinking: Reasoning/thinking trace from the model, if available.
+            Populated for Anthropic extended thinking and OpenRouter reasoning models.
+    """
+
+    text: str
+    thinking: str | None = None
+
+
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+
+
+def _strip_think_tags(text: str) -> str:
+    """Remove <think>...</think> blocks from model output."""
+    return _THINK_TAG_RE.sub("", text).lstrip()
+
+
+def _format_output(
+    result: LLMResponse, include_reasoning: bool, is_base_completion: bool
+) -> str:
+    """Format an LLMResponse into the final output string.
+
+    Args:
+        result: The raw LLMResponse from the provider or cache.
+        include_reasoning: Whether to prepend cached thinking as <think> tags.
+        is_base_completion: True when using a text completions endpoint (base
+            model sampling via tinker/vllm/together with a string prompt).
+            Base completion output is returned as-is — never stripped or wrapped.
+    """
+    if is_base_completion:
+        return result.text
+    if include_reasoning and result.thinking:
+        return f"<think>\n{result.thinking}\n</think>\n\n{result.text}"
+    return _strip_think_tags(result.text)
+
 
 # ── Config ───────────────────────────────────────────────────────────
 
@@ -122,6 +182,13 @@ def _make_vllm_client():
     return openai.AsyncOpenAI(
         api_key=os.environ.get("VLLM_API_KEY", "EMPTY"),
         base_url=os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1"),
+    )
+
+
+def _make_together_client():
+    return openai.AsyncOpenAI(
+        api_key=os.environ.get("TOGETHER_API_KEY"),
+        base_url="https://api.together.xyz/v1",
     )
 
 
@@ -173,6 +240,13 @@ PROVIDERS = {
         "concurrency": 50,
         "call": "_call_openai_text",
         "client_factory": _make_vllm_client,
+    },
+    "together": {
+        "models": set(),  # matched by "together/" prefix
+        "prefix": "together/",
+        "concurrency": 50,
+        "call": "_call_openai_text",
+        "client_factory": _make_together_client,
     },
 }
 
@@ -282,28 +356,45 @@ def _cache_key(
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
-def cache_get(key: str) -> str | None:
+def _serialize_response(resp: LLMResponse) -> str:
+    """Serialize an LLMResponse to a JSON string for caching."""
+    return json.dumps({"text": resp.text, "thinking": resp.thinking})
+
+
+def _deserialize_response(raw: str) -> LLMResponse:
+    """Deserialize a cached string back to LLMResponse."""
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict) and "text" in data:
+            return LLMResponse(text=data["text"], thinking=data.get("thinking"))
+    except (json.JSONDecodeError, TypeError):
+        pass
+    # Legacy plain-string cache entry
+    return LLMResponse(text=raw)
+
+
+def cache_get(key: str) -> LLMResponse | None:
     row = _db.execute("SELECT completion FROM cache WHERE key = ?", (key,)).fetchone()
-    return row[0] if row else None
+    return _deserialize_response(row[0]) if row else None
 
 
-def cache_put(key: str, completion: str, model: str):
+def cache_put(key: str, response: LLMResponse, model: str):
     _db.execute(
         "INSERT OR REPLACE INTO cache (key, completion, model, created_at) VALUES (?, ?, ?, ?)",
-        (key, completion, model, time.time()),
+        (key, _serialize_response(response), model, time.time()),
     )
     _db.commit()
 
 
-def cache_put_many(entries: list[tuple[str, str, str]]):
+def cache_put_many(entries: list[tuple[str, LLMResponse, str]]):
     _db.executemany(
         "INSERT OR REPLACE INTO cache (key, completion, model, created_at) VALUES (?, ?, ?, ?)",
-        [(k, c, m, time.time()) for k, c, m in entries],
+        [(k, _serialize_response(r), m, time.time()) for k, r, m in entries],
     )
     _db.commit()
 
 
-def cache_get_many(keys: list[str]) -> dict[str, str]:
+def cache_get_many(keys: list[str]) -> dict[str, LLMResponse]:
     if not keys:
         return {}
     results = {}
@@ -314,7 +405,7 @@ def cache_get_many(keys: list[str]) -> dict[str, str]:
             f"SELECT key, completion FROM cache WHERE key IN ({placeholders})", chunk
         ).fetchall()
         for k, v in rows:
-            results[k] = v
+            results[k] = _deserialize_response(v)
     return results
 
 
@@ -329,7 +420,7 @@ async def _call_anthropic(
     client,
     raw_prompt: str | None = None,
     **kwargs,
-) -> str:
+) -> LLMResponse:
     system_parts = [m["content"] for m in messages if m["role"] == "system"]
     chat_messages = [
         {"role": m["role"], "content": m["content"]}
@@ -350,7 +441,9 @@ async def _call_anthropic(
         max_tokens=max_tokens,
         **api_kwargs,
     )
-    return "".join(b.text for b in resp.content if hasattr(b, "text"))
+    text = "".join(b.text for b in resp.content if hasattr(b, "text"))
+    thinking = "".join(b.thinking for b in resp.content if b.type == "thinking") or None
+    return LLMResponse(text=text, thinking=thinking)
 
 
 def _raise_empty() -> None:
@@ -369,7 +462,7 @@ async def _call_openai(
     client,
     raw_prompt: str | None = None,
     **kwargs,
-) -> str:
+) -> LLMResponse:
     api_kwargs = {}
     if "reasoning_effort" in kwargs:
         api_kwargs["reasoning_effort"] = kwargs["reasoning_effort"]
@@ -385,7 +478,13 @@ async def _call_openai(
     )
     if not resp.choices or not resp.choices[0].message.content:
         _raise_empty()
-    return resp.choices[0].message.content
+    text = resp.choices[0].message.content
+    # OpenRouter returns reasoning in model_extra (not a named attribute)
+    thinking = None
+    extra = getattr(resp.choices[0].message, "model_extra", None) or {}
+    if extra.get("reasoning"):
+        thinking = extra["reasoning"]
+    return LLMResponse(text=text, thinking=thinking)
 
 
 async def _call_openai_text(
@@ -396,7 +495,7 @@ async def _call_openai_text(
     client,
     raw_prompt: str | None = None,
     **kwargs,
-) -> str:
+) -> LLMResponse:
     """OpenAI-compatible text completion (not chat).
 
     When raw_prompt is provided, uses /completions for base-model sampling.
@@ -411,7 +510,7 @@ async def _call_openai_text(
         )
         if not resp.choices or not resp.choices[0].text:
             _raise_empty()
-        return resp.choices[0].text
+        return LLMResponse(text=resp.choices[0].text)
 
     # Fall back to chat completions for message lists
     resp = await client.chat.completions.create(
@@ -422,7 +521,7 @@ async def _call_openai_text(
     )
     if not resp.choices or not resp.choices[0].message.content:
         _raise_empty()
-    return resp.choices[0].message.content
+    return LLMResponse(text=resp.choices[0].message.content)
 
 
 # Map from string names in PROVIDERS to actual functions
@@ -459,10 +558,29 @@ async def _retry_with_backoff(
                 f"  API error [{label}] (attempt {attempt + 1}/{retries}): {e}, retrying in {wait}s..."
             )
             await asyncio.sleep(wait)
-    return ""
+    return LLMResponse(text="")
 
 
 # ── Single completion ────────────────────────────────────────────────
+
+
+def _verify_reasoning(
+    result: LLMResponse | None,
+    include_reasoning: bool,
+    is_base_completion: bool,
+    api_id: str,
+) -> None:
+    """Raise if include_reasoning=True but no reasoning trace was produced."""
+    if not include_reasoning or is_base_completion:
+        return
+    has_thinking = bool(result and result.thinking)
+    has_think_tags = bool(result and "<think>" in (result.text or ""))
+    if not has_thinking and not has_think_tags:
+        raise RuntimeError(
+            f"include_reasoning=True but model {api_id!r} produced no reasoning "
+            f"trace. Check that the model supports reasoning/thinking and that "
+            f"the appropriate kwargs (e.g. thinking=, extra_body=) are set."
+        )
 
 
 async def complete(
@@ -472,32 +590,61 @@ async def complete(
     max_tokens: int = 4096,
     use_cache: bool = True,
     retries: int = DEFAULT_MAX_RETRIES,
+    include_reasoning: bool = False,
+    salt: str | None = None,
     **kwargs,
 ) -> str:
-    """Complete a prompt. Returns the completion string.
+    """Complete a prompt. Returns the completion text as a string.
 
-    prompt can be a string (becomes a user message) or a list of message dicts.
+    Args:
+        prompt: Either a raw string (base model text completion via tinker/vllm/
+            together) or a list of message dicts (chat completion via any provider).
+            String prompts are only accepted for base-model providers that support
+            the /completions endpoint. For chat models, always pass message dicts.
+        include_reasoning: If True and the model produced a reasoning/thinking
+            trace, prepend it as ``<think>...</think>`` (matching the standard
+            chat-template convention used by DeepSeek, Qwen, etc.).
+            If False (default), any ``<think>`` blocks in chat output are stripped.
+            Has no effect on base-model completions (output is never modified).
+        salt: Optional string mixed into the cache key to force distinct cached
+            samples for otherwise identical calls (e.g. ``salt="sample_3"`` for
+            best-of-N sampling). Does not affect the API call itself.
+
+    Reasoning traces are always captured and cached regardless of this flag.
     """
-    raw_prompt = None
-    if isinstance(prompt, str):
-        messages = [{"role": "user", "content": prompt}]
-        raw_prompt = prompt
-    else:
-        messages = prompt
-
     api_id, provider, resolved_extra = resolve_model(model)
     merged = {**resolved_extra, **kwargs}
+    call_name = PROVIDERS[provider]["call"]
+
+    if isinstance(prompt, str):
+        # String prompts are for base-model text completion only
+        if call_name != "_call_openai_text":
+            raise TypeError(
+                f"String prompts are only supported for base-model providers "
+                f"(tinker/vllm/together), got {provider!r} for model {model!r}. "
+                f"Use a list of message dicts for chat models."
+            )
+        raw_prompt = prompt
+        is_base_completion = True
+        messages = [{"role": "user", "content": prompt}]  # for cache key only
+    else:
+        raw_prompt = None
+        is_base_completion = False
+        messages = prompt
 
     # Cache lookup
     cache_kwargs = {k: v for k, v in merged.items() if not callable(v)}
+    if salt is not None:
+        cache_kwargs["_salt"] = salt
     key = _cache_key(api_id, messages, temperature, max_tokens, **cache_kwargs)
     if use_cache:
         cached = cache_get(key)
         if cached is not None:
-            return cached
+            _verify_reasoning(cached, include_reasoning, is_base_completion, api_id)
+            return _format_output(cached, include_reasoning, is_base_completion)
 
     sem = _get_semaphore(provider)
-    call_fn = _CALL_FUNCTIONS[PROVIDERS[provider]["call"]]
+    call_fn = _CALL_FUNCTIONS[call_name]
     client = _get_client(provider)
 
     async def _attempt():
@@ -514,41 +661,292 @@ async def complete(
 
     result = await _retry_with_backoff(_attempt, retries=retries, label=api_id)
 
-    if use_cache and result:
+    if use_cache and result and result.text:
         cache_put(key, result, api_id)
-    return result
+
+    _verify_reasoning(result, include_reasoning, is_base_completion, api_id)
+    return _format_output(result, include_reasoning, is_base_completion)
 
 
-# ── Batch completion (Anthropic only) ────────────────────────────────
+# ── Batch completion (Anthropic + OpenAI) ─────────────────────────────
+
+
+@contextmanager
+def _batch_cleanup(cancel_fn):
+    """Register a cleanup function for batch cancellation on exit/signal."""
+    atexit.register(cancel_fn)
+    prev_int = signal.signal(signal.SIGINT, cancel_fn)
+    prev_term = signal.signal(signal.SIGTERM, cancel_fn)
+    try:
+        yield
+    finally:
+        atexit.unregister(cancel_fn)
+        signal.signal(signal.SIGINT, prev_int)
+        signal.signal(signal.SIGTERM, prev_term)
+
+
+def _batch_anthropic(
+    api_id: str,
+    uncached_indices: list[int],
+    messages_list: list[list[dict]],
+    temperature: float,
+    max_tokens: int,
+    merged: dict,
+    chunk_size: int,
+    poll_interval: int,
+) -> dict[int, LLMResponse]:
+    """Submit and collect results from Anthropic's batch API (sync).
+
+    All chunks are submitted up front, then polled concurrently in one loop.
+    """
+    client = _get_anthropic_sync()
+    uncached_messages = [messages_list[i] for i in uncached_indices]
+
+    # Build and submit chunks
+    chunks: list[tuple[str, list[int]]] = []
+    for chunk_start in range(0, len(uncached_indices), chunk_size):
+        chunk_end = min(chunk_start + chunk_size, len(uncached_indices))
+        chunk_indices = uncached_indices[chunk_start:chunk_end]
+        chunk_msgs = uncached_messages[chunk_start:chunk_end]
+
+        requests = []
+        for i, msgs in enumerate(chunk_msgs):
+            system_parts = [m["content"] for m in msgs if m["role"] == "system"]
+            chat_msgs = [m for m in msgs if m["role"] != "system"]
+            params = {
+                "model": api_id,
+                "messages": chat_msgs,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if system_parts:
+                params["system"] = "\n\n".join(system_parts)
+            if "thinking" in merged:
+                params["thinking"] = merged["thinking"]
+            requests.append(
+                anthropic.types.messages.batch_create_params.Request(
+                    custom_id=str(i),
+                    params=params,
+                )
+            )
+
+        batch = client.messages.batches.create(requests=requests)
+        print(f"  Batch {batch.id}: {len(requests)} requests submitted")
+        chunks.append((batch.id, chunk_indices))
+
+    # Cleanup handler — cancels any in-progress batches on exit/signal
+    pending_ids = {bid for bid, _ in chunks}
+
+    def _cancel(signum=None, frame=None):
+        if not pending_ids:
+            return
+        print(f"\n  Cancelling {len(pending_ids)} Anthropic batches...")
+        for bid in list(pending_ids):
+            try:
+                client.messages.batches.cancel(bid)
+            except Exception:
+                pass
+        if signum is not None:
+            raise SystemExit(1)
+
+    with _batch_cleanup(_cancel):
+        # Poll until all batches complete
+        elapsed = 0
+        while pending_ids:
+            for bid in list(pending_ids):
+                try:
+                    status = client.messages.batches.retrieve(bid)
+                except Exception as e:
+                    print(f"  Polling error for {bid}: {e}, will retry...")
+                    continue
+                if status.processing_status == "ended":
+                    pending_ids.discard(bid)
+                    print(f"  Batch {bid} completed: {status.request_counts}")
+            if pending_ids:
+                if elapsed > 0 and elapsed % 300 == 0:
+                    print(
+                        f"  {len(pending_ids)} batches still processing ({elapsed // 60}m elapsed)..."
+                    )
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+
+        # Collect results
+        completions: dict[int, LLMResponse] = {}
+        for batch_id, chunk_indices in chunks:
+            results = {}
+            for result in client.messages.batches.results(batch_id):
+                idx = int(result.custom_id)
+                if result.result.type == "succeeded":
+                    content = result.result.message.content
+                    text = "".join(b.text for b in content if hasattr(b, "text"))
+                    thinking = (
+                        "".join(b.thinking for b in content if b.type == "thinking")
+                        or None
+                    )
+                    results[idx] = LLMResponse(text=text, thinking=thinking)
+                else:
+                    results[idx] = LLMResponse(text="")
+
+            for local_idx, original_idx in enumerate(chunk_indices):
+                completions[original_idx] = results.get(local_idx, LLMResponse(text=""))
+
+    return completions
+
+
+def _batch_openai(
+    api_id: str,
+    provider: str,
+    uncached_indices: list[int],
+    messages_list: list[list[dict]],
+    temperature: float,
+    max_tokens: int,
+    merged: dict,
+    chunk_size: int,
+    poll_interval: int,
+) -> dict[int, LLMResponse]:
+    """Submit and collect results from OpenAI's batch API (sync).
+
+    Chunks are submitted and polled sequentially (one at a time).
+    Works with any OpenAI-compatible provider that supports the batch endpoint
+    (currently "openai" provider only).
+    """
+    client = openai.OpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+    )
+    uncached_messages = [messages_list[i] for i in uncached_indices]
+    completions: dict[int, LLMResponse] = {}
+    active_batch_ids: list[str] = []
+
+    def _cancel(signum=None, frame=None):
+        print(f"\n  Cancelling {len(active_batch_ids)} OpenAI batches...")
+        for bid in active_batch_ids:
+            try:
+                client.batches.cancel(bid)
+                print(f"  Cancelled {bid}")
+            except Exception:
+                pass
+        if signum is not None:
+            raise SystemExit(1)
+
+    with _batch_cleanup(_cancel):
+        # Process in chunks (OpenAI limit: 50k requests per batch)
+        for chunk_start in range(0, len(uncached_indices), chunk_size):
+            chunk_end = min(chunk_start + chunk_size, len(uncached_indices))
+            chunk_indices = uncached_indices[chunk_start:chunk_end]
+            chunk_msgs = uncached_messages[chunk_start:chunk_end]
+
+            # Write JSONL request file
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".jsonl", delete=False
+            ) as f:
+                jsonl_path = f.name
+                for i, msgs in enumerate(chunk_msgs):
+                    body = {
+                        "model": api_id,
+                        "messages": msgs,
+                        "temperature": temperature,
+                        "max_completion_tokens": max_tokens,
+                    }
+                    if "reasoning_effort" in merged:
+                        body["reasoning_effort"] = merged["reasoning_effort"]
+                    request = {
+                        "custom_id": str(i),
+                        "method": "POST",
+                        "url": "/v1/chat/completions",
+                        "body": body,
+                    }
+                    f.write(json.dumps(request) + "\n")
+
+            # Upload file and create batch
+            with open(jsonl_path, "rb") as f:
+                uploaded = client.files.create(file=f, purpose="batch")
+            os.unlink(jsonl_path)
+
+            batch = client.batches.create(
+                input_file_id=uploaded.id,
+                endpoint="/v1/chat/completions",
+                completion_window="24h",
+            )
+            active_batch_ids.append(batch.id)
+            print(f"  Batch {batch.id}: {len(chunk_indices)} requests submitted")
+
+            # Poll until done
+            elapsed = 0
+            while True:
+                status = client.batches.retrieve(batch.id)
+                counts = status.request_counts
+                if status.status == "completed":
+                    active_batch_ids.remove(batch.id)
+                    print(
+                        f"  Batch {batch.id} completed: "
+                        f"{counts.completed}/{counts.total} succeeded, "
+                        f"{counts.failed} failed"
+                    )
+                    break
+                elif status.status in ("failed", "expired", "cancelled"):
+                    active_batch_ids.remove(batch.id)
+                    print(f"  Batch {batch.id} {status.status}: {status.errors}")
+                    break
+                if elapsed > 0 and elapsed % 300 == 0:
+                    print(
+                        f"  Batch {batch.id}: {status.status} "
+                        f"({counts.completed}/{counts.total}, {elapsed // 60}m elapsed)..."
+                    )
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+
+            # Download and parse results
+            if status.output_file_id:
+                content = client.files.content(status.output_file_id).content
+                for line in content.decode("utf-8").strip().split("\n"):
+                    if not line:
+                        continue
+                    row = json.loads(line)
+                    local_idx = int(row["custom_id"])
+                    original_idx = chunk_indices[local_idx]
+                    if row.get("error"):
+                        completions[original_idx] = LLMResponse(text="")
+                    else:
+                        body = row["response"]["body"]
+                        choice = body["choices"][0]
+                        text = choice["message"]["content"] or ""
+                        completions[original_idx] = LLMResponse(text=text)
+
+    return completions
 
 
 async def complete_batch(
-    prompts: list[str] | list[list[dict]],
+    prompts: list[list[dict]],
     model: str = "claude-sonnet-4-6",
     temperature: float = 1.0,
     max_tokens: int = 4096,
     use_cache: bool = True,
     chunk_size: int = BATCH_CHUNK_SIZE,
-    max_concurrent_batches: int = DEFAULT_MAX_CONCURRENT_BATCHES,
     poll_interval: int = DEFAULT_POLL_INTERVAL,
+    include_reasoning: bool = False,
     **kwargs,
 ) -> list[str]:
-    """Batch complete prompts via Anthropic batch API. Returns list of completions."""
-    messages_list = []
-    for p in prompts:
-        if isinstance(p, str):
-            messages_list.append([{"role": "user", "content": p}])
-        else:
-            messages_list.append(p)
+    """Batch complete prompts via Anthropic or OpenAI batch API.
 
+    Supports Anthropic models (claude-*) and OpenAI models (gpt-*).
+    Both providers offer ~50% cost savings vs real-time API calls.
+
+    Args:
+        prompts: List of message lists (each a list of {role, content} dicts).
+        model: Model ID — routes to the appropriate batch API automatically.
+        include_reasoning: If True, prepend reasoning as <think> tags.
+        chunk_size: Max requests per batch (Anthropic: 5000, OpenAI: 50000).
+        poll_interval: Seconds between status checks.
+    """
+    messages_list = list(prompts)
     api_id, provider, resolved_extra = resolve_model(model)
-    if provider != "anthropic":
+    if provider not in ("anthropic", "openai"):
         raise ValueError(
-            f"Batch API only supports Anthropic models, got {model} ({provider})"
+            f"Batch API supports Anthropic and OpenAI models, got {model} ({provider})"
         )
     merged = {**resolved_extra, **kwargs}
 
-    # Cache
+    # Cache lookup
     cache_kwargs = {k: v for k, v in merged.items() if not callable(v)}
     keys = [
         _cache_key(api_id, msgs, temperature, max_tokens, **cache_kwargs)
@@ -558,137 +956,62 @@ async def complete_batch(
     uncached_indices = [i for i, k in enumerate(keys) if k not in cached]
 
     print(
-        f"  Cache: {len(keys) - len(uncached_indices)}/{len(keys)} hits, {len(uncached_indices)} to fetch"
+        f"  Cache: {len(keys) - len(uncached_indices)}/{len(keys)} hits, "
+        f"{len(uncached_indices)} to fetch via {provider} batch API"
     )
 
     if not uncached_indices:
-        return [cached[k] for k in keys]
+        return [
+            _format_output(
+                cached.get(k, LLMResponse(text="")), include_reasoning, False
+            )
+            for k in keys
+        ]
 
-    uncached_messages = [messages_list[i] for i in uncached_indices]
-    all_completions: dict[int, str] = {}
-    client = _get_anthropic_sync()
+    # Dispatch to provider-specific batch implementation (sync, run in thread)
+    if provider == "anthropic":
+        all_completions = await asyncio.to_thread(
+            _batch_anthropic,
+            api_id,
+            uncached_indices,
+            messages_list,
+            temperature,
+            max_tokens,
+            merged,
+            chunk_size,
+            poll_interval,
+        )
+    else:
+        all_completions = await asyncio.to_thread(
+            _batch_openai,
+            api_id,
+            provider,
+            uncached_indices,
+            messages_list,
+            temperature,
+            max_tokens,
+            merged,
+            chunk_size,
+            poll_interval,
+        )
 
-    # Submit chunks
-    batch_sem = asyncio.Semaphore(max_concurrent_batches)
+    # Cache new results
+    cache_entries = [
+        (keys[i], resp, api_id) for i, resp in all_completions.items() if resp.text
+    ]
+    if cache_entries:
+        cache_put_many(cache_entries)
+        print(f"  Cached {len(cache_entries)} new results")
 
-    async def _submit_chunk(chunk_indices, chunk_msgs):
-        async with batch_sem:
-            requests = []
-            for i, msgs in enumerate(chunk_msgs):
-                system_parts = [m["content"] for m in msgs if m["role"] == "system"]
-                chat_msgs = [
-                    {"role": m["role"], "content": m["content"]}
-                    for m in msgs
-                    if m["role"] != "system"
-                ]
-                params = {
-                    "model": api_id,
-                    "messages": chat_msgs,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                }
-                if system_parts:
-                    params["system"] = "\n\n".join(system_parts)
-                if "thinking" in merged:
-                    params["thinking"] = merged["thinking"]
-                requests.append(
-                    anthropic.types.messages.batch_create_params.Request(
-                        custom_id=str(i),
-                        params=params,
-                    )
-                )
-            batch = client.messages.batches.create(requests=requests)
-            print(f"  Batch {batch.id}: {len(requests)} requests submitted")
-            return batch.id, chunk_indices
-
-    submit_tasks = []
-    for chunk_start in range(0, len(uncached_indices), chunk_size):
-        chunk_end = min(chunk_start + chunk_size, len(uncached_indices))
-        chunk_indices = uncached_indices[chunk_start:chunk_end]
-        chunk_msgs = uncached_messages[chunk_start:chunk_end]
-        submit_tasks.append(_submit_chunk(chunk_indices, chunk_msgs))
-
-    chunks = await asyncio.gather(*submit_tasks)
-
-    # Register cleanup handler to cancel batches on exit
-    all_batch_ids = [batch_id for batch_id, _ in chunks]
-
-    def _cancel_batches(signum=None, frame=None):
-        print(f"\n  Cancelling {len(all_batch_ids)} batches...")
-        for bid in all_batch_ids:
-            try:
-                client.messages.batches.cancel(bid)
-                print(f"  Cancelled {bid}")
-            except Exception as e:
-                print(f"  Failed to cancel {bid}: {e}")
-        if signum is not None:
-            raise SystemExit(1)
-
-    import atexit
-    import signal
-
-    atexit.register(_cancel_batches)
-    prev_sigint = signal.signal(signal.SIGINT, _cancel_batches)
-    prev_sigterm = signal.signal(signal.SIGTERM, _cancel_batches)
-
-    # Poll until done
-    pending = {batch_id for batch_id, _ in chunks}
-    elapsed = 0
-    while pending:
-        for batch_id in list(pending):
-            try:
-                status = client.messages.batches.retrieve(batch_id)
-            except Exception as e:
-                print(f"  Polling error for {batch_id}: {e}, will retry...")
-                continue
-            if status.processing_status == "ended":
-                pending.discard(batch_id)
-                print(f"  Batch {batch_id} completed: {status.request_counts}")
-        if pending:
-            if elapsed > 0 and elapsed % 300 == 0:
-                print(
-                    f"  {len(pending)} batches still processing ({elapsed // 60}m elapsed)..."
-                )
-            await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
-
-    # Unregister cleanup
-    atexit.unregister(_cancel_batches)
-    signal.signal(signal.SIGINT, prev_sigint)
-    signal.signal(signal.SIGTERM, prev_sigterm)
-
-    # Collect results
-    for batch_id, chunk_indices in chunks:
-        results = {}
-        for result in client.messages.batches.results(batch_id):
-            idx = int(result.custom_id)
-            if result.result.type == "succeeded":
-                text = "".join(
-                    b.text for b in result.result.message.content if hasattr(b, "text")
-                )
-                results[idx] = text
-            else:
-                results[idx] = ""
-
-        cache_entries = []
-        for local_idx, original_idx in enumerate(chunk_indices):
-            completion = results.get(local_idx, "")
-            all_completions[original_idx] = completion
-            if use_cache and completion:
-                cache_entries.append((keys[original_idx], completion, api_id))
-
-        if cache_entries:
-            cache_put_many(cache_entries)
-            print(f"  Cached {len(cache_entries)} results from {batch_id}")
-
-    # Assemble final results
+    # Assemble final output
     output = []
     for i, k in enumerate(keys):
         if k in cached:
-            output.append(cached[k])
+            resp = cached[k]
         elif i in all_completions:
-            output.append(all_completions[i])
+            resp = all_completions[i]
         else:
-            output.append("")
+            resp = LLMResponse(text="")
+        output.append(_format_output(resp, include_reasoning, False))
 
     return output

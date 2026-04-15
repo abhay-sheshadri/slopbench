@@ -23,7 +23,7 @@ async def _llm(
 ) -> str:
     content = _prefix + load_prompt_file(PROMPTS_DIR / template, **kwargs)
     return await complete(
-        content,
+        [{"role": "user", "content": content}],
         model=model_id,
         temperature=1.0,
         max_tokens=max_tokens,
@@ -147,7 +147,9 @@ async def _run_conversation(
         auditor_messages = [{"role": "system", "content": auditor_system}]
         for msg in transcript:
             if msg["role"] == "user" and msg["content"] != initial_message:
-                auditor_messages.append({"role": "assistant", "content": msg["content"]})
+                auditor_messages.append(
+                    {"role": "assistant", "content": msg["content"]}
+                )
             elif msg["role"] == "assistant":
                 auditor_messages.append({"role": "user", "content": msg["content"]})
 

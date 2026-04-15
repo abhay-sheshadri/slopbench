@@ -136,7 +136,7 @@ async def llm(
 
     content = _prefix + load_prompt_file(template, **kwargs)
     return await complete(
-        content,
+        [{"role": "user", "content": content}],
         model=model_id,
         temperature=1.0,
         max_tokens=max_tokens,
@@ -247,3 +247,48 @@ async def gather_with_limits(
         return await tqdm.gather(*wrapped_tasks)
     else:
         return await asyncio.gather(*wrapped_tasks)
+
+
+# =============================================================================
+# Bootstrap confidence intervals
+# =============================================================================
+
+
+def bootstrap_ci(
+    stat_fn: Callable,
+    *data: list,
+    n_boot: int = 1000,
+    seed: int = 42,
+    confidence: float = 0.95,
+) -> tuple[float, float, float]:
+    """Compute a bootstrap confidence interval for any statistic.
+
+    Args:
+        stat_fn: Function that takes one or more lists and returns a scalar.
+                 e.g. ``lambda x, y: spearman(x, y)`` or ``lambda x: sum(x)/len(x)``
+        *data: One or more equal-length lists to resample in lockstep.
+        n_boot: Number of bootstrap iterations.
+        seed: RNG seed for reproducibility.
+        confidence: Confidence level (default 0.95 for 95% CI).
+
+    Returns:
+        (point_estimate, ci_lo, ci_hi) where point_estimate is stat_fn
+        applied to the original data.
+    """
+    import random as _random
+
+    n = len(data[0])
+    rng = _random.Random(seed)
+    point = stat_fn(*data)
+
+    boot_stats = []
+    for _ in range(n_boot):
+        idx = [rng.randint(0, n - 1) for _ in range(n)]
+        resampled = [[d[i] for i in idx] for d in data]
+        boot_stats.append(stat_fn(*resampled))
+
+    alpha = (1 - confidence) / 2
+    boot_stats.sort()
+    lo = boot_stats[int(alpha * n_boot)]
+    hi = boot_stats[int((1 - alpha) * n_boot)]
+    return point, lo, hi

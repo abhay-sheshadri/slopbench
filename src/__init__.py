@@ -1,6 +1,6 @@
 """Re-exports from tooling and utils for convenience."""
 
-from src.tooling import complete, complete_batch, resolve_model
+from src.tooling import LLMResponse, complete, complete_batch, resolve_model
 from src.utils import (
     extract_tag,
     gather_with_limits,
