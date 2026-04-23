@@ -205,7 +205,6 @@ PROVIDERS = {
             "claude-opus-4-6",
             "claude-opus-4-1-20250805",
         },
-        "concurrency": 50,
         "call": "_call_anthropic",
         "client_factory": _make_anthropic_client,
     },
@@ -224,35 +223,30 @@ PROVIDERS = {
             "gpt-4o",
             "gpt-4o-mini",
         },
-        "concurrency": 50,
         "call": "_call_openai_responses",
         "client_factory": _make_openai_client,
     },
     "openrouter": {
         "models": set(),  # matched by "openrouter/" prefix
         "prefix": "openrouter/",
-        "concurrency": 50,
         "call": "_call_openai",
         "client_factory": _make_openrouter_client,
     },
     "tinker": {
         "models": set(),  # matched by "tinker/" prefix or "tinker://" checkpoint paths
         "prefix": "tinker/",
-        "concurrency": 50,
         "call": "_call_openai_text",
         "client_factory": _make_tinker_client,
     },
     "vllm": {
         "models": set(),  # matched by "vllm/" prefix
         "prefix": "vllm/",
-        "concurrency": 50,
         "call": "_call_openai_text",
         "client_factory": _make_vllm_client,
     },
     "together": {
         "models": set(),  # matched by "together/" prefix
         "prefix": "together/",
-        "concurrency": 50,
         "call": "_call_openai_text",
         "client_factory": _make_together_client,
     },
@@ -312,18 +306,6 @@ def _get_anthropic_sync() -> anthropic.Anthropic:
     if _anthropic_sync is None:
         _anthropic_sync = _make_anthropic_sync_client()
     return _anthropic_sync
-
-
-# ── Semaphores ──────────────────────────────────────────────────────
-
-_semaphores: dict[str, asyncio.Semaphore] = {}
-
-
-def _get_semaphore(provider: str) -> asyncio.Semaphore:
-    if provider not in _semaphores:
-        limit = PROVIDERS.get(provider, {}).get("concurrency", 50)
-        _semaphores[provider] = asyncio.Semaphore(limit)
-    return _semaphores[provider]
 
 
 # ── Cache ────────────────────────────────────────────────────────────
@@ -738,20 +720,18 @@ async def complete(
             _verify_reasoning(cached, include_reasoning, is_base_completion, api_id)
             return _format_output(cached, include_reasoning, is_base_completion)
 
-    sem = _get_semaphore(provider)
     client = _get_client(provider)
 
     async def _attempt():
-        async with sem:
-            return await call_fn(
-                api_id,
-                messages,
-                temperature,
-                max_tokens,
-                client,
-                raw_prompt=raw_prompt,
-                **merged,
-            )
+        return await call_fn(
+            api_id,
+            messages,
+            temperature,
+            max_tokens,
+            client,
+            raw_prompt=raw_prompt,
+            **merged,
+        )
 
     result = await _retry_with_backoff(_attempt, retries=retries, label=api_id)
 
