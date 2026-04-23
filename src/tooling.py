@@ -4,13 +4,13 @@ Supports Anthropic, OpenAI, OpenRouter, and Tinker models with a unified
 async interface. All results are cached in a SQLite WAL-mode database.
 
 Providers & model routing:
-    - Anthropic:    "claude-sonnet-4-6", "claude-opus-4-6", etc.
-    - OpenAI:       "gpt-4.1", "gpt-5", etc.
+    - Anthropic:    "claude-sonnet-4-6", "claude-opus-4-7", etc.
+    - OpenAI:       "gpt-5.4", "gpt-5.4-mini", etc.
     - OpenRouter:   "openrouter/<model-id>" (any model on OpenRouter)
     - Tinker:       "tinker/<model>" or "tinker://<checkpoint>" (base model sampling)
     - vLLM:         "vllm/<model>" (local/remote vLLM server, base model sampling)
 
-    Reasoning effort can be appended with a colon, e.g. "gpt-5:medium".
+    Reasoning effort can be appended with a colon, e.g. "gpt-5.4:medium".
     Unknown model IDs fall back to Anthropic.
 
 There are two modes of calling complete():
@@ -54,7 +54,7 @@ Usage:
     text = await complete([
         {"role": "user", "content": "Hard problem"},
     ], model="claude-sonnet-4-6",
-       thinking={"type": "enabled", "budget_tokens": 5000},
+       extra_body={"output_config": {"effort": "high"}},
        include_reasoning=True)
     # → "<think>\n..reasoning..\n</think>\n\nThe answer is..."
     # By default (include_reasoning=False), <think> blocks are stripped.
@@ -67,7 +67,7 @@ Usage:
     texts = await complete_batch([
         [{"role": "user", "content": "Say 1"}],
         [{"role": "user", "content": "Say 2"}],
-    ], model="claude-sonnet-4-6")  # or model="gpt-4.1"
+    ], model="claude-sonnet-4-6")  # or model="gpt-5.4"
 
     # Caching is on by default; disable per-call with use_cache=False:
     text = await complete([{"role": "user", "content": "Say hello"}], use_cache=False)
@@ -103,7 +103,8 @@ class LLMResponse:
     Attributes:
         text: The completion text (always present).
         thinking: Reasoning/thinking trace from the model, if available.
-            Populated for Anthropic extended thinking and OpenRouter reasoning models.
+            Populated for Anthropic extended thinking, OpenAI reasoning
+            summaries (Responses API), and OpenRouter reasoning models.
     """
 
     text: str
@@ -192,12 +193,15 @@ def _make_together_client():
     )
 
 
+_ANTHROPIC_NO_TEMPERATURE = {"claude-opus-4-7"}
+
 PROVIDERS = {
     "anthropic": {
         "models": {
             "claude-sonnet-4-6",
             "claude-sonnet-4-5-20250929",
             "claude-haiku-4-5-20251001",
+            "claude-opus-4-7",
             "claude-opus-4-6",
             "claude-opus-4-1-20250805",
         },
@@ -213,11 +217,15 @@ PROVIDERS = {
             "gpt-5-nano",
             "gpt-5-mini",
             "gpt-5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.4-nano",
+            "gpt-5.4-pro",
             "gpt-4o",
             "gpt-4o-mini",
         },
         "concurrency": 50,
-        "call": "_call_openai",
+        "call": "_call_openai_responses",
         "client_factory": _make_openai_client,
     },
     "openrouter": {
@@ -341,7 +349,11 @@ _db = _init_db()
 
 
 def _cache_key(
-    model: str, messages: list[dict], temperature: float, max_tokens: int, **kwargs
+    model: str,
+    messages: list[dict],
+    temperature: float | None,
+    max_tokens: int,
+    **kwargs,
 ) -> str:
     blob = json.dumps(
         {
@@ -415,7 +427,7 @@ def cache_get_many(keys: list[str]) -> dict[str, LLMResponse]:
 async def _call_anthropic(
     model: str,
     messages: list[dict],
-    temperature: float,
+    temperature: float | None,
     max_tokens: int,
     client,
     raw_prompt: str | None = None,
@@ -433,11 +445,14 @@ async def _call_anthropic(
         api_kwargs["system"] = "\n\n".join(system_parts)
     if "thinking" in kwargs:
         api_kwargs["thinking"] = kwargs["thinking"]
+    if "extra_body" in kwargs:
+        api_kwargs["extra_body"] = kwargs["extra_body"]
+    if temperature is not None and model not in _ANTHROPIC_NO_TEMPERATURE:
+        api_kwargs["temperature"] = temperature
 
     resp = await client.messages.create(
         model=model,
         messages=chat_messages,
-        temperature=temperature,
         max_tokens=max_tokens,
         **api_kwargs,
     )
@@ -457,7 +472,7 @@ def _raise_empty() -> None:
 async def _call_openai(
     model: str,
     messages: list[dict],
-    temperature: float,
+    temperature: float | None,
     max_tokens: int,
     client,
     raw_prompt: str | None = None,
@@ -468,11 +483,12 @@ async def _call_openai(
         api_kwargs["reasoning_effort"] = kwargs["reasoning_effort"]
     if "extra_body" in kwargs:
         api_kwargs["extra_body"] = kwargs["extra_body"]
+    if temperature is not None:
+        api_kwargs["temperature"] = temperature
 
     resp = await client.chat.completions.create(
         model=model,
         messages=messages,
-        temperature=temperature,
         max_completion_tokens=max_tokens,
         **api_kwargs,
     )
@@ -487,10 +503,73 @@ async def _call_openai(
     return LLMResponse(text=text, thinking=thinking)
 
 
+async def _call_openai_responses(
+    model: str,
+    messages: list[dict],
+    temperature: float | None,
+    max_tokens: int,
+    client,
+    raw_prompt: str | None = None,
+    **kwargs,
+) -> LLMResponse:
+    """OpenAI Responses API — supports reasoning summaries."""
+    input_items = []
+    for msg in messages:
+        if msg["role"] == "system":
+            input_items.append({"role": "developer", "content": msg["content"]})
+        else:
+            input_items.append({"role": msg["role"], "content": msg["content"]})
+
+    api_kwargs: dict = {}
+    if max_tokens:
+        api_kwargs["max_output_tokens"] = max_tokens
+
+    # Build reasoning config — temperature is not supported alongside reasoning
+    reasoning_effort = kwargs.get("reasoning_effort")
+    if reasoning_effort:
+        api_kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
+    elif temperature is not None:
+        api_kwargs["temperature"] = temperature
+    if "extra_body" in kwargs:
+        api_kwargs["extra_body"] = kwargs["extra_body"]
+
+    resp = await client.responses.create(
+        model=model,
+        input=input_items,
+        **api_kwargs,
+    )
+
+    # Extract text and reasoning summary from output items
+    text_parts = []
+    thinking_parts = []
+    has_reasoning = False
+    for item in resp.output:
+        if item.type == "reasoning":
+            has_reasoning = True
+            for s in getattr(item, "summary", None) or []:
+                if hasattr(s, "text"):
+                    thinking_parts.append(s.text)
+        elif item.type == "message":
+            for c in item.content or []:
+                if hasattr(c, "text"):
+                    text_parts.append(c.text)
+
+    text = "".join(text_parts)
+    # Mark reasoning as present even when summary is empty (trivial prompts)
+    thinking = (
+        "\n".join(thinking_parts)
+        if thinking_parts
+        else ("(reasoning)" if has_reasoning else None)
+    )
+    if not text:
+        _raise_empty()
+    return LLMResponse(text=text, thinking=thinking)
+
+
 async def _call_openai_text(
     model: str,
     messages: list[dict],
-    temperature: float,
+    temperature: float | None,
     max_tokens: int,
     client,
     raw_prompt: str | None = None,
@@ -502,34 +581,45 @@ async def _call_openai_text(
     Falls back to /chat/completions for message-list calls.
     """
     if raw_prompt is not None:
+        api_kwargs = {"max_tokens": max_tokens}
+        if temperature is not None:
+            api_kwargs["temperature"] = temperature
+        if "extra_body" in kwargs:
+            api_kwargs["extra_body"] = kwargs["extra_body"]
         resp = await client.completions.create(
             model=model,
             prompt=raw_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            **api_kwargs,
         )
         if not resp.choices or not resp.choices[0].text:
             _raise_empty()
         return LLMResponse(text=resp.choices[0].text)
 
     # Fall back to chat completions for message lists
+    api_kwargs = {"max_completion_tokens": max_tokens}
+    if temperature is not None:
+        api_kwargs["temperature"] = temperature
+    if "extra_body" in kwargs:
+        api_kwargs["extra_body"] = kwargs["extra_body"]
+    if "reasoning_effort" in kwargs:
+        api_kwargs["reasoning_effort"] = kwargs["reasoning_effort"]
     resp = await client.chat.completions.create(
         model=model,
         messages=messages,
-        temperature=temperature,
-        max_completion_tokens=max_tokens,
+        **api_kwargs,
     )
     if not resp.choices or not resp.choices[0].message.content:
         _raise_empty()
     return LLMResponse(text=resp.choices[0].message.content)
 
 
-# Map from string names in PROVIDERS to actual functions
-_CALL_FUNCTIONS = {
-    "_call_anthropic": _call_anthropic,
-    "_call_openai": _call_openai,
-    "_call_openai_text": _call_openai_text,
-}
+# Wire up direct function references (PROVIDERS is defined before functions)
+PROVIDERS["anthropic"]["call"] = _call_anthropic
+PROVIDERS["openai"]["call"] = _call_openai_responses
+PROVIDERS["openrouter"]["call"] = _call_openai
+PROVIDERS["tinker"]["call"] = _call_openai_text
+PROVIDERS["vllm"]["call"] = _call_openai_text
+PROVIDERS["together"]["call"] = _call_openai_text
 
 
 # ── Retry helper ─────────────────────────────────────────────────────
@@ -586,7 +676,7 @@ def _verify_reasoning(
 async def complete(
     prompt: str | list[dict],
     model: str = "claude-sonnet-4-6",
-    temperature: float = 1.0,
+    temperature: float | None = None,
     max_tokens: int = 4096,
     use_cache: bool = True,
     retries: int = DEFAULT_MAX_RETRIES,
@@ -601,6 +691,9 @@ async def complete(
             together) or a list of message dicts (chat completion via any provider).
             String prompts are only accepted for base-model providers that support
             the /completions endpoint. For chat models, always pass message dicts.
+        temperature: Sampling temperature. Pass None (default) to omit from the
+            API call, letting the provider use its default. Some models (e.g.
+            Opus 4.7, OpenAI reasoning models) reject explicit temperature.
         include_reasoning: If True and the model produced a reasoning/thinking
             trace, prepend it as ``<think>...</think>`` (matching the standard
             chat-template convention used by DeepSeek, Qwen, etc.).
@@ -614,11 +707,11 @@ async def complete(
     """
     api_id, provider, resolved_extra = resolve_model(model)
     merged = {**resolved_extra, **kwargs}
-    call_name = PROVIDERS[provider]["call"]
+    call_fn = PROVIDERS[provider]["call"]
 
     if isinstance(prompt, str):
         # String prompts are for base-model text completion only
-        if call_name != "_call_openai_text":
+        if call_fn is not _call_openai_text:
             raise TypeError(
                 f"String prompts are only supported for base-model providers "
                 f"(tinker/vllm/together), got {provider!r} for model {model!r}. "
@@ -634,6 +727,8 @@ async def complete(
 
     # Cache lookup
     cache_kwargs = {k: v for k, v in merged.items() if not callable(v)}
+    if call_fn is _call_openai_responses:
+        cache_kwargs["_api"] = "responses"
     if salt is not None:
         cache_kwargs["_salt"] = salt
     key = _cache_key(api_id, messages, temperature, max_tokens, **cache_kwargs)
@@ -644,7 +739,6 @@ async def complete(
             return _format_output(cached, include_reasoning, is_base_completion)
 
     sem = _get_semaphore(provider)
-    call_fn = _CALL_FUNCTIONS[call_name]
     client = _get_client(provider)
 
     async def _attempt():
@@ -689,7 +783,7 @@ def _batch_anthropic(
     api_id: str,
     uncached_indices: list[int],
     messages_list: list[list[dict]],
-    temperature: float,
+    temperature: float | None,
     max_tokens: int,
     merged: dict,
     chunk_size: int,
@@ -716,9 +810,10 @@ def _batch_anthropic(
             params = {
                 "model": api_id,
                 "messages": chat_msgs,
-                "temperature": temperature,
                 "max_tokens": max_tokens,
             }
+            if temperature is not None and api_id not in _ANTHROPIC_NO_TEMPERATURE:
+                params["temperature"] = temperature
             if system_parts:
                 params["system"] = "\n\n".join(system_parts)
             if "thinking" in merged:
@@ -798,7 +893,7 @@ def _batch_openai(
     provider: str,
     uncached_indices: list[int],
     messages_list: list[list[dict]],
-    temperature: float,
+    temperature: float | None,
     max_tokens: int,
     merged: dict,
     chunk_size: int,
@@ -844,9 +939,10 @@ def _batch_openai(
                     body = {
                         "model": api_id,
                         "messages": msgs,
-                        "temperature": temperature,
                         "max_completion_tokens": max_tokens,
                     }
+                    if temperature is not None:
+                        body["temperature"] = temperature
                     if "reasoning_effort" in merged:
                         body["reasoning_effort"] = merged["reasoning_effort"]
                     request = {
@@ -910,7 +1006,8 @@ def _batch_openai(
                         body = row["response"]["body"]
                         choice = body["choices"][0]
                         text = choice["message"]["content"] or ""
-                        completions[original_idx] = LLMResponse(text=text)
+                        reasoning = choice["message"].get("reasoning_content")
+                        completions[original_idx] = LLMResponse(text=text, thinking=reasoning)
 
     return completions
 
@@ -918,7 +1015,7 @@ def _batch_openai(
 async def complete_batch(
     prompts: list[list[dict]],
     model: str = "claude-sonnet-4-6",
-    temperature: float = 1.0,
+    temperature: float | None = None,
     max_tokens: int = 4096,
     use_cache: bool = True,
     chunk_size: int = BATCH_CHUNK_SIZE,
@@ -945,9 +1042,12 @@ async def complete_batch(
             f"Batch API supports Anthropic and OpenAI models, got {model} ({provider})"
         )
     merged = {**resolved_extra, **kwargs}
+    call_fn = PROVIDERS[provider]["call"]
 
     # Cache lookup
     cache_kwargs = {k: v for k, v in merged.items() if not callable(v)}
+    if call_fn is _call_openai_responses:
+        cache_kwargs["_api"] = "responses"
     keys = [
         _cache_key(api_id, msgs, temperature, max_tokens, **cache_kwargs)
         for msgs in messages_list

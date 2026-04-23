@@ -315,8 +315,6 @@ def _plot_single_row(
     else:
         ax.set_xticklabels(x_labels)
 
-    if show_legend and legend_loc != "outside right":
-        ax.legend(loc=legend_loc, frameon=True)
     _style_ax(ax, ylim=ylim)
 
 
@@ -459,21 +457,22 @@ def plot_hierarchical_bars(
 
     # Add title to figure
     if title:
-        fig.suptitle(title, fontsize=14, color=ANTHRO_CLAY, y=1.02)
+        fig.suptitle(title, fontsize=14, fontweight="bold", color="#1a1a1a", y=1.02)
 
     plt.tight_layout()
 
-    # Place legend outside the plot on the right
-    if legend_loc == "outside right":
-        handles, labels = axes[0, 0].get_legend_handles_labels()
-        if handles:
-            fig.legend(
-                handles,
-                labels,
-                loc="center left",
-                bbox_to_anchor=(1.0, 0.5),
-                frameon=True,
-            )
+    # Place legend below the plot (skip if only one entry)
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    if len(handles) > 1:
+        fig.legend(
+            handles,
+            labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.02),
+            ncol=min(len(handles), 5),
+            frameon=True,
+            fontsize=10,
+        )
 
     # Apply horizontal reference lines
     if hlines:
@@ -610,7 +609,15 @@ def plot_scatter_with_trend(
         fontsize=11,
         color=ANTHRO_CLAY,
     )
-    ax.legend(fontsize=8, frameon=True, loc="upper right")
+    handles, labels = ax.get_legend_handles_labels()
+    if len(handles) > 1:
+        ax.legend(
+            fontsize=8,
+            frameon=True,
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.08),
+            ncol=min(len(handles), 5),
+        )
     _style_ax(ax)
 
     if own_fig:
@@ -814,11 +821,21 @@ def plot_line_series(
         ax.set_xticklabels([str(v) for v in raw_x])
         _style_ax(ax)
 
-    # Legend on first panel only
-    axes[0, 0].legend(loc=legend_loc, frameon=True, fontsize=10)
+    # Legend below the plot (skip if only one entry)
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    if len(handles) > 1:
+        fig.legend(
+            handles,
+            labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.02),
+            ncol=min(len(handles), 5),
+            frameon=True,
+            fontsize=10,
+        )
 
     if title:
-        fig.suptitle(title, fontsize=15, color=ANTHRO_CLAY, y=1.01)
+        fig.suptitle(title, fontsize=15, fontweight="bold", color="#1a1a1a", y=1.01)
 
     plt.tight_layout()
     _save_fig(fig, save_path)
@@ -912,7 +929,14 @@ def plot_confusion_heatmaps(
         ax0 = axes_flat[0]
         bbox = ax0.get_position()
         title_x = (bbox.x0 + bbox.x1) / 2
-        fig.suptitle(title, fontsize=14, color=ANTHRO_CLAY, x=title_x, ha="center")
+        fig.suptitle(
+            title,
+            fontsize=14,
+            fontweight="bold",
+            color="#1a1a1a",
+            x=title_x,
+            ha="center",
+        )
 
     _save_fig(fig, save_path)
 
@@ -998,7 +1022,11 @@ def plot_scaling_curves(
 
             # Apply dodge: shift each series symmetrically
             offset = (s_idx - (n_series - 1) / 2) * dodge
-            ns_dodged = [n * (2**offset) for n in ns] if log_x and dodge else [n + offset for n in ns]
+            ns_dodged = (
+                [n * (2**offset) for n in ns]
+                if log_x and dodge
+                else [n + offset for n in ns]
+            )
 
             yerr = None
             if ci_key:
@@ -1047,24 +1075,21 @@ def plot_scaling_curves(
             ax.set_ylim(panel["ylim"])
         _style_ax(ax)
 
-    # Legend
-    if legend_loc == "below":
-        handles, labels = axes[0, 0].get_legend_handles_labels()
-        if handles:
-            fig.legend(
-                handles,
-                labels,
-                loc="upper center",
-                bbox_to_anchor=(0.5, -0.02),
-                ncol=min(len(handles), 5),
-                frameon=True,
-                fontsize=10,
-            )
-    else:
-        axes[0, 0].legend(loc=legend_loc, frameon=True, fontsize=10)
+    # Legend below the plot (skip if only one entry)
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    if len(handles) > 1:
+        fig.legend(
+            handles,
+            labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.02),
+            ncol=min(len(handles), 5),
+            frameon=True,
+            fontsize=10,
+        )
 
     if title:
-        fig.suptitle(title, fontsize=15, color=ANTHRO_CLAY, y=1.01)
+        fig.suptitle(title, fontsize=15, fontweight="bold", color="#1a1a1a", y=1.01)
 
     plt.tight_layout()
     _save_fig(fig, save_path)
