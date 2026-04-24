@@ -39,11 +39,15 @@ from src.utils import load_prompt_file
 
 SKILLS_DIR = Path(__file__).parent / "skills"
 
-ALL_SKILLS = [
-    str(SKILLS_DIR / d)
-    for d in sorted(SKILLS_DIR.iterdir())
-    if d.is_dir() and (d / "SKILL.md").exists()
-]
+ALL_SKILLS = (
+    [
+        str(SKILLS_DIR / d)
+        for d in sorted(SKILLS_DIR.iterdir())
+        if d.is_dir() and (d / "SKILL.md").exists()
+    ]
+    if SKILLS_DIR.is_dir()
+    else []
+)
 
 # ---------------------------------------------------------------------------
 # File naming conventions — single source of truth
@@ -82,7 +86,7 @@ def phase_planner_response_file(
 
 FileCheck = Callable[[str, str | None], Awaitable[str | None]]
 
-_PROMPTS = "src/agent_scaffold/prompts"
+_PROMPTS = str(Path(__file__).resolve().parent / "prompts")
 
 
 def load_prompt(path: str, **kwargs: object) -> str:
@@ -122,6 +126,11 @@ PROMISE_PHASE_NEXT_SEGMENT = (
 PROMISE_PHASE_ALL_COMPLETE = (
     "All planned work is complete. "
     "I have written the context file for the main planner."
+)
+
+PROMISE_BASIC = (
+    "I have completed the plan and the full task completion checklist. "
+    "All items are done and all changes have been verified."
 )
 
 PROMISE_APPROVE = "I approve the phase planner's instructions."
@@ -347,6 +356,8 @@ def scaffold_loop(
             state.messages.insert(0, ChatMessageSystem(content=system_prompt))
 
         continuations = 0
+        truncations = 0
+        max_truncations = 5
 
         while True:
             if compact_handler:
@@ -369,7 +380,18 @@ def scaffold_loop(
                 compact_handler.record_output(state.output)
 
             if state.output.stop_reason == "model_length":
-                return state
+                truncations += 1
+                if truncations >= max_truncations:
+                    return state
+                state.messages.append(
+                    ChatMessageUser(
+                        content=(
+                            "Your previous response was truncated due to context length limits. "
+                            "Continue where you left off."
+                        )
+                    )
+                )
+                continue
 
             if state.output.message.tool_calls:
                 tool_result = await execute_tools(state.messages, tools)
@@ -552,6 +574,63 @@ def worker(
                 exit_promise=promise,
             ),
             max_continuations=max_continuations,
+        ),
+        system_prompt=sys_prompt,
+        model=model,
+        compact_handler=make_compact_handler(
+            sys_prompt,
+            tools,
+            model,
+            compaction_threshold,
+        ),
+        activity_tracker=activity_tracker,
+    )
+
+
+def basic_agent(
+    working_dir: str,
+    tools: list[Tool],
+    *,
+    instructions: str = "",
+    extra_checklist_items: list[str] | None = None,
+    max_continuations: int = 30,
+    model: str | None = None,
+    compaction_threshold: float = 0.9,
+    skills: list[str] | None = None,
+    activity_tracker: ActivityTracker | None = None,
+) -> Agent:
+    """Create a basic single-loop agent that plans then executes.
+
+    Unlike the full orchestrator (planner → worker → phase planner → review),
+    this is a single agent that writes a plan to PLAN.md, executes it step by
+    step, then goes through a completion checklist before exiting.
+
+    Good for tasks that don't need multi-phase decomposition.
+    """
+    if skills is None:
+        skills = ALL_SKILLS
+    if skills:
+        tools = [*tools, skill(skills)]
+
+    sys_prompt = load_prompt(
+        "basic/system.jinja2",
+        working_dir=working_dir,
+        instructions=instructions,
+        instructions_file=INITIAL_INSTRUCTIONS_FILE,
+        exit_promise=PROMISE_BASIC,
+        extra_checklist_items=extra_checklist_items or [],
+    )
+    return scaffold_loop(
+        tools=tools,
+        exit_config=ExitConfig(
+            promises=[PROMISE_BASIC],
+            continuation_prompt=load_prompt(
+                "basic/continuation.jinja2",
+                exit_promise=PROMISE_BASIC,
+            ),
+            max_continuations=max_continuations,
+            file_checks=[check_git_clean()],
+            working_dir=working_dir,
         ),
         system_prompt=sys_prompt,
         model=model,

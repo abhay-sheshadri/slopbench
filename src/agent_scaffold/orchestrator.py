@@ -90,7 +90,7 @@ def _parse_phase_name(text: str, fallback: str) -> str:
     return fallback
 
 
-async def _init_git(directory: str) -> None:
+async def init_git(directory: str) -> None:
     """Initialize a git repo with an initial commit if not already one."""
     sb = sandbox()
     result = await sb.exec(["test", "-d", f"{directory}/.git"], timeout=5)
@@ -113,7 +113,9 @@ async def _init_git(directory: str) -> None:
         ["git", "add", "-A"],
         ["git", "commit", "-m", "Initial setup", "--allow-empty"],
     ]:
-        await sb.exec(cmd, cwd=directory, timeout=10)
+        r = await sb.exec(cmd, cwd=directory, timeout=10)
+        if not r.success:
+            raise RuntimeError(f"git init failed in {directory}: {cmd!r} -> {r.stderr}")
 
 
 async def _setup_worker_dir(
@@ -131,7 +133,8 @@ async def _setup_worker_dir(
     sb = sandbox()
     await sb.exec(["rm", "-rf", dest], timeout=30)
     result = await sb.exec(["cp", "-r", source, dest], timeout=30)
-    assert result.success, f"Failed to copy {source} -> {dest}: {result.stderr}"
+    if not result.success:
+        raise RuntimeError(f"Failed to copy {source} -> {dest}: {result.stderr}")
 
     # Remove planner-only artifacts and inter-agent communication files
     cleanup = "\n".join(
@@ -192,7 +195,7 @@ def _decision_label(decision: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def _snapshot_workspace(working_dir: str) -> bytes | None:
+async def snapshot_workspace(working_dir: str) -> bytes | None:
     """Tar+gzip the workspace and return raw bytes."""
     sb = sandbox()
     tar_path = "/tmp/workspace_snapshot.tar.gz"
@@ -287,7 +290,7 @@ async def run(
     async def finalize() -> OrchestratorResult:
         _add_timelines(span_ids)
         log("  Snapshotting workspace...")
-        result.workspace_tar = await _snapshot_workspace(working_dir)
+        result.workspace_tar = await snapshot_workspace(working_dir)
         return result
 
     # --- Write planner inputs ---
@@ -298,7 +301,7 @@ async def run(
     if env_contents:
         await write_file(f"{planner_dir}/.env", env_contents)
 
-    await _init_git(planner_dir)
+    await init_git(planner_dir)
 
     # === Step 1: Run main planner ===
     log("=== Running main planner ===")
@@ -371,7 +374,7 @@ async def run(
         )
         if env_contents:
             await write_file(f"{phase_path}/.env", env_contents)
-        await _init_git(phase_path)
+        await init_git(phase_path)
 
         # --- Run worker ---
         log(f"  Running worker in {completed_name}/...")
@@ -569,8 +572,7 @@ async def run(
             log("\n=== All work complete ===")
             result.status = "completed"
             result.final_dir = phase_path
-            _add_timelines(span_ids)
-            return result
+            return await finalize()
 
         if decision == PROMISE_PHASE_MORE_WORK:
             phase_idx += 1
