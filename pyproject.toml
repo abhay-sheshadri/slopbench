@@ -23,6 +23,7 @@ dependencies = [
     "tinker",
     "fastapi",
     "uvicorn",
+    "inspect-ai",
 ]
 
 [project.optional-dependencies]

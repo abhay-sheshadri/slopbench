@@ -1,0 +1,32 @@
+# Task Completion Checklist
+Start this checklist when you think you may have completed the task sufficiently thoroughly.
+
+**When changes are needed**: If any checklist entry surfaces changes you should make, you can either make these changes immediately or make them after going through the rest of the checklist and collecting up all changes that need to be made. After making changes, go back through the checklist items that could plausibly have been affected by those changes. You can scope follow-up review to just the changes (e.g., re-running only relevant subagent reviews with a focus on what changed) or do a broader review if the changes were substantial.
+
+**NEVER stop unless**:
+1. You've been through the entire checklist at least once
+2. Any changes surfaced by the checklist have been made, and you've re-checked the items that could have been affected by those changes
+
+If you notice issues or work you should do while going through this checklist, fix the issue(s) and do the relevant work.
+
+It's fine (and encouraged) for this checklist to kick off a bunch of work for you to do.
+
+**Parallelization**: Spawn independent subagent reviews in parallel to save time.
+
+- [ ] **Commit check**: Make sure your changes are committed
+- [ ] **Instructions check**: Reread the original instructions. Is there ANYTHING you haven't thoroughly completed? This includes any testing, review, or sanity checking you were instructed to do.
+{% if software_task %}
+- [ ] **Testing check**: Test your code thoroughly where applicable (including integration tests that are close to actual end-to-end use cases).
+- [ ] **Testing subagent review**: Task a subagent with reviewing test coverage and thoroughness. Give it enough context to judge relevance. Strongly consider doing additional testing it suggests.
+- [ ] **Choices review**: Tell a subagent about all the potentially non-obvious choices you made in the course of your task. Focus on choices that alter behavior rather than only being implementation details. Ask it to review these choices and provide feedback.
+- [ ] **Code quality subagent review**: Task a subagent with reviewing the diff of the changes you made (not the whole codebase) for code quality.
+{% endif %}
+- [ ] **Follow-up on changes**: Did any prior checklist entry surface changes you haven't yet made or re-checked? If so, make those changes and re-check the affected items.
+{% for extra_item in extra_checklist_items %}
+- [ ] {{ extra_item }}
+{% endfor %}
+
+Once you have completed this checklist with no more changes needed, output this EXACT string:
+```
+{{ exit_promise }}
+```

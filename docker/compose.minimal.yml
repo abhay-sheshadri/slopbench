@@ -1,0 +1,9 @@
+# Minimal container — no Python, no GPU.
+# Usage: sandbox=("docker", "docker/compose.minimal.yml")
+
+services:
+  default:
+    image: agent-minimal
+    x-local: true
+    command: "tail -f /dev/null"
+    init: true

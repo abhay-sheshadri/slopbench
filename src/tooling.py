@@ -92,6 +92,7 @@ import openai
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+load_dotenv(Path.cwd() / ".env")
 
 # ── Types ────────────────────────────────────────────────────────────
 
@@ -987,7 +988,9 @@ def _batch_openai(
                         choice = body["choices"][0]
                         text = choice["message"]["content"] or ""
                         reasoning = choice["message"].get("reasoning_content")
-                        completions[original_idx] = LLMResponse(text=text, thinking=reasoning)
+                        completions[original_idx] = LLMResponse(
+                            text=text, thinking=reasoning
+                        )
 
     return completions
 

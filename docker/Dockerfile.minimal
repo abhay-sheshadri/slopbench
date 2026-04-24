@@ -1,0 +1,23 @@
+# Minimal container for agent tasks that don't need Python/ML.
+#
+# Just basic CLI tools (bash, git, curl, jq). Good for:
+#   - Code editing / software engineering tasks
+#   - SWE-bench style evaluations
+#   - Any task where the agent just needs a shell
+#
+# Build:  docker build -t agent-minimal -f docker/Dockerfile.minimal docker/
+
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    jq \
+    wget \
+    unzip \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+CMD ["tail", "-f", "/dev/null"]

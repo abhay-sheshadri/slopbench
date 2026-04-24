@@ -1,0 +1,21 @@
+# Research container — Python, PyTorch, GPU, pre-downloaded models.
+# Usage: sandbox=("docker", "docker/compose.research.yml")
+#
+# VRAM limiting: set GPU_MEMORY_GB to cap VRAM per container.
+# Default: no limit (uses full GPU).
+
+services:
+  default:
+    image: agent-research
+    x-local: true
+    command: "tail -f /dev/null"
+    init: true
+    environment:
+      - GPU_MEMORY_GB=${GPU_MEMORY_GB:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
