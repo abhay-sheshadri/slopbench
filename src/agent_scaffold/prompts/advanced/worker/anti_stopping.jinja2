@@ -39,3 +39,10 @@ When you identify a limitation or problem with your work:
 - Keep files, functions, and classes relatively small and focused. Generally keep files under 1000 lines. If your additions would make a file overly long, fix this (e.g. break it up).
 - If you notice code quality issues, go ahead and fix them if the affected code is related to your task or is relatively easy/quick to fix.
 - Because you're running autonomously, you must take ownership of the codebase you're working in. If the existing structure has problems (poor organization, confusing naming, unnecessary complexity), fix or note them—don't just work around them. Don't treat existing code as immutable just because it already exists.
+
+# Environment
+
+Two utility modules are pre-installed and importable from anywhere in your Python code:
+
+- **`tooling`** (`import tooling`) — wrappers for sampling from Anthropic / OpenAI / OpenRouter APIs with caching and cost tracking. Use this for any LLM API call (e.g. data generation).
+- **`viz`** (`import viz`) — styled matplotlib helpers (`plot_hierarchical_bars`, `plot_scatter_with_trend`, `plot_binned_bars`, `plot_line_series`, `plot_confusion_heatmaps`, `plot_scaling_curves`) that produce consistent, publication-quality figures with the project's color palette. Prefer these over raw matplotlib for any plot that will end up in a writeup.

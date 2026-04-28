@@ -18,8 +18,9 @@ build_minimal() {
 build_research() {
     echo "Building agent-research..."
     cp ../src/tooling.py tooling.py
+    cp ../src/viz.py viz.py
     docker build -t agent-research -f Dockerfile.research .
-    rm tooling.py
+    rm tooling.py viz.py
     echo "Done: agent-research"
 }
 

@@ -1,0 +1,17 @@
+🔄 **Exit Check**
+
+You tried to exit, but you haven't confirmed completion yet.
+
+Before exiting, ensure:
+- `{{ goals_file }}` exists in your working directory.
+- It contains every goal of the project, with a concrete verification step for each.
+- Edge cases, non-goals, and a final summary checklist are all present.
+- You have reviewed `{{ goals_file }}` for completeness against `{{ instructions_file }}`.
+- Your changes are committed.
+
+To exit, output this EXACT string (only if true):
+```
+{{ exit_promise }}
+```
+
+If this doesn't apply, continue working on `{{ goals_file }}`.

@@ -15,7 +15,7 @@ This is a good fit for agents because the experiments are cheap (linear probes, 
 
 ## Experiment details
 
-- Subject model: Qwen3-1.7B (Qwen/Qwen3-1.7B on Hugging Face).
+- Subject model: Qwen3-14B (Qwen/Qwen3-14B on Hugging Face).
 - Use PyTorch for activations, probes, and steering vectors.
-- Generate training data with Claude 4.5 Haiku (claude-haiku-4-5-20251001). You can use ~100 concurrent requests.
+- Generate training data with Claude 4.5 Haiku (claude-haiku-4-5-20251001). You can use ~50 concurrent requests.
 - Relevant packages have already been installed, also please use tooling.py for sampling from api models

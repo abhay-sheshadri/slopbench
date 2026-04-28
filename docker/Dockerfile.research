@@ -37,15 +37,16 @@ RUN pip install --no-cache-dir \
     scipy \
     httpx
 
-# Pre-download Qwen3-1.7B weights into the image layer.
+# Pre-download Qwen3-14B weights into the image layer.
 # Cached in Docker layer — no download at container startup.
 RUN python -c "\
 from transformers import AutoModelForCausalLM, AutoTokenizer; \
-AutoTokenizer.from_pretrained('Qwen/Qwen3-1.7B'); \
-AutoModelForCausalLM.from_pretrained('Qwen/Qwen3-1.7B')"
+AutoTokenizer.from_pretrained('Qwen/Qwen3-14B'); \
+AutoModelForCausalLM.from_pretrained('Qwen/Qwen3-14B')"
 
-# Bake tooling.py into the image so agents can import it.
+# Bake tooling.py and viz.py into the image so agents can import them.
 COPY tooling.py /opt/tooling/tooling.py
+COPY viz.py /opt/tooling/viz.py
 ENV PYTHONPATH="/opt/tooling"
 
 # GPU memory limiting: if GPU_MEMORY_GB is set, cap VRAM via PyTorch.

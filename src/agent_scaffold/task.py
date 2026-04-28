@@ -16,6 +16,7 @@ from .agent import (
     ActivityTracker,
     StallError,
     basic_agent,
+    basic_planner,
     run_with_watchdog,
     write_file,
 )
@@ -43,6 +44,11 @@ def orchestrator_solver(
     """Solver that runs the full orchestrator lifecycle."""
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
+        snap_dest = (
+            Path(snapshot_dir) / f"agent_{state.sample_id}.tar.gz"
+            if snapshot_dir
+            else None
+        )
         result = await orchestrator_run(
             task_instructions=state.input_text,
             working_dir=working_dir,
@@ -57,6 +63,7 @@ def orchestrator_solver(
             phase_planner_model=phase_planner_model,
             skills=skills,
             stall_timeout=stall_timeout,
+            snapshot_dest=snap_dest,
         )
         state.metadata["orchestrator_status"] = result.status
         state.metadata["phases_completed"] = len(result.phases)
@@ -71,12 +78,8 @@ def orchestrator_solver(
         ]
         if result.final_dir:
             state.metadata["final_dir"] = result.final_dir
-
-        if snapshot_dir and result.workspace_tar:
-            snap_path = Path(snapshot_dir) / f"agent_{state.sample_id}.tar.gz"
-            snap_path.parent.mkdir(parents=True, exist_ok=True)
-            snap_path.write_bytes(result.workspace_tar)
-            state.metadata["snapshot"] = str(snap_path)
+        if result.snapshot_path:
+            state.metadata["snapshot"] = str(result.snapshot_path)
 
         return state
 
@@ -103,6 +106,7 @@ def create_task(
     snapshot_dir: str | None = None,
     skills: list[str] | None = None,
     stall_timeout: float | None = 1800,
+    mig_uuids: list[str] | None = None,
 ) -> Task:
     if isinstance(task_instructions, str):
         task_instructions = [task_instructions]
@@ -111,7 +115,20 @@ def create_task(
     if env_file:
         env_contents = Path(env_file).read_text()
 
-    samples = [Sample(input=instr, id=i) for i, instr in enumerate(task_instructions)]
+    if mig_uuids is not None:
+        if len(task_instructions) > len(mig_uuids):
+            raise ValueError(
+                f"Need {len(task_instructions)} MIG UUIDs but only "
+                f"{len(mig_uuids)} available. Reduce K or add more MIG slices."
+            )
+        samples = [
+            Sample(input=instr, id=i, metadata={"MIG_UUID": mig_uuids[i]})
+            for i, instr in enumerate(task_instructions)
+        ]
+    else:
+        samples = [
+            Sample(input=instr, id=i) for i, instr in enumerate(task_instructions)
+        ]
 
     return Task(
         name=name,
@@ -152,7 +169,11 @@ def basic_agent_solver(
     skills: list[str] | None = None,
     stall_timeout: float | None = 1800,
 ) -> Solver:
-    """Solver that runs a single basic agent (plan → execute → checklist)."""
+    """Solver that runs the basic two-stage flow in ``working_dir``:
+    1. ``basic_planner`` writes ``GOALS.md`` (exhaustive goals + verification steps).
+    2. ``basic_agent`` completes the project and exits only when every goal in
+       ``GOALS.md`` has been verified achieved.
+    """
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         await sandbox().exec(["mkdir", "-p", working_dir], timeout=10)
@@ -164,43 +185,74 @@ def basic_agent_solver(
         await init_git(working_dir)
 
         tracker = ActivityTracker() if stall_timeout else None
-        agent = basic_agent(
+        tools = [bash(), text_editor(), python()]
+
+        async def run_stage(
+            agent, stage_name: str, initial_message: str
+        ) -> tuple[AgentState, bool]:
+            """Run an agent stage under the watchdog. Returns (final_state, stalled)."""
+            agent_state = AgentState(
+                messages=[ChatMessageUser(content=initial_message)]
+            )
+            span_id = uuid.uuid4().hex
+            async with span(stage_name, type="agent", id=span_id):
+                try:
+                    if tracker:
+                        tracker.ping()
+                        agent_state = await run_with_watchdog(
+                            agent(agent_state),
+                            tracker,
+                            stall_timeout,
+                            label=stage_name,
+                        )
+                    else:
+                        agent_state = await agent(agent_state)
+                    return agent_state, False
+                except StallError as e:
+                    state.metadata["agent_status"] = "stalled"
+                    state.metadata["stall_reason"] = f"{stage_name}: {e}"
+                    return agent_state, True
+
+        # === Stage 1: planner writes GOALS.md ===
+        planner = basic_planner(
             working_dir=working_dir,
-            tools=[bash(), text_editor(), python()],
+            tools=tools,
             max_continuations=max_continuations,
             model=model,
             skills=skills,
             activity_tracker=tracker,
         )
+        _, stalled = await run_stage(
+            planner,
+            "basic_planner",
+            f"Read {INITIAL_INSTRUCTIONS_FILE} and write GOALS.md.",
+        )
 
-        agent_state = AgentState(messages=[ChatMessageUser(content="Begin the task.")])
-
-        span_id = uuid.uuid4().hex
-        async with span("basic_agent", type="agent", id=span_id):
-            try:
-                if tracker:
-                    tracker.ping()
-                    agent_state = await run_with_watchdog(
-                        agent(agent_state),
-                        tracker,
-                        stall_timeout,
-                        label="basic_agent",
-                    )
-                else:
-                    agent_state = await agent(agent_state)
+        # === Stage 2: executor verifies every goal ===
+        agent_state: AgentState | None = None
+        if not stalled:
+            agent = basic_agent(
+                working_dir=working_dir,
+                tools=tools,
+                max_continuations=max_continuations,
+                model=model,
+                skills=skills,
+                activity_tracker=tracker,
+            )
+            agent_state, stalled = await run_stage(
+                agent,
+                "basic_agent",
+                "Begin the task.",
+            )
+            if not stalled:
                 state.metadata["agent_status"] = "completed"
-            except StallError as e:
-                state.metadata["agent_status"] = "stalled"
-                state.metadata["stall_reason"] = str(e)
 
-        state.metadata["stop_reason"] = agent_state.output.stop_reason
+        if agent_state is not None and agent_state.output.choices:
+            state.metadata["stop_reason"] = agent_state.output.stop_reason
 
         if snapshot_dir:
-            tar_bytes = await snapshot_workspace(working_dir)
-            if tar_bytes:
-                snap_path = Path(snapshot_dir) / f"agent_{state.sample_id}.tar.gz"
-                snap_path.parent.mkdir(parents=True, exist_ok=True)
-                snap_path.write_bytes(tar_bytes)
+            snap_path = Path(snapshot_dir) / f"agent_{state.sample_id}.tar.gz"
+            if await snapshot_workspace(working_dir, snap_path):
                 state.metadata["snapshot"] = str(snap_path)
 
         return state
@@ -222,6 +274,7 @@ def create_basic_task(
     snapshot_dir: str | None = None,
     skills: list[str] | None = None,
     stall_timeout: float | None = 1800,
+    mig_uuids: list[str] | None = None,
 ) -> Task:
     """Create an Inspect Task using the basic single-loop agent."""
     if isinstance(task_instructions, str):
@@ -231,7 +284,20 @@ def create_basic_task(
     if env_file:
         env_contents = Path(env_file).read_text()
 
-    samples = [Sample(input=instr, id=i) for i, instr in enumerate(task_instructions)]
+    if mig_uuids is not None:
+        if len(task_instructions) > len(mig_uuids):
+            raise ValueError(
+                f"Need {len(task_instructions)} MIG UUIDs but only "
+                f"{len(mig_uuids)} available. Reduce K or add more MIG slices."
+            )
+        samples = [
+            Sample(input=instr, id=i, metadata={"MIG_UUID": mig_uuids[i]})
+            for i, instr in enumerate(task_instructions)
+        ]
+    else:
+        samples = [
+            Sample(input=instr, id=i) for i, instr in enumerate(task_instructions)
+        ]
 
     return Task(
         name=name,

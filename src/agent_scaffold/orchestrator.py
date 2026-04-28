@@ -2,6 +2,7 @@
 
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import yaml
 from inspect_ai.agent import AgentState
@@ -64,7 +65,7 @@ class OrchestratorResult:
     phases: list[PhaseResult] = field(default_factory=list)
     planner_dir: str | None = None
     final_dir: str | None = None
-    workspace_tar: bytes | None = None
+    snapshot_path: Path | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -195,17 +196,91 @@ def _decision_label(decision: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def snapshot_workspace(working_dir: str) -> bytes | None:
-    """Tar+gzip the workspace and return raw bytes."""
+SNAPSHOT_PATTERN_EXCLUDES = (
+    "__pycache__",
+    "*.pyc",
+    ".venv",
+    "venv",
+    "node_modules",
+    ".cache",
+    "huggingface",
+    "models--*",
+    "*.safetensors",
+    "*.bin",
+    "*.gguf",
+    "*.onnx",
+)
+
+SNAPSHOT_MAX_FILE_SIZE_MB = 100
+
+
+async def snapshot_workspace(working_dir: str, dest: Path) -> bool:
+    """Tar the workspace inside the sandbox and copy it to ``dest`` on the host.
+
+    Uses ``docker compose cp`` directly (rather than ``sandbox.read_file``) so
+    the result is streamed to disk and never has to fit within Inspect's
+    read-back size cap.
+
+    Trims the snapshot via pattern excludes and a per-file size cap (catches
+    activation-tensor caches without losing small probe weights).
+
+    Returns True on success, False on any failure (sandbox not Docker, tar
+    failed, copy failed).
+    """
+    from inspect_ai.util._sandbox.docker.compose import compose_cp
+    from inspect_ai.util._sandbox.docker.docker import DockerSandboxEnvironment
+    from inspect_ai.util._sandbox.events import SandboxEnvironmentProxy
+
     sb = sandbox()
+    # Inspect wraps the real sandbox in a proxy (for event recording) — unwrap
+    # to get at DockerSandboxEnvironment._service / _project.
+    sb_inner = sb._sandbox if isinstance(sb, SandboxEnvironmentProxy) else sb
+    if not isinstance(sb_inner, DockerSandboxEnvironment):
+        return False
+
     tar_path = "/tmp/workspace_snapshot.tar.gz"
-    result = await sb.exec(
-        ["tar", "czf", tar_path, "-C", working_dir, "."],
-        timeout=120,
+    size_excludes = "/tmp/workspace_snapshot_size_excludes.txt"
+
+    # Build a file of paths (relative to working_dir) for files exceeding the
+    # size cap. tar's --exclude-from reads one pattern per line.
+    size_list = await sb.exec(
+        [
+            "bash",
+            "-c",
+            (
+                f"cd {working_dir} && "
+                f"find . -type f -size +{SNAPSHOT_MAX_FILE_SIZE_MB}M "
+                f"-printf '%P\\n' > {size_excludes}"
+            ),
+        ],
+        timeout=60,
     )
+    if not size_list.success:
+        return False
+
+    tar_cmd = ["tar", "czf", tar_path, "--exclude-from", size_excludes]
+    for pat in SNAPSHOT_PATTERN_EXCLUDES:
+        tar_cmd.append(f"--exclude={pat}")
+    tar_cmd += ["-C", working_dir, "."]
+
+    result = await sb.exec(tar_cmd, timeout=120)
     if not result.success:
-        return None
-    return await sb.read_file(tar_path, text=False)
+        return False
+
+    # Stream the tar straight from container to host with `docker compose cp`.
+    # This sidesteps `sandbox.read_file()`'s read-size cap entirely.
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        await compose_cp(
+            src=f"{sb_inner._service}:{tar_path}",
+            dest=dest.name,
+            project=sb_inner._project,
+            cwd=str(dest.parent),
+            output_limit=None,
+        )
+    except RuntimeError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -258,8 +333,14 @@ async def run(
     phase_planner_model: str | None = None,
     skills: list[str] | None = None,
     stall_timeout: float | None = 1800,
+    snapshot_dest: Path | None = None,
 ) -> OrchestratorResult:
-    """Run the full orchestration lifecycle."""
+    """Run the full orchestration lifecycle.
+
+    If ``snapshot_dest`` is provided, the workspace is tarred and copied to
+    that host path on the way out (success recorded in
+    ``OrchestratorResult.snapshot_path``).
+    """
     if phase_planner_model is None:
         phase_planner_model = planner_model
 
@@ -289,13 +370,15 @@ async def run(
 
     async def finalize() -> OrchestratorResult:
         _add_timelines(span_ids)
-        log("  Snapshotting workspace...")
-        result.workspace_tar = await snapshot_workspace(working_dir)
+        if snapshot_dest is not None:
+            log("  Snapshotting workspace...")
+            if await snapshot_workspace(working_dir, snapshot_dest):
+                result.snapshot_path = snapshot_dest
         return result
 
     # --- Write planner inputs ---
     await write_file(f"{planner_dir}/{INITIAL_INSTRUCTIONS_FILE}", task_instructions)
-    guidance = load_prompt("planner/guidance.jinja2")
+    guidance = load_prompt("advanced/planner/guidance.jinja2")
     await write_file(f"{planner_dir}/{PLANNER_GUIDANCE_FILE}", guidance)
 
     if env_contents:

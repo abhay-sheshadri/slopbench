@@ -20,7 +20,9 @@ Usage:
 
 import argparse
 import os
+import re
 import shutil
+import subprocess
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -32,6 +34,79 @@ from inspect_ai import eval
 from src.agent_scaffold.task import create_basic_task, create_task
 
 PROJECT_IDEAS_DIR = Path(__file__).resolve().parent.parent / "project_ideas"
+MIG_UUIDS_FILE = Path(__file__).resolve().parent.parent.parent / ".mig_uuids"
+
+# Inspect's task_init runs `docker compose build / pull / config` ONCE per task
+# before any sample is launched, so it has no sample-scoped metadata. Our
+# compose file uses `${SAMPLE_METADATA_MIG_UUID:?...}` so that a real container
+# start without metadata fails loudly. To let task-time YAML parsing succeed we
+# expose a placeholder at the process level. Sample-scoped metadata overrides
+# this at actual container-start time. If the override ever fails to land, the
+# container will refuse to start (placeholder isn't a valid MIG UUID), which is
+# the fail-loud behavior we want.
+os.environ.setdefault("SAMPLE_METADATA_MIG_UUID", "TASK_INIT_PLACEHOLDER")
+
+
+EXPECTED_MIG_PROFILE = "3g.40gb"
+
+
+def _live_mig_slices() -> dict[str, str]:
+    """Return {uuid: profile_name} for every MIG slice the driver exposes."""
+    try:
+        out = subprocess.check_output(["nvidia-smi", "-L"], text=True)
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        raise RuntimeError(f"nvidia-smi -L failed: {e}") from e
+    # nvidia-smi -L lines for slices look like:
+    #   "  MIG 3g.40gb     Device  0: (UUID: MIG-<hex-uuid>)"
+    pattern = re.compile(r"MIG\s+(\S+).*?UUID:\s*(MIG-[0-9a-f-]+)")
+    return {uuid: profile for profile, uuid in pattern.findall(out)}
+
+
+def load_mig_uuids() -> list[str]:
+    """Read MIG UUIDs from `.mig_uuids` and verify every one is a live MIG slice.
+
+    Fails loudly if:
+      - `.mig_uuids` is missing (MIG never enabled, or file deleted)
+      - the file is empty
+      - any UUID in the file is no longer a live MIG slice (host was rebooted,
+        instances were torn down, or someone disabled MIG)
+      - there are live MIG slices missing from the file (file is stale; would
+        leak otherwise-usable capacity)
+    """
+    if not MIG_UUIDS_FILE.exists():
+        raise FileNotFoundError(
+            f"{MIG_UUIDS_FILE} not found. Run scripts/enable_mig.sh first."
+        )
+    file_uuids = [
+        line.strip() for line in MIG_UUIDS_FILE.read_text().splitlines() if line.strip()
+    ]
+    if not file_uuids:
+        raise ValueError(f"{MIG_UUIDS_FILE} is empty. Re-run scripts/enable_mig.sh.")
+
+    live = _live_mig_slices()
+    file_set = set(file_uuids)
+    stale = file_set - live.keys()
+    extra = live.keys() - file_set
+    if stale:
+        raise RuntimeError(
+            f"{len(stale)} MIG UUID(s) in {MIG_UUIDS_FILE} are not live slices: "
+            f"{sorted(stale)}. Likely the host was rebooted or MIG was disabled. "
+            f"Re-run scripts/enable_mig.sh."
+        )
+    if extra:
+        raise RuntimeError(
+            f"{len(extra)} live MIG UUID(s) are not in {MIG_UUIDS_FILE}: "
+            f"{sorted(extra)}. The file is stale. Re-run scripts/enable_mig.sh "
+            f"to refresh it."
+        )
+    wrong_profile = {u: p for u, p in live.items() if p != EXPECTED_MIG_PROFILE}
+    if wrong_profile:
+        raise RuntimeError(
+            f"Expected all MIG slices to be {EXPECTED_MIG_PROFILE}, but found "
+            f"{wrong_profile}. The compose/dockerfile assume 40 GB slices; "
+            f"reconfigure or re-run scripts/enable_mig.sh."
+        )
+    return file_uuids
 
 
 def load_project(name: str) -> str:
@@ -96,6 +171,56 @@ def _clean_output_dir(output_dir: str):
         print(f"Cleaned previous output: {output_dir}")
 
 
+def _extract_writeups(snapshot_dir: Path, writeups_dir: Path) -> int:
+    """Pull the ``writeup/`` subtree out of every ``agent_*.tar.gz`` in
+    ``snapshot_dir`` into ``writeups_dir/agent_<i>/`` (with the leading
+    ``writeup/`` prefix stripped). Returns the count of agents extracted.
+    """
+    import re
+    import tarfile
+
+    if not snapshot_dir.exists():
+        return 0
+    pat = re.compile(r"^agent_(\d+)\.tar\.gz$")
+    extracted = 0
+    for tar_file in sorted(snapshot_dir.glob("agent_*.tar.gz")):
+        m = pat.match(tar_file.name)
+        if not m:
+            continue
+        agent_dest = writeups_dir / f"agent_{m.group(1)}"
+        agent_dest.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(tar_file, "r:gz") as tar:
+            members = []
+            for member in tar.getmembers():
+                name = member.name.lstrip("./")
+                if not name.startswith("writeup/"):
+                    continue
+                stripped = name[len("writeup/") :]
+                if not stripped:
+                    continue
+                member.name = stripped
+                members.append(member)
+            if members:
+                tar.extractall(path=agent_dest, members=members, filter="data")
+                extracted += 1
+        if not any(agent_dest.iterdir()):
+            agent_dest.rmdir()
+    return extracted
+
+
+def _allocate_mig_uuids(num_projects: int, k: int) -> list[list[str]]:
+    """Slice the MIG-UUID pool into disjoint per-project chunks of size k."""
+    pool = load_mig_uuids()
+    needed = num_projects * k
+    if needed > len(pool):
+        raise ValueError(
+            f"Total samples ({num_projects} projects x K={k} = {needed}) exceeds "
+            f"available MIG slices ({len(pool)}). Reduce K, drop projects, or "
+            f"add more MIG slices."
+        )
+    return [pool[i * k : (i + 1) * k] for i in range(num_projects)]
+
+
 def run_basic(args, projects: list[str]):
     """Run basic (single-loop) agents."""
     output_dir = _build_output_dir(args.output_dir, "basic", args.model)
@@ -103,9 +228,10 @@ def run_basic(args, projects: list[str]):
     snapshot_dir = f"{output_dir}/snapshots"
 
     sandbox = ("docker", "docker/compose.research.yml")
+    project_uuids = _allocate_mig_uuids(len(projects), args.k)
 
     tasks = []
-    for project_name in projects:
+    for project_name, uuids in zip(projects, project_uuids):
         instructions = load_project(project_name)
         task = create_basic_task(
             [instructions] * args.k,
@@ -118,6 +244,7 @@ def run_basic(args, projects: list[str]):
             model=args.model,
             snapshot_dir=f"{snapshot_dir}/{project_name}",
             stall_timeout=args.stall_timeout or None,
+            mig_uuids=uuids,
         )
         tasks.append(task)
 
@@ -126,8 +253,6 @@ def run_basic(args, projects: list[str]):
     print(f"Projects ({len(tasks)}), {args.k} agent(s) each:")
     for t in tasks:
         print(f"  {t.name}")
-    if args.gpu_memory:
-        print(f"VRAM limit: {args.gpu_memory} GB per container")
     print(f"Output: {output_dir}")
     print()
 
@@ -144,6 +269,15 @@ def run_basic(args, projects: list[str]):
 
     _print_summary(results, "basic", output_dir)
 
+    writeups_root = Path(output_dir) / "writeups"
+    for project_name in projects:
+        n = _extract_writeups(
+            snapshot_dir=Path(snapshot_dir) / project_name,
+            writeups_dir=writeups_root / project_name,
+        )
+        if n:
+            print(f"  Extracted {n} writeup(s) → {writeups_root / project_name}")
+
 
 def run_advanced(args, projects: list[str]):
     """Run full orchestrator agents."""
@@ -153,9 +287,10 @@ def run_advanced(args, projects: list[str]):
     snapshot_dir = f"{output_dir}/snapshots"
 
     sandbox = ("docker", "docker/compose.research.yml")
+    project_uuids = _allocate_mig_uuids(len(projects), args.k)
 
     tasks = []
-    for project_name in projects:
+    for project_name, uuids in zip(projects, project_uuids):
         instructions = load_project(project_name)
         task = create_task(
             [instructions] * args.k,
@@ -172,6 +307,7 @@ def run_advanced(args, projects: list[str]):
             phase_planner_model=args.phase_planner_model,
             snapshot_dir=f"{snapshot_dir}/{project_name}",
             stall_timeout=args.stall_timeout or None,
+            mig_uuids=uuids,
         )
         tasks.append(task)
 
@@ -183,8 +319,6 @@ def run_advanced(args, projects: list[str]):
     print(f"Projects ({len(tasks)}), {args.k} agent(s) each:")
     for t in tasks:
         print(f"  {t.name}")
-    if args.gpu_memory:
-        print(f"VRAM limit: {args.gpu_memory} GB per container")
     print(f"Output: {output_dir}")
     print()
 
@@ -200,6 +334,15 @@ def run_advanced(args, projects: list[str]):
     )
 
     _print_summary(results, "advanced", output_dir)
+
+    writeups_root = Path(output_dir) / "writeups"
+    for project_name in projects:
+        n = _extract_writeups(
+            snapshot_dir=Path(snapshot_dir) / project_name,
+            writeups_dir=writeups_root / project_name,
+        )
+        if n:
+            print(f"  Extracted {n} writeup(s) → {writeups_root / project_name}")
 
 
 def main():
@@ -226,13 +369,6 @@ def main():
         )
         sub.add_argument(
             "--k", type=int, default=1, help="Agents per project (default: 1)."
-        )
-        sub.add_argument(
-            "--gpu-memory",
-            type=int,
-            default=None,
-            metavar="GB",
-            help="VRAM limit per container in GB.",
         )
         sub.add_argument(
             "--max-sandboxes",
@@ -302,9 +438,6 @@ def main():
         return
 
     projects = args.projects or available
-
-    if args.gpu_memory:
-        os.environ["GPU_MEMORY_GB"] = str(args.gpu_memory)
 
     if args.agent_type == "basic":
         run_basic(args, projects)

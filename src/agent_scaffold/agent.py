@@ -13,6 +13,7 @@ identically on local and Docker (GPU) sandboxes.
 import asyncio
 import contextlib
 import copy
+import re
 import time
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
@@ -56,6 +57,7 @@ ALL_SKILLS = (
 INITIAL_INSTRUCTIONS_FILE = "INITIAL_INSTRUCTIONS.md"
 OVERALL_PLAN_FILE = "OVERALL_PLAN.md"
 PLANNER_GUIDANCE_FILE = "PLANNER_GUIDANCE.md"
+BASIC_GOALS_FILE = "GOALS.md"
 
 
 def instructions_file(segment_idx: int, phase_idx: int) -> str:
@@ -128,9 +130,17 @@ PROMISE_PHASE_ALL_COMPLETE = (
     "I have written the context file for the main planner."
 )
 
+PROMISE_BASIC_PLAN = (
+    f"I have written {BASIC_GOALS_FILE} with an exhaustive specification "
+    "of every goal of this project."
+)
+
 PROMISE_BASIC = (
-    "I have completed the plan and the full task completion checklist. "
-    "All items are done and all changes have been verified."
+    f"Did I go through every goal listed in {BASIC_GOALS_FILE}? Yes. "
+    "Did I run the verification step the planner specified for each goal? Yes. "
+    "Did I address every issue surfaced by verification and re-verify the affected goals? "
+    f"Yes - every goal is achieved, every checkbox in {BASIC_GOALS_FILE} is ticked, "
+    "and all changes are committed."
 )
 
 PROMISE_APPROVE = "I approve the phase planner's instructions."
@@ -278,6 +288,36 @@ def check_files_exist(*filenames: str) -> FileCheck:
 
 def check_planner_files() -> FileCheck:
     return check_files_exist(OVERALL_PLAN_FILE, instructions_file(0, 0))
+
+
+def check_goals_checklist_complete(goals_file: str = BASIC_GOALS_FILE) -> FileCheck:
+    """Verify ``goals_file`` exists and has no unchecked ``- [ ]`` items.
+
+    Used by the basic agent's exit gate so that "every checkbox is ticked"
+    in the promise text is grounded in actual file state.
+    """
+    pattern = re.compile(r"^\s*[-*]\s*\[ \]\s+(.+)$", re.MULTILINE)
+
+    async def check(working_dir: str, promise: str | None) -> str | None:
+        path = f"{working_dir}/{goals_file}"
+        if not await file_exists(path):
+            return (
+                f"**Missing file**: `{goals_file}` must exist in `{working_dir}` "
+                f"before exiting."
+            )
+        content = await read_file(path)
+        unchecked = pattern.findall(content)
+        if not unchecked:
+            return None
+        preview = "\n".join(f"  - [ ] {item.strip()}" for item in unchecked[:5])
+        more = f"\n  ... and {len(unchecked) - 5} more" if len(unchecked) > 5 else ""
+        return (
+            f"**Unchecked goals in `{goals_file}`**: {len(unchecked)} item(s) "
+            "remain unchecked. Verify each one and tick it off "
+            f"(change `- [ ]` to `- [x]`) before exiting:\n{preview}{more}"
+        )
+
+    return check
 
 
 def check_phase_planner_files(segment_idx: int, phase_idx: int) -> FileCheck:
@@ -533,7 +573,7 @@ def worker(
 
     promise = PROMISE_SIMPLE if simple else PROMISE_CHECKLIST
 
-    parts = [load_prompt("worker/anti_stopping.jinja2", subsidized=subsidized)]
+    parts = [load_prompt("advanced/worker/anti_stopping.jinja2", subsidized=subsidized)]
 
     if instructions:
         task_section = (
@@ -553,7 +593,7 @@ def worker(
     if not simple:
         parts.append(
             load_prompt(
-                "worker/checklist.jinja2",
+                "advanced/worker/checklist.jinja2",
                 exit_promise=promise,
                 software_task=software_task,
                 extra_checklist_items=extra_checklist_items or [],
@@ -569,7 +609,7 @@ def worker(
         exit_config=ExitConfig(
             promises=[promise],
             continuation_prompt=load_prompt(
-                "worker/continuation.jinja2",
+                "advanced/worker/continuation.jinja2",
                 simple=simple,
                 exit_promise=promise,
             ),
@@ -587,25 +627,18 @@ def worker(
     )
 
 
-def basic_agent(
+def basic_planner(
     working_dir: str,
     tools: list[Tool],
     *,
-    instructions: str = "",
-    extra_checklist_items: list[str] | None = None,
     max_continuations: int = 30,
     model: str | None = None,
     compaction_threshold: float = 0.9,
     skills: list[str] | None = None,
     activity_tracker: ActivityTracker | None = None,
 ) -> Agent:
-    """Create a basic single-loop agent that plans then executes.
-
-    Unlike the full orchestrator (planner → worker → phase planner → review),
-    this is a single agent that writes a plan to PLAN.md, executes it step by
-    step, then goes through a completion checklist before exiting.
-
-    Good for tasks that don't need multi-phase decomposition.
+    """Basic-mode planner: writes ``GOALS.md`` with an exhaustive list of
+    project goals (and a verification step for each) for the executor agent.
     """
     if skills is None:
         skills = ALL_SKILLS
@@ -613,23 +646,78 @@ def basic_agent(
         tools = [*tools, skill(skills)]
 
     sys_prompt = load_prompt(
-        "basic/system.jinja2",
+        "basic/planner/system.jinja2",
         working_dir=working_dir,
-        instructions=instructions,
         instructions_file=INITIAL_INSTRUCTIONS_FILE,
+        goals_file=BASIC_GOALS_FILE,
+        exit_promise=PROMISE_BASIC_PLAN,
+    )
+    return scaffold_loop(
+        tools=tools,
+        exit_config=ExitConfig(
+            promises=[PROMISE_BASIC_PLAN],
+            continuation_prompt=load_prompt(
+                "basic/planner/continuation.jinja2",
+                instructions_file=INITIAL_INSTRUCTIONS_FILE,
+                goals_file=BASIC_GOALS_FILE,
+                exit_promise=PROMISE_BASIC_PLAN,
+            ),
+            max_continuations=max_continuations,
+            file_checks=[check_files_exist(BASIC_GOALS_FILE), check_git_clean()],
+            working_dir=working_dir,
+        ),
+        system_prompt=sys_prompt,
+        model=model,
+        compact_handler=make_compact_handler(
+            sys_prompt,
+            tools,
+            model,
+            compaction_threshold,
+        ),
+        activity_tracker=activity_tracker,
+    )
+
+
+def basic_agent(
+    working_dir: str,
+    tools: list[Tool],
+    *,
+    max_continuations: int = 30,
+    model: str | None = None,
+    compaction_threshold: float = 0.9,
+    skills: list[str] | None = None,
+    activity_tracker: ActivityTracker | None = None,
+) -> Agent:
+    """Basic-mode executor: reads ``INITIAL_INSTRUCTIONS.md`` and ``GOALS.md``,
+    completes the project, and exits only when every goal in ``GOALS.md`` has
+    been verified achieved.
+    """
+    if skills is None:
+        skills = ALL_SKILLS
+    if skills:
+        tools = [*tools, skill(skills)]
+
+    sys_prompt = load_prompt(
+        "basic/agent/system.jinja2",
+        working_dir=working_dir,
+        instructions_file=INITIAL_INSTRUCTIONS_FILE,
+        goals_file=BASIC_GOALS_FILE,
         exit_promise=PROMISE_BASIC,
-        extra_checklist_items=extra_checklist_items or [],
     )
     return scaffold_loop(
         tools=tools,
         exit_config=ExitConfig(
             promises=[PROMISE_BASIC],
             continuation_prompt=load_prompt(
-                "basic/continuation.jinja2",
+                "basic/agent/continuation.jinja2",
+                goals_file=BASIC_GOALS_FILE,
                 exit_promise=PROMISE_BASIC,
             ),
             max_continuations=max_continuations,
-            file_checks=[check_git_clean()],
+            file_checks=[
+                check_goals_checklist_complete(BASIC_GOALS_FILE),
+                check_git_clean(),
+            ],
             working_dir=working_dir,
         ),
         system_prompt=sys_prompt,
@@ -662,7 +750,7 @@ def planner(
         tools = [*tools, skill(skills)]
 
     sys_prompt = load_prompt(
-        "planner/system.jinja2",
+        "advanced/planner/system.jinja2",
         working_dir=working_dir,
         has_initial_dir=has_initial_dir,
     )
@@ -671,7 +759,7 @@ def planner(
         exit_config=ExitConfig(
             promises=[PROMISE_PLAN],
             continuation_prompt=load_prompt(
-                "planner/continuation.jinja2",
+                "advanced/planner/continuation.jinja2",
                 exit_promise=PROMISE_PLAN,
             ),
             max_continuations=max_continuations,
@@ -718,11 +806,11 @@ def phase_planner_prompt(
     )
 
     return (
-        load_prompt("phase_planner/system.jinja2", **prompt_kwargs),
+        load_prompt("advanced/phase_planner/system.jinja2", **prompt_kwargs),
         ExitConfig(
             promises=promises,
             continuation_prompt=load_prompt(
-                "phase_planner/continuation.jinja2", **prompt_kwargs
+                "advanced/phase_planner/continuation.jinja2", **prompt_kwargs
             ),
             file_checks=[
                 check_phase_planner_files(segment_idx, phase_idx),
@@ -752,7 +840,7 @@ def planner_review_prompt(
     """
     return (
         load_prompt(
-            "planner/review.jinja2",
+            "advanced/planner/review.jinja2",
             segment_idx=segment_idx,
             phase_idx=phase_idx,
             completed_phase_name=completed_phase_name,
@@ -769,7 +857,7 @@ def planner_review_prompt(
         ExitConfig(
             promises=[PROMISE_APPROVE, PROMISE_REJECT],
             continuation_prompt=load_prompt(
-                "planner/review_continuation.jinja2",
+                "advanced/planner/review_continuation.jinja2",
                 approve_promise=PROMISE_APPROVE,
                 reject_promise=PROMISE_REJECT,
             ),

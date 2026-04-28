@@ -1,8 +1,13 @@
-# Research container — Python, PyTorch, GPU, pre-downloaded models.
+# Research container — Python, PyTorch, MIG slice, pre-downloaded models.
 # Usage: sandbox=("docker", "docker/compose.research.yml")
 #
-# VRAM limiting: set GPU_MEMORY_GB to cap VRAM per container.
-# Default: no limit (uses full GPU).
+# VRAM is hardware-capped via MIG. Each container is pinned to a single
+# 3g.40gb MIG slice (40GB) by setting NVIDIA_VISIBLE_DEVICES to the slice
+# UUID. The UUID comes from sample metadata via Inspect's
+# SAMPLE_METADATA_<KEY> compose-env interpolation; the orchestrator assigns
+# one MIG UUID per sample.
+#
+# To enable MIG and create slices: bash scripts/enable_mig.sh
 
 services:
   default:
@@ -10,12 +15,7 @@ services:
     x-local: true
     command: "tail -f /dev/null"
     init: true
+    runtime: nvidia
     environment:
-      - GPU_MEMORY_GB=${GPU_MEMORY_GB:-}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      - NVIDIA_VISIBLE_DEVICES=${SAMPLE_METADATA_MIG_UUID:?MIG_UUID metadata required on Sample (run.py allocates these from .mig_uuids)}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
