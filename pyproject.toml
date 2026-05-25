@@ -6,24 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "project-name"
 version = "0.1.0"
 description = "Project description"
-readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "anthropic",
-    "openai",
-    "python-dotenv",
-    "torch",
-    "jinja2",
-    "tqdm",
-    "transformers",
-    "datasets",
-    "peft",
-    "trl",
     "docent-python==0.1.27a0",
-    "tinker",
-    "fastapi",
-    "uvicorn",
     "inspect-ai",
+    "pydantic",
 ]
 
 [project.optional-dependencies]

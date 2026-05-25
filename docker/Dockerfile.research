@@ -1,14 +1,14 @@
-# Research container for ML tasks with GPU support.
+# Research container for agent research tasks.
 #
-# Includes Python, PyTorch, transformers, and pre-downloaded model weights.
+# Includes Python and common API/data-analysis packages.
 # Good for:
 #   - ML research experiments
-#   - Fine-tuning / training tasks
-#   - Tasks that need local model inference
+#   - Dataset creation and analysis
+#   - API-based model calls
 #
 # Build:  docker build -t agent-research -f docker/Dockerfile.research docker/
 
-FROM pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
+FROM python:3.11-slim
 
 # System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -16,51 +16,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     jq \
     wget \
+    ca-certificates \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Python packages for ML research
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG ABHAY_PI_PACKAGE=@earendil-works/pi-coding-agent
+RUN npm install -g "$ABHAY_PI_PACKAGE"
+
+# Python packages for API-based research
 RUN pip install --no-cache-dir \
     anthropic \
     openai \
     python-dotenv \
     jinja2 \
     tqdm \
-    transformers \
-    accelerate \
-    safetensors \
-    datasets \
-    peft \
-    trl \
     scikit-learn \
     matplotlib \
     pandas \
     scipy \
     httpx
-
-# Pre-download Qwen3-14B weights into the image layer.
-# Cached in Docker layer — no download at container startup.
-RUN python -c "\
-from transformers import AutoModelForCausalLM, AutoTokenizer; \
-AutoTokenizer.from_pretrained('Qwen/Qwen3-14B'); \
-AutoModelForCausalLM.from_pretrained('Qwen/Qwen3-14B')"
-
-# Bake tooling.py and viz.py into the image so agents can import them.
-COPY tooling.py /opt/tooling/tooling.py
-COPY viz.py /opt/tooling/viz.py
-ENV PYTHONPATH="/opt/tooling"
-
-# GPU memory limiting: if GPU_MEMORY_GB is set, cap VRAM via PyTorch.
-# Applied automatically on every `python` invocation via sitecustomize.
-RUN printf 'import os\n\
-_gb = os.environ.get("GPU_MEMORY_GB")\n\
-if _gb:\n\
-    try:\n\
-        import torch\n\
-        if torch.cuda.is_available():\n\
-            _total = torch.cuda.get_device_properties(0).total_memory / 1e9\n\
-            torch.cuda.set_per_process_memory_fraction(float(_gb) / _total)\n\
-    except Exception:\n\
-        pass\n' > /opt/conda/lib/python3.11/sitecustomize.py
 
 WORKDIR /workspace
 

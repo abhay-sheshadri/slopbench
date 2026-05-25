@@ -1,9 +1,6 @@
 #!/bin/bash
-set -e  # Exit immediately if any command fails
-set -u  # Exit if undefined variable is used
-set -o pipefail  # Exit if any command in a pipeline fails
+set -euo pipefail
 
-# Helper function to run commands with sudo if available
 run_with_sudo() {
     if command -v sudo >/dev/null 2>&1; then
         sudo "$@"
@@ -12,44 +9,63 @@ run_with_sudo() {
     fi
 }
 
-# Setup up the agents
-bash scripts/setup_claude_code.sh
+install_python_env() {
+    run_with_sudo rm -rf .venv
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    source "$HOME/.local/bin/env"
+    uv python install 3.11
+    uv venv --clear
+    source .venv/bin/activate
+    uv pip install -e .
+    uv pip install pre-commit
+    pre-commit install
+}
 
-# Create a virtual environment
-run_with_sudo rm -rf .venv
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
-uv python install 3.11
-uv venv --clear
-source .venv/bin/activate
+install_dev_tools() {
+    run_with_sudo apt update
+    run_with_sudo apt install -y tmux gh
+    cp .tmux.conf ~/.tmux.conf
+}
 
-uv pip install -e .
+install_docker() {
+    if command -v docker >/dev/null 2>&1; then
+        return
+    fi
 
-# Install and setup pre-commit hooks
-uv pip install pre-commit
-pre-commit install
+    run_with_sudo apt update
+    run_with_sudo apt install -y ca-certificates curl gnupg
+    run_with_sudo install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+        | run_with_sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    run_with_sudo chmod a+r /etc/apt/keyrings/docker.gpg
 
-# Other utils for development
-run_with_sudo apt update
-run_with_sudo apt install -y tmux gh
-cp .tmux.conf ~/.tmux.conf
+    . /etc/os-release
+    codename="${VERSION_CODENAME:-}"
+    if [ -z "$codename" ]; then
+        codename="$(. /etc/lsb-release && echo "$DISTRIB_CODENAME")"
+    fi
 
-# Install claude+ wrapper
-run_with_sudo cp scripts/claude+ /usr/local/bin/claude+
-run_with_sudo chmod +x /usr/local/bin/claude+
+    echo \
+        "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $codename stable" \
+        | run_with_sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
 
-# Install NVIDIA Container Toolkit (for Docker GPU passthrough)
-if command -v nvidia-smi >/dev/null 2>&1 && ! command -v nvidia-container-cli >/dev/null 2>&1; then
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-        | run_with_sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-    curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
-        | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-        | run_with_sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-    run_with_sudo apt-get update
-    run_with_sudo apt-get install -y nvidia-container-toolkit
-    run_with_sudo nvidia-ctk runtime configure --runtime=docker
-    run_with_sudo systemctl restart docker
-fi
+    run_with_sudo apt update
+    run_with_sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+}
 
-# Build Docker images for agent sandboxes
+start_docker() {
+    if docker info >/dev/null 2>&1; then
+        return
+    fi
+
+    run_with_sudo systemctl enable --now docker
+}
+
+cd "$(dirname "$0")/.."
+
+bash scripts/setup_abhay_pi.sh
+install_python_env
+install_dev_tools
+install_docker
+start_docker
 bash docker/build.sh

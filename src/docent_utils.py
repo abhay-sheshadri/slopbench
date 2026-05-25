@@ -1,5 +1,4 @@
 import json
-import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -17,8 +16,6 @@ from docent.data_models.chat import (
 )
 from docent.data_models.transcript import Transcript
 from pydantic import PrivateAttr
-
-from src.tooling import ANTHROPIC_MODELS, OPENAI_MODELS
 
 
 class AgentTranscript(Transcript):
@@ -151,9 +148,13 @@ class AgentTranscript(Transcript):
 
 
 def model_id_to_provider(model_id: str) -> str:
-    if model_id in ANTHROPIC_MODELS:
+    if model_id.startswith("anthropic/") or model_id.startswith("claude-"):
         return "anthropic"
-    elif model_id in OPENAI_MODELS or model_id.startswith("ft:gpt"):
+    elif (
+        model_id.startswith("openai/")
+        or model_id.startswith("gpt-")
+        or model_id.startswith("ft:gpt")
+    ):
         return "openai"
     elif "/" in model_id:
         return "openrouter"

@@ -1,0 +1,4 @@
+#!/bin/bash
+set -e
+
+IS_SANDBOX=1 npm exec node@22 -- --experimental-strip-types /root/pi-agent-work/packages/coding-agent/src/cli.ts "$@"
