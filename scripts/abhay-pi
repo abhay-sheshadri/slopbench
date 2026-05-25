@@ -1,4 +1,10 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-IS_SANDBOX=1 npm exec node@22 -- --experimental-strip-types /root/pi-agent-work/packages/coding-agent/src/cli.ts "$@"
+ABHAY_PI_DIR="${ABHAY_PI_DIR:-/opt/abhay-pi}"
+
+IS_SANDBOX="${IS_SANDBOX:-1}" \
+    "$ABHAY_PI_DIR/node_modules/.bin/tsx" \
+    --tsconfig "$ABHAY_PI_DIR/tsconfig.json" \
+    "$ABHAY_PI_DIR/packages/coding-agent/src/cli.ts" \
+    "$@"

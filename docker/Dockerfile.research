@@ -25,8 +25,17 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-ARG ABHAY_PI_PACKAGE=@earendil-works/pi-coding-agent
-RUN npm install -g "$ABHAY_PI_PACKAGE"
+ARG ABHAY_PI_REPO=https://github.com/abhay-sheshadri/abhay-pi.git
+ARG ABHAY_PI_REF=main
+RUN git clone --branch "$ABHAY_PI_REF" --depth 1 "$ABHAY_PI_REPO" /opt/abhay-pi \
+    && npm --prefix /opt/abhay-pi install --ignore-scripts \
+    && printf '%s\n' \
+        '#!/bin/sh' \
+        'export IS_SANDBOX="${IS_SANDBOX:-1}"' \
+        'exec /opt/abhay-pi/node_modules/.bin/tsx --tsconfig /opt/abhay-pi/tsconfig.json /opt/abhay-pi/packages/coding-agent/src/cli.ts "$@"' \
+        > /usr/local/bin/pi \
+    && chmod +x /usr/local/bin/pi \
+    && ln -sf /usr/local/bin/pi /usr/local/bin/abhay-pi
 
 # Python packages for API-based research
 RUN pip install --no-cache-dir \
