@@ -1,7 +1,5 @@
 # Model Organisms of Emergent Collusion
 
-Fabien Roger, Apr 22, 2026
-
 ## TL;DR
 
 LLMs might be too nice to themselves when they recognize their own outputs, and we can build model organisms to understand when this becomes an issue.
