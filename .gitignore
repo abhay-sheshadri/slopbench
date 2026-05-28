@@ -60,6 +60,7 @@ logs/
 
 # LLM cache
 .cache_sqlite/
+.playwright-mcp/
 
 # Environment variables
 .env
