@@ -1,9 +1,0 @@
-# Minimal container — no Python or research stack.
-# Usage: sandbox=("docker", "docker/compose.minimal.yml")
-
-services:
-  default:
-    image: agent-minimal
-    x-local: true
-    command: "tail -f /dev/null"
-    init: true

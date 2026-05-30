@@ -1,9 +1,0 @@
-# Research container — Python and CPU-only research tooling.
-# Usage: sandbox=("docker", "docker/compose.research.yml")
-
-services:
-  default:
-    image: agent-research
-    x-local: true
-    command: "tail -f /dev/null"
-    init: true

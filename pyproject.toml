@@ -9,7 +9,6 @@ description = "Project description"
 requires-python = ">=3.11"
 dependencies = [
     "docent-python==0.1.27a0",
-    "inspect-ai",
     "pydantic",
 ]
 
