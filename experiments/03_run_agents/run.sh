@@ -1,13 +1,27 @@
 #!/bin/bash
-# Run pi research agents on proposals in bwrap sandboxes — both modes (goal +
-# multi_phase) by default. All flags pass through to run.py, e.g.:
-#   ./run.sh --list
-#   ./run.sh --proposals empirical_slop_probes --force
-#   ./run.sh --proposals empirical_slop_probes --modes goal --max-concurrent 1
+# Launch pi research agents. Edit the config block below, then run it:
+#   ./run.sh            # launch every (project x mode) run, concurrently, no timeout
+#   ./run.sh --force    # wipe each run's output dir first
 # Watch live or review with ./view_agents.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 [ -f .venv/bin/activate ] && source .venv/bin/activate
+
+# ------------------------------- config ------------------------------------ #
+PROJECTS=(
+    empirical_cot_controllability_steering_vectors
+    empirical_introspection_science
+    empirical_subliminal_backdoors
+)
+MODES=(goal multi_phase)
+THINKING=xhigh
+MODEL="anthropic/claude-opus-4-8"   # Claude Opus 4.8
+# --------------------------------------------------------------------------- #
+
 source scripts/run_cleanup.sh
 install_run_cleanup_trap
-exec python experiments/03_run_agents/run.py "$@"
+
+ARGS=(--projects "${PROJECTS[@]}" --modes "${MODES[@]}" --thinking "$THINKING")
+[ -n "$MODEL" ] && ARGS+=(--model "$MODEL")
+
+exec python experiments/03_run_agents/run.py "${ARGS[@]}" "$@"

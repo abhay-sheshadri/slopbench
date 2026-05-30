@@ -49,6 +49,28 @@ SESSION = f"{WORKSPACE}/.pi_transcripts/session.jsonl"
 HTML = f"{WORKSPACE}/.pi_transcripts/session.html"
 PLANNER_COMMAND = "/init-planner"
 
+# Written into each workspace so the agent never commits the injected secrets or
+# our harness scratch dirs. The task tells agents not to override an existing
+# .gitignore, so seeding it here makes this the canonical one.
+WORKSPACE_GITIGNORE = """\
+# Injected secrets - never commit.
+.env
+.env.*
+
+# Harness scratch (agent HOME + transcripts), not part of the project's work.
+.home/
+.pi_transcripts/
+
+# Caches / large artifacts.
+__pycache__/
+*.pyc
+.cache/
+huggingface/
+*.safetensors
+*.bin
+*.gguf
+"""
+
 
 # --------------------------------------------------------------------------- #
 # Prompts + per-phase commands
@@ -238,11 +260,17 @@ async def run_one(spec: RunSpec, *, sem: asyncio.Semaphore, on_event=None) -> Ru
             (ws / "planner" / "INITIAL_INSTRUCTIONS.md").write_text(
                 planner_initial_instructions("proposal.md")
             )
+            (ws / ".gitignore").write_text(WORKSPACE_GITIGNORE)
 
-            # Secrets are injected as environment variables — never written to a
-            # file inside the (browsable, persisted) run dir.
             overrides = parse_env_text(spec.env_contents) if spec.env_contents else {}
             env = sandbox.default_env(overrides)
+            # Provide credentials BOTH as environment variables (forwarded into the
+            # sandbox by bwrap) and as a .env file in the workspace: research code
+            # commonly loads one via python-dotenv, and it makes credential
+            # presence unambiguous to the agent. The .gitignore above keeps it out
+            # of commits, and outputs/ is gitignored at the repo root.
+            if spec.env_contents:
+                (ws / ".env").write_text(spec.env_contents)
 
             _log(
                 on_event,
@@ -290,9 +318,7 @@ async def run_one(spec: RunSpec, *, sem: asyncio.Semaphore, on_event=None) -> Ru
             for session, html in ((PLANNER_SESSION, PLANNER_HTML), (SESSION, HTML)):
                 host_session = ws / ".pi_transcripts" / Path(session).name
                 if host_session.exists():
-                    await _sandbox_run(
-                        ws, ["pi", "--export", session, html], env, command_timeout=120
-                    )
+                    await _sandbox_run(ws, ["pi", "--export", session, html], env)
             rls = fold_run_loop_sessions(ws)
 
             manifest = {
@@ -356,7 +382,12 @@ def main() -> None:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--thinking", default="xhigh")
     parser.add_argument("--output-dir", default="outputs/agent_runner")
-    parser.add_argument("--command-timeout", type=int, default=3600)
+    parser.add_argument(
+        "--command-timeout",
+        type=int,
+        default=None,
+        help="Per-phase wall-clock cap in seconds. Default: no timeout (run unbounded).",
+    )
     parser.add_argument("--run-loop-args", default="")
     parser.add_argument("--max-concurrent", type=int, default=2)
     args = parser.parse_args()

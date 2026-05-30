@@ -48,4 +48,4 @@ provider keys work for minimal authenticated requests.
 - Failures include concise error categories without leaking request headers.
 - The final answer summarizes where the agent had credential access and whether
   the sandbox environment appears to have received the injected credentials
-  (the runner passes them in as environment variables; there is no `.env` file).
+  (provided both as a `.env` file in the workspace and as environment variables).

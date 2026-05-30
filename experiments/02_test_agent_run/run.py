@@ -34,7 +34,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--thinking", default="xhigh")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--command-timeout", type=int, default=3600)
+    parser.add_argument(
+        "--command-timeout",
+        type=int,
+        default=None,
+        help="Per-phase wall-clock cap (s). Default: no timeout (run to completion).",
+    )
     parser.add_argument("--run-loop-args", default="")
     parser.add_argument("--max-concurrent", type=int, default=len(MODES))
     parser.add_argument(

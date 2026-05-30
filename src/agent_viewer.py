@@ -21,15 +21,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shutil
+import subprocess
 import threading
 import time
+import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from src import sandbox
+from src import DEFAULT_MODEL, sandbox
+from src.runner_utils import parse_env_text
 from src.theme import PALETTE_CSS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,6 +70,7 @@ def parse_session(text: str) -> dict:
     tool_results: dict[str, dict] = {}
     goal: dict | None = None
     header: dict = {}
+    cost = 0.0
 
     entries = list(_iter_jsonl(text))
 
@@ -91,6 +97,9 @@ def parse_session(text: str) -> dict:
                     "isError": bool(msg.get("isError")),
                     "text": _content_text(msg.get("content")),
                 }
+            c = ((msg.get("usage") or {}).get("cost") or {}).get("total")
+            if isinstance(c, (int, float)):
+                cost += c
 
     # Second pass: build user/assistant turns with blocks.
     for entry in entries:
@@ -139,7 +148,7 @@ def parse_session(text: str) -> dict:
                     "blocks": blocks,
                 }
             )
-    return {"turns": turns, "goal": goal, "header": header}
+    return {"turns": turns, "goal": goal, "header": header, "cost": cost}
 
 
 def _content_text(content) -> str:
@@ -180,8 +189,21 @@ def _mode_from_name(name: str) -> str | None:
 
 
 def _is_run_dir(d: Path) -> bool:
+    # A run dir is recognised by ANY transcript marker. multi_phase runs often
+    # have no top-level session.jsonl (the /run-loop orchestrator barely writes
+    # to its own session; the work lives in run_loop_sessions/), and a finished
+    # or timed-out run has no RUNNING marker — so check planner/manifest too,
+    # otherwise such runs vanish from the browser once they stop.
     t = d / ".pi_transcripts"
-    return (t / "session.jsonl").exists() or (t / RUNNING_MARKER).exists()
+    if not t.is_dir():
+        return False
+    return (
+        (t / "session.jsonl").exists()
+        or (t / "planner.session.jsonl").exists()
+        or (t / "manifest.json").exists()
+        or (t / RUNNING_MARKER).exists()
+        or (t / "run_loop_sessions").is_dir()
+    )
 
 
 def _run_dirs_under(d: Path) -> set:
@@ -387,11 +409,17 @@ def _assemble(
     """
     main = parse_session(session_text or "")
     planner = parse_session(planner_text) if planner_text else None
+    sub_parsed = [(nm, parse_session(text)) for nm, text in sub_sessions]
     raw = [("main", main["turns"])]
     if planner is not None:
         raw.append(("planner", planner["turns"]))
-    for nm, text in sub_sessions:
-        raw.append((nm, parse_session(text)["turns"]))
+    for nm, p in sub_parsed:
+        raw.append((nm, p["turns"]))
+    total_cost = (
+        main.get("cost", 0.0)
+        + (planner.get("cost", 0.0) if planner else 0.0)
+        + sum(p.get("cost", 0.0) for _, p in sub_parsed)
+    )
     sessions = []
     for nm, turns in raw:
         meta = _session_meta(nm, mode)
@@ -410,6 +438,11 @@ def _assemble(
     sessions.sort(key=lambda s: (s["ts"] is None, s["ts"] or 0.0, s["_ord"]))
     for s in sessions:
         s.pop("_ord", None)
+    if mode == "multi_phase":
+        # The run-loop orchestrator + its planner (the "Execution" group) add
+        # little beyond the per-phase tabs, so hide them for multi_phase runs;
+        # the planner tab and each phase's worker/reviewer/phase-planner remain.
+        sessions = [s for s in sessions if s["group"] != "Execution"]
     return {
         "mode": mode,
         # The goal-mode objective lives in the execution session; fall back to the
@@ -417,6 +450,7 @@ def _assemble(
         "goal": main["goal"] or (planner["goal"] if planner else None),
         "run_loop": _run_loop_summary(run_loop_state_text),
         "sessions": sessions,
+        "cost": round(total_cost, 4),
     }
 
 
@@ -444,11 +478,51 @@ def _read_subsessions(base: Path, tdir: Path, rl_text: str | None) -> list:
     return out
 
 
+# Parsing session.jsonl into normalized turns is the viewer's main cost, and the
+# SSE stream + overview re-request transcripts constantly. Cache the assembled
+# result keyed by a cheap stat-only signature of the run's files, so a live run
+# only re-parses when something on disk actually changed and finished runs are
+# effectively free.
+_TX_CACHE: "dict[str, tuple]" = {}
+_TX_LOCK = threading.Lock()
+_TX_CACHE_MAX = 96
+
+
+def _disk_sig(base: Path, tdir: Path) -> tuple:
+    """Stat-only fingerprint of every file that feeds a run's transcript."""
+    parts: list = [(tdir / RUNNING_MARKER).exists()]
+    candidates = [
+        tdir / "session.jsonl",
+        tdir / "planner.session.jsonl",
+        tdir / "manifest.json",
+        base / "planner" / "RUN_LOOP_STATE.json",
+    ]
+    sub_dir = tdir / "run_loop_sessions"
+    if sub_dir.is_dir():
+        candidates += sorted(sub_dir.glob("*.jsonl"))
+    else:  # live multi_phase: sub-agent sessions still live in the agent's HOME
+        home_pi = base / ".home" / ".pi"
+        if home_pi.is_dir():
+            candidates += sorted(home_pi.glob("**/*.jsonl"))
+    for p in candidates:
+        try:
+            st = p.stat()
+            parts.append((str(p), st.st_mtime_ns, st.st_size))
+        except OSError:
+            continue
+    return tuple(parts)
+
+
 def _transcript_disk(rel: str) -> dict:
     base = _safe_disk_path(rel)
     if base is None or not base.exists():
         return {"error": "not found"}
     tdir = base / ".pi_transcripts"
+    sig = _disk_sig(base, tdir)
+    with _TX_LOCK:
+        hit = _TX_CACHE.get(rel)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
     sess = tdir / "session.jsonl"
     session_text = sess.read_text(errors="replace") if sess.exists() else ""
     planner_sess = tdir / "planner.session.jsonl"
@@ -463,7 +537,50 @@ def _transcript_disk(rel: str) -> dict:
     data.update(
         {"id": rel, "source": "live" if (tdir / RUNNING_MARKER).exists() else "disk"}
     )
+    with _TX_LOCK:
+        if len(_TX_CACHE) >= _TX_CACHE_MAX:
+            _TX_CACHE.pop(next(iter(_TX_CACHE)), None)
+        _TX_CACHE[rel] = (sig, data)
     return data
+
+
+def list_runs_overview() -> list[dict]:
+    """Flat status list of every run under outputs/ for the homepage dashboard.
+
+    Built off the cached transcript parse, so repeated polls are cheap: only runs
+    whose files changed since the last poll are re-read.
+    """
+    out: list[dict] = []
+    for base in _run_dirs_under(OUTPUTS_DIR):
+        rel = str(base.relative_to(OUTPUTS_DIR))
+        item = _run_item(base, rel)
+        data = _transcript_disk(rel)
+        sessions = data.get("sessions") or []
+        item["sessions"] = len(sessions)
+        item["turns"] = sum(len(s.get("turns") or []) for s in sessions)
+        ts_vals = [
+            s.get("ts") for s in sessions if isinstance(s.get("ts"), (int, float))
+        ]
+        item["lastActivity"] = max(ts_vals) if ts_vals else None
+        item["goal"] = data.get("goal")
+        item["cost"] = data.get("cost")
+        rl = data.get("run_loop")
+        item["run_loop"] = (
+            {
+                "status": rl.get("status"),
+                "segment": rl.get("segment"),
+                "phase": rl.get("phase"),
+                "stage": rl.get("stage"),
+                "completed": len(rl.get("completed") or []),
+                "lastError": rl.get("lastError"),
+            }
+            if rl
+            else None
+        )
+        item["group"] = rel.split("/")[0] if "/" in rel else ""
+        out.append(item)
+    out.sort(key=lambda x: (not x.get("live"), -(x.get("mtime") or 0.0)))
+    return out
 
 
 def audit_disk_transcripts() -> list[dict]:
@@ -489,7 +606,7 @@ def audit_disk_transcripts() -> list[dict]:
         rl = _run_loop_summary(
             rl_path.read_text(errors="replace") if rl_path.exists() else None
         )
-        stages = sorted({s.rsplit("_", 1)[0] if s[-1].isdigit() else s for s in subs})
+        stages = sorted({re.sub(r"_\d+_\d+$", "", s) for s in subs})
         results.append(
             {
                 "path": str(base.relative_to(OUTPUTS_DIR)),
@@ -521,6 +638,305 @@ def _run_loop_session_files(sessions: dict) -> list[dict]:
                 if isinstance(path, str):
                     out.append({"name": f"{label} {key}", "path": path})
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Run Lens: a read-only oversight agent over a run
+# --------------------------------------------------------------------------- #
+# A "Run Lens" query spawns `pi` in a bwrap sandbox where the run directory is
+# bind-mounted READ-ONLY at /workspace (writable scratch on tmpfs + /lensjob), so
+# the agent can read all of the run's code and transcripts to answer questions
+# but physically cannot modify the run it is auditing. Its answer streams back to
+# the browser via the same session.jsonl parser the rest of the viewer uses.
+LENS_DIR = OUTPUTS_DIR / ".lens"
+LENS_MODEL = os.environ.get("LENS_MODEL", DEFAULT_MODEL)
+LENS_THINKING = os.environ.get("LENS_THINKING", "medium")
+# Max number of Run-Lens summary agents the dashboard's "Generate summaries"
+# fan-out runs at once (also injected as the client-side cap). Each one is a full
+# model call, so this is the main throughput/cost knob; override via env.
+# Default kept conservative because each agent is a full Opus call and many at
+# once (alongside the real runs) can OOM the box (the killed-rc=-9 symptom);
+# raise it via env if the machine has headroom (e.g. =50).
+LENS_SUMMARY_CONCURRENCY = max(1, int(os.environ.get("LENS_SUMMARY_CONCURRENCY", "8")))
+LENS_BINARY_EXT = {
+    ".pyc",
+    ".so",
+    ".bin",
+    ".safetensors",
+    ".gguf",
+    ".onnx",
+    ".pt",
+    ".pth",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".pdf",
+    ".zip",
+    ".gz",
+    ".tar",
+}
+# Dependency/cache directories pruned from the orientation file index so the
+# run's OWN files (transcripts, write-ups, proposal, the agent's code) surface
+# instead of being buried under thousands of .venv/site-packages entries.
+LENS_SKIP_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "site-packages",
+    "node_modules",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".cache",
+    ".ipynb_checkpoints",
+    "wandb",
+}
+_LENS_JOBS: dict[str, dict] = {}
+_LENS_LOCK = threading.Lock()
+
+
+def _lens_env() -> dict[str, str]:
+    env_path = ROOT / ".env"
+    overrides = parse_env_text(env_path.read_text()) if env_path.exists() else {}
+    env = sandbox.default_env(overrides)
+    env["HOME"] = "/lensjob/home"  # writable scratch (workspace is read-only)
+    return env
+
+
+def _lens_file_index(base: Path, limit: int = 220) -> list[str]:
+    """Concise file index (relative path | bytes) to orient the oversight agent.
+
+    Prunes dependency/cache dirs (``.venv``, ``site-packages``, ``node_modules``,
+    ``__pycache__`` …) so the run's own files actually surface instead of being
+    buried under thousands of library files.
+    """
+    out: list[str] = []
+    for root, dirs, files in os.walk(base):
+        dirs[:] = [
+            d
+            for d in sorted(dirs)
+            if d not in LENS_SKIP_DIRS and not d.endswith((".dist-info", ".egg-info"))
+        ]
+        rootp = Path(root)
+        for fn in sorted(files):
+            p = rootp / fn
+            rel = p.relative_to(base)
+            parts = rel.parts
+            # Keep agent-HOME noise out, but keep its sub-agent session transcripts.
+            if ".home" in parts and p.suffix != ".jsonl":
+                continue
+            if p.suffix.lower() in LENS_BINARY_EXT:
+                continue
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            if size > 3_000_000:
+                continue
+            out.append(f"  {rel} | {size}")
+            if len(out) >= limit:
+                out.append("  … (index truncated)")
+                return out
+    return out
+
+
+def _lens_prompt(rel: str, base: Path, question: str) -> str:
+    tdir = base / ".pi_transcripts"
+    status = "running" if (tdir / RUNNING_MARKER).exists() else "completed"
+    data = _transcript_disk(rel)
+    sess = ", ".join(
+        f"{s.get('label') or s['name']}({len(s['turns'])})"
+        for s in data.get("sessions", [])
+    )
+    rl = data.get("run_loop")
+    lines = [
+        "You are a READ-ONLY oversight assistant embedded in an agent-run viewer.",
+        "Your working directory (/workspace) is the run directory below, mounted",
+        "READ-ONLY: you can read any file in it (cat/grep/ls/find/read) and run",
+        "read-only shell commands, but you cannot modify the run. Answer the user's",
+        "question with concrete evidence — cite specific files and transcript",
+        "sessions. Be concise; do NOT narrate your search ('let me check'); give",
+        "conclusions plus the evidence you verified.",
+        "",
+        f"Run: {rel}",
+        f"Status: {status} | mode: {data.get('mode')} | est. spend so far: ${data.get('cost', 0) or 0:.2f}",
+    ]
+    if data.get("goal"):
+        g = data["goal"]
+        lines.append(f"Goal: status={g.get('status')} tokensUsed={g.get('tokensUsed')}")
+    if rl:
+        lines.append(
+            f"Run-loop: status={rl.get('status')} segment={rl.get('segment')} "
+            f"phase={rl.get('phase')} stage={rl.get('stage')} "
+            f"completed_phases={len(rl.get('completed') or [])}"
+        )
+    lines += [
+        f"Transcript sessions present (name(turns)): {sess or 'none yet'}",
+        "",
+        "Key locations (relative to /workspace):",
+        "  - execution transcript: .pi_transcripts/session.jsonl",
+        "  - planner transcript:   .pi_transcripts/planner.session.jsonl",
+        "  - run-loop sub-agent sessions: .home/.pi/agent/sessions/*/*.jsonl",
+        "  - run-loop state: planner/RUN_LOOP_STATE.json",
+        "  - the agent's own write-ups: writeup/ and/or writeups/",
+        "  - the task spec: proposal.md, planner/OVERALL_PLAN.md, planner/INSTRUCTIONS_*.md",
+        "",
+        "File index (relative path | bytes):",
+        *_lens_file_index(base),
+        "",
+        "User question:",
+        question.strip(),
+    ]
+    return "\n".join(lines)
+
+
+def _prune_lens_jobs(keep: int = 80) -> None:
+    """Drop finished lens jobs (and scratch dirs) beyond ``keep``.
+
+    Only prunes jobs that finished a while ago, so a job whose summary is still
+    being polled/streamed by the browser is never yanked out from under it. This
+    keeps the registry bounded even when a 'Generate summaries' fan-out spawns
+    many jobs at once.
+    """
+    now = time.time()
+    with _LENS_LOCK:
+        finished = [
+            (j, info)
+            for j, info in _LENS_JOBS.items()
+            if info["proc"].poll() is not None and now - info["started"] > 45
+        ]
+        finished.sort(key=lambda x: x[1]["started"])
+        for j, info in finished[:-keep] if len(finished) > keep else []:
+            _LENS_JOBS.pop(j, None)
+            shutil.rmtree(info["dir"], ignore_errors=True)
+
+
+def start_lens(rel: str, question: str) -> dict:
+    """Spawn a read-only oversight pi over run ``rel``. Returns {job} or {error}."""
+    if sandbox.available() is None:
+        return {"error": "bubblewrap (bwrap) is not installed"}
+    base = _safe_disk_path(rel)
+    if base is None or not (base / ".pi_transcripts").exists():
+        return {"error": "unknown run"}
+    if not (question or "").strip():
+        return {"error": "empty question"}
+    _prune_lens_jobs()
+    job = uuid.uuid4().hex[:12]
+    jobdir = LENS_DIR / job
+    (jobdir / "home").mkdir(parents=True, exist_ok=True)
+    session = jobdir / "session.jsonl"
+    inner = [
+        "pi",
+        "-p",
+        "--session",
+        "/lensjob/session.jsonl",
+        "--model",
+        LENS_MODEL,
+        "--thinking",
+        LENS_THINKING,
+        "--mode",
+        "json",
+        _lens_prompt(rel, base, question),
+    ]
+    argv = sandbox.build_argv(
+        base, inner, workspace_ro=True, extra_binds=((str(jobdir), "/lensjob"),)
+    )
+    try:
+        proc = subprocess.Popen(
+            argv,
+            env=_lens_env(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        return {"error": f"failed to start oversight agent: {exc}"}
+    with _LENS_LOCK:
+        _LENS_JOBS[job] = {
+            "proc": proc,
+            "session": session,
+            "dir": jobdir,
+            "run": rel,
+            "started": time.time(),
+        }
+    return {"job": job}
+
+
+def lens_transcript(job: str) -> dict:
+    """Assistant turns produced so far by a lens job + running/error state."""
+    info = _LENS_JOBS.get(job)
+    if not info:
+        return {"error": "unknown or expired lens job"}
+    proc = info["proc"]
+    running = proc.poll() is None
+    text = (
+        info["session"].read_text(errors="replace") if info["session"].exists() else ""
+    )
+    turns = [t for t in parse_session(text)["turns"] if t.get("role") == "assistant"]
+    out = {"turns": turns, "running": running, "job": job}
+    if not running and not turns and proc.returncode not in (0, None):
+        err = b""
+        try:
+            err = proc.stderr.read() if proc.stderr else b""
+        except (OSError, ValueError):
+            pass
+        rc = proc.returncode
+        detail = err.decode("utf-8", "replace").strip()[-400:]
+        if not detail and rc is not None and rc < 0:
+            detail = (
+                f"oversight agent was killed (signal {-rc}) — most likely out of memory "
+                f"from too many parallel summaries; lower LENS_SUMMARY_CONCURRENCY"
+            )
+        out["error"] = detail or f"oversight agent exited rc={rc}"
+    return out
+
+
+def cancel_lens(job: str) -> dict:
+    info = _LENS_JOBS.get(job)
+    if info and info["proc"].poll() is None:
+        info["proc"].kill()
+    return {"cancelled": True}
+
+
+def lens_poll(job_ids: list[str]) -> dict:
+    """Latest answer text + running/error state for many lens jobs in one call.
+
+    The dashboard's summary fan-out polls this single endpoint instead of opening
+    one EventSource per run, so it scales past the browser's ~6-connections-per-
+    host limit to dozens/hundreds of parallel summaries.
+    """
+    out: dict[str, dict] = {}
+    for j in job_ids[:256]:
+        d = lens_transcript(j)
+        text = "\n".join(
+            b.get("text", "")
+            for t in d.get("turns", [])
+            for b in (t.get("blocks") or [])
+            if b.get("kind") == "text"
+        ).strip()
+        out[j] = {
+            "running": bool(d.get("running")),
+            "error": d.get("error"),
+            "text": text,
+        }
+    return out
+
+
+def _lens_signature(data: dict) -> str:
+    if data.get("error"):
+        return "err:" + str(data.get("error"))
+    turns = data.get("turns") or []
+    last = turns[-1] if turns else {}
+    blocks = last.get("blocks") or []
+    lb = blocks[-1] if blocks else {}
+    res = lb.get("result") or {}
+    return (
+        f"{'run' if data.get('running') else 'done'}:{len(turns)}:{len(blocks)}:"
+        f"{lb.get('kind')}:{len(lb.get('text') or lb.get('task') or '')}:{len(res.get('text') or '')}"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -592,6 +1008,73 @@ class Handler(BaseHTTPRequestHandler):
                 return  # client closed the EventSource
             time.sleep(interval)
 
+    def _lens_stream(self, job: str):
+        """SSE: stream a Run Lens job's answer (assistant turns) as it works."""
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionError, OSError):
+            return
+        last_sig = None
+        sent_final = False
+        deadline = time.monotonic() + 3600
+        while time.monotonic() < deadline:
+            try:
+                data = lens_transcript(job)
+            except Exception as exc:  # noqa: BLE001
+                data = {"error": f"{type(exc).__name__}: {exc}"}
+            sig = _lens_signature(data)
+            try:
+                if sig != last_sig:
+                    last_sig = sig
+                    self.wfile.write(
+                        b"data: " + json.dumps(data).encode("utf-8") + b"\n\n"
+                    )
+                else:
+                    self.wfile.write(b": hb\n\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionError, OSError):
+                return
+            if data.get("error") or not data.get("running"):
+                if sent_final:
+                    return
+                sent_final = True  # one more flush after the run ends, then stop
+            time.sleep(0.7)
+
+    def _read_body(self) -> dict:
+        length = int(self.headers.get("Content-Length") or 0)
+        if not length:
+            return {}
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8", "replace"))
+        except (json.JSONDecodeError, ValueError):
+            return {}
+
+    def do_POST(self):
+        try:
+            path = urlparse(self.path).path
+            if path == "/api/lens/ask":
+                body = self._read_body()
+                self._json(
+                    start_lens((body.get("id") or ""), body.get("question") or "")
+                )
+            elif path == "/api/lens/cancel":
+                body = self._read_body()
+                self._json(cancel_lens(body.get("job") or ""))
+            else:
+                self._send(404, b"not found", "text/plain")
+        except (BrokenPipeError, ConnectionError, OSError):
+            pass
+        except Exception as exc:  # noqa: BLE001
+            try:
+                self._json({"error": f"{type(exc).__name__}: {exc}"}, code=500)
+            except Exception:
+                pass
+
     def do_GET(self):
         try:
             parsed = urlparse(self.path)
@@ -602,12 +1085,21 @@ class Handler(BaseHTTPRequestHandler):
                 qs = parse_qs(parsed.query)
                 rel = (qs.get("path") or [""])[0]
                 self._json({"path": rel, "items": list_dir(rel)})
+            elif path == "/api/overview":
+                self._json({"runs": list_runs_overview()})
             elif path == "/api/agent":
                 qs = parse_qs(parsed.query)
                 self._json(get_transcript((qs.get("id") or [""])[0]))
             elif path == "/api/stream":
                 qs = parse_qs(parsed.query)
                 self._stream((qs.get("id") or [""])[0])
+            elif path == "/api/lens/stream":
+                qs = parse_qs(parsed.query)
+                self._lens_stream((qs.get("job") or [""])[0])
+            elif path == "/api/lens/poll":
+                qs = parse_qs(parsed.query)
+                raw = (qs.get("jobs") or [""])[0]
+                self._json({"jobs": lens_poll([x for x in raw.split(",") if x])})
             else:
                 self._send(404, b"not found", "text/plain")
         except (BrokenPipeError, ConnectionError, OSError):
@@ -631,9 +1123,15 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);}
 .sidebar::-webkit-scrollbar,.main::-webkit-scrollbar,pre::-webkit-scrollbar{width:9px;height:9px}
 .sidebar::-webkit-scrollbar-thumb,.main::-webkit-scrollbar-thumb,pre::-webkit-scrollbar-thumb{background:var(--panel3);border-radius:6px}
 .app{display:grid;grid-template-columns:var(--sidebar-w,300px) 6px minmax(0,1fr);height:100vh}
+.app.lens-open{grid-template-columns:var(--sidebar-w,300px) 6px minmax(0,1fr) 6px var(--lens-w,420px)}
 .sidebar{background:var(--panel);border-right:1px solid var(--border);overflow-y:auto;padding:12px}
 .resizer{cursor:col-resize;background:var(--border);transition:background .12s}
 .resizer:hover,.resizer.active{background:var(--accent)}
+.resizer[hidden]{display:none}
+#lensResizer{grid-column:4}
+.ovbtn{width:100%;display:flex;align-items:center;justify-content:center;gap:8px;background:var(--panel2);border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:9px 10px;margin-bottom:11px;cursor:pointer;font-size:13px;font-weight:700;letter-spacing:.2px;transition:.12s}
+.ovbtn:hover{border-color:var(--accent)}
+.ovbtn.active{border-color:var(--accent);background:var(--panel3);box-shadow:0 0 0 1px var(--accent)}
 .browse-head{display:flex;align-items:center;justify-content:space-between;margin:2px 4px 10px}
 .browse-head h1{font-size:13px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin:0}
 .browse-head button{background:var(--panel2);border:1px solid var(--border);color:var(--muted);border-radius:6px;cursor:pointer;font-size:14px;line-height:1;padding:3px 8px}
@@ -657,17 +1155,20 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);}
 .badge{font-size:9px;padding:1px 6px;border-radius:6px;background:#2a2f3a;color:var(--accent);text-transform:uppercase;letter-spacing:.4px}
 .count{font-size:10px;color:var(--muted);font-family:var(--mono)}
 .main{overflow-y:auto;padding:0 0 60px}
-.topbar{position:sticky;top:0;z-index:5;background:rgba(15,17,23,.92);backdrop-filter:blur(6px);
-  border-bottom:1px solid var(--border);padding:12px 22px;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
-.topbar .title{font-weight:700;font-size:16px}
+.stickyhead{position:sticky;top:0;z-index:5;background:rgba(13,16,23,.94);backdrop-filter:blur(6px);border-bottom:1px solid var(--border)}
+.topbar{padding:11px 22px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.topbar .title{font-weight:700;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:44vw}
+.tbtn{background:var(--panel2);border:1px solid var(--border);color:var(--muted);border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;transition:.12s}
+.tbtn:hover{color:var(--fg);border-color:var(--accent)}
+.tbtn:disabled,.tbtn:disabled:hover{opacity:.4;cursor:not-allowed;color:var(--muted);border-color:var(--border)}
 .flt{width:100%;background:var(--panel2);border:1px solid var(--border);color:var(--fg);border-radius:7px;padding:6px 9px;font-size:12px;outline:none;margin-bottom:10px}
 .flt:focus{border-color:var(--accent)}
-.statepill{font-size:12px;border:1px solid var(--border);border-radius:20px;padding:3px 11px;color:var(--muted)}
-.statepill b{color:var(--fg)}
+.costlbl{font-size:14px;font-weight:700;color:var(--ok);font-family:var(--mono)}
 .content{max-width:1000px;margin:0 auto;padding:18px 22px}
 .turn{margin:14px 0;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--panel)}
 .turn .role{font-size:11px;text-transform:uppercase;letter-spacing:.6px;padding:7px 14px;font-weight:700;border-bottom:1px solid var(--border)}
 .turn.user .role{color:var(--user)} .turn.assistant .role{color:var(--assist)}
+.turn.user{border-left:3px solid var(--user)} .turn.assistant{border-left:3px solid var(--assist)}
 .turn .body{padding:6px 14px 12px}
 .block{margin:10px 0}
 .text{white-space:pre-wrap;word-wrap:break-word}
@@ -683,15 +1184,32 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
 .think .inner .text{color:#c8bfe7;font-style:italic}
 .tag{font-size:10px;padding:1px 6px;border-radius:5px;background:#2a2f3a;color:var(--muted);margin-left:auto}
 .tag.err{background:#3a2330;color:var(--err)} .tag.ok{background:#23311f;color:var(--ok)}
-.phases{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 0}
-.phase{font-size:11px;border:1px solid var(--border);border-radius:6px;padding:3px 8px;background:var(--panel2)}
-.phase.cur{border-color:var(--accent);color:var(--accent)}
-.sesstabs{display:flex;gap:6px;flex-wrap:wrap;padding:10px 22px 0;max-width:1000px;margin:0 auto}
-.sesstab{font-size:12px;border:1px solid var(--border);background:var(--panel2);color:var(--muted);border-radius:7px;padding:4px 10px;cursor:pointer;transition:.12s}
+.sesstabs{display:flex;gap:6px;flex-wrap:wrap;padding:8px 22px 10px;max-width:1000px;margin:0 auto}
+.sesstab{font-size:12px;border:1px solid var(--border);background:var(--panel2);color:var(--muted);border-radius:7px;padding:4px 10px;cursor:pointer;transition:.12s;display:inline-flex;align-items:center}
 .sesstab:hover{color:var(--fg);border-color:var(--faint)}
 .sesstab.active{border-color:var(--accent);color:var(--fg);background:var(--panel3)}
-.sessgroup{flex-basis:100%;font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--faint);font-weight:700;margin:8px 2px 0}
-.sessgroup:first-child{margin-top:0}
+.sesstab .tc{font-size:9px;color:var(--faint);margin-left:6px;font-family:var(--mono)}
+.sesstab.active .tc{color:var(--muted)}
+.lens-toggle.active{border-color:var(--accent);color:var(--fg);background:var(--panel3)}
+/* Run Lens drawer */
+.lens{grid-column:5;min-width:0;height:100vh;overflow:hidden;
+  background:var(--panel);border-left:1px solid var(--border);display:flex;flex-direction:column}
+.lens[hidden]{display:none}
+.lens-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 14px;border-bottom:1px solid var(--border);background:var(--panel2)}
+.lens-title{font-weight:700;font-size:13px;display:flex;gap:7px;align-items:center}
+.lens-mark{color:var(--accent)}
+.lens-sub{font-weight:500;font-size:11px;color:var(--muted);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:230px}
+.lens-msgs{flex:1;overflow-y:auto;padding:12px 14px}
+.lens-q{margin:4px 0 10px;padding:8px 11px;background:var(--panel3);border:1px solid var(--border);border-radius:8px;color:var(--fg);font-size:13px;white-space:pre-wrap;word-break:break-word}
+.lens-q .who{display:block;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--user);margin-bottom:3px;font-weight:700}
+.lens-ans{margin:2px 0 16px}
+.lens-ans .who{display:block;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:5px;font-weight:700}
+.lens-thinking{color:var(--muted);font-size:12px;font-style:italic}
+.lens-composer{border-top:1px solid var(--border);padding:10px 12px;background:var(--panel2)}
+.lens-composer textarea{width:100%;resize:vertical;min-height:42px;background:var(--bg);border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:8px 10px;font:13px/1.5 var(--sans);outline:none}
+.lens-composer textarea:focus{border-color:var(--accent)}
+.lens-row{display:flex;align-items:center;gap:8px;margin-top:7px}
+.lens-status{flex:1;font-size:11px;color:var(--muted);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .empty{color:var(--muted);text-align:center;padding:60px 20px}
 .controls{margin-left:auto;display:flex;gap:10px;align-items:center;font-size:12px;color:var(--muted)}
 .controls label{display:flex;gap:5px;align-items:center;cursor:pointer}
@@ -718,10 +1236,34 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
 @keyframes pulse{0%{transform:scale(.7);opacity:.8}100%{transform:scale(2.4);opacity:0}}
 .livetag{font-size:9px;font-weight:700;letter-spacing:.5px;color:var(--ok);border:1px solid rgba(158,206,106,.4);border-radius:5px;padding:0 5px}
 .donetag{font-size:9px;font-weight:700;letter-spacing:.5px;color:var(--faint);text-transform:uppercase}
+/* Overview dashboard (homepage) */
+.dash{max-width:1040px;margin:0 auto;padding:18px 22px}
+.dash-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:2px 2px 14px;flex-wrap:wrap}
+.dash-title{font-size:16px;font-weight:700}
+.dash-title span{color:var(--muted);font-weight:500;font-size:13px}
+.dash-actions{display:flex;gap:8px;align-items:center}
+.dash-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.dgroup{grid-column:1/-1;font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--faint);font-weight:700;margin:10px 2px 0}
+.dgroup:first-child{margin-top:0}
+.card{border:1px solid var(--border);border-radius:10px;background:var(--panel);padding:11px 13px;cursor:pointer;transition:.12s;display:flex;flex-direction:column;gap:7px;min-width:0}
+.card:hover{border-color:var(--accent)}
+.card-top{display:flex;align-items:center;gap:8px}
+.card-name{font-weight:700;font-size:13px;word-break:break-all;flex:1}
+.card-meta{font-size:11px;color:var(--muted);font-family:var(--mono);display:flex;gap:4px 8px;flex-wrap:wrap}
+.card-meta b{color:var(--fg);font-weight:600}
+.card-sum{font-size:12.5px;line-height:1.5;color:var(--fg);border-top:1px solid var(--border);padding-top:7px}
+.card-sum .ph{color:var(--faint)}
+.card-sum .working{color:var(--accent)}
+.card-sum .err{color:var(--err)}
+.card-sum .md>:first-child{margin-top:0}.card-sum .md>:last-child{margin-bottom:0}
+.card-actions{display:flex;gap:6px;justify-content:flex-end}
+.mini{font-size:10px;padding:2px 8px;border-radius:5px;background:var(--panel2);border:1px solid var(--border);color:var(--muted);cursor:pointer;transition:.12s}
+.mini:hover{color:var(--fg);border-color:var(--accent)}
 </style></head>
 <body>
 <div class="app">
   <div class="sidebar">
+    <button id="overviewBtn" class="ovbtn" title="Status dashboard of all runs">⌂ Overview — all runs</button>
     <div class="browse-head"><h1>Browse</h1><button id="refresh" title="Refresh">⟳</button></div>
     <div id="breadcrumb" class="breadcrumb"></div>
     <input id="filter" class="flt" placeholder="filter…" autocomplete="off">
@@ -729,20 +1271,32 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
   </div>
   <div class="resizer" id="resizer" title="Drag to resize"></div>
   <div class="main">
+    <div class="stickyhead">
     <div class="topbar">
       <span class="title" id="title">Select a run</span>
-      <span class="statepill" id="modepill" style="display:none"></span>
-      <span class="statepill" id="goalpill" style="display:none"></span>
-      <span class="statepill" id="rlpill" style="display:none"></span>
+      <span class="costlbl" id="costlbl" style="display:none" title="total model spend on this run"></span>
       <div class="controls">
+        <button class="tbtn" id="toggleAll" title="Expand / collapse all blocks">expand</button>
+        <button class="tbtn lens-toggle" id="lensBtn" disabled title="Open a run to ask the read-only oversight agent about it">🔍 Run Lens</button>
         <label><input type="checkbox" id="autorefresh" checked> live</label>
-        <span id="updated"></span>
       </div>
     </div>
-    <div id="phases"></div>
     <div id="sesstabs" class="sesstabs"></div>
+    </div>
     <div class="content" id="content"><div class="empty">Click through the folders on the left and pick a run to view its transcript.</div></div>
   </div>
+  <div class="resizer" id="lensResizer" title="Drag to resize Run Lens" hidden></div>
+  <aside class="lens" id="lens" hidden>
+    <div class="lens-head">
+      <div class="lens-title"><span class="lens-mark">›</span> Run Lens <span class="lens-sub" id="lensCtx">no run</span></div>
+      <button class="tbtn" id="lensClose" title="Close">×</button>
+    </div>
+    <div class="lens-msgs" id="lensMsgs"><div class="empty" style="padding:30px 14px">Ask a read-only agent about this run — its state, code, or transcripts.<br><br>It can read every file in the run (mounted read-only) and cite evidence.</div></div>
+    <div class="lens-composer">
+      <textarea id="lensInput" rows="2" placeholder="Ask about this run… (Enter to send)"></textarea>
+      <div class="lens-row"><span class="lens-status" id="lensStatus"></span><button class="tbtn" id="lensSend">Ask</button><button class="tbtn" id="lensStop" hidden>Stop</button></div>
+    </div>
+  </aside>
 </div>
 <script>
 const E=s=>document.createElement(s);
@@ -795,7 +1349,8 @@ function _md(src){
 }
 
 let state={agentId:null,sess:0,data:null,es:null,path:"",items:[],filter:"",
-           panes:{},paneAgent:null};
+           panes:{},paneAgent:null,lensOpen:false,lensEs:null,lensJob:null,
+           view:"overview",overview:[],overviewSig:"",summaries:{},sumQueue:[],sumActive:0,sumPoll:null};
 let busyTree=false;
 
 async function jget(u){
@@ -861,9 +1416,215 @@ async function refreshDir(){   // silent refresh so live status/new runs appear
   if(res){state.items=res.items||[];renderTree(state.items);}
 }
 function selectRun(id){
+  const switching=id!==state.agentId;
+  state.view="run";
+  const ob=document.getElementById("overviewBtn"); if(ob)ob.classList.remove("active");
   state.agentId=id;state.sess=0;state._pickDefault=true;location.hash=encodeURIComponent(id);
   renderTree(state.items);   // refresh active highlight
   openStream();
+  // The Run Lens is bound to a specific run: opening a run makes it available
+  // and (on a fresh run) docks it open on the side; switching clears stale state.
+  if(switching){ lensReset(); lensSetOpen(true,false); }
+  else { updateLensCtx(); }
+}
+
+// ---- Run Lens: read-only oversight agent over the selected run ----
+function lensSetOpen(open,focus){
+  if(open && !state.agentId) open=false;   // Run Lens is only openable on a specific run
+  state.lensOpen=open;
+  document.getElementById("lens").hidden=!open;
+  document.getElementById("lensResizer").hidden=!open;
+  document.querySelector(".app").classList.toggle("lens-open",open);
+  const btn=document.getElementById("lensBtn");
+  btn.classList.toggle("active",open);
+  btn.disabled=!state.agentId;             // no run selected -> can't open the lens
+  if(open){updateLensCtx(); if(focus)document.getElementById("lensInput").focus();}
+}
+function lensReset(){   // stop any in-flight job and clear the conversation
+  stopLens(true);
+  const m=document.getElementById("lensMsgs");
+  if(m)m.innerHTML='<div class="empty" style="padding:30px 14px">Ask a read-only agent about this run \u2014 its state, code, or transcripts.<br><br>It can read every file in the run (mounted read-only) and cite evidence.</div>';
+  lensStatus("");
+}
+function updateLensCtx(){
+  const el=document.getElementById("lensCtx"); if(!el)return;
+  el.textContent=state.agentId?("· "+state.agentId.split("/").pop()):"no run selected";
+}
+function lensBusy(b){document.getElementById("lensSend").hidden=b;document.getElementById("lensStop").hidden=!b;}
+function lensStatus(s){document.getElementById("lensStatus").textContent=s||"";}
+function lensAddQuestion(q){
+  const m=document.getElementById("lensMsgs");const e=m.querySelector(".empty");if(e)e.remove();
+  const d=E("div");d.className="lens-q";d.innerHTML='<span class="who">You</span>'+esc(q);m.appendChild(d);
+  const a=E("div");a.className="lens-ans";a.innerHTML='<span class="who">Run Lens</span><div class="ansbody"><div class="lens-thinking">working…</div></div>';
+  m.appendChild(a);m.scrollTop=m.scrollHeight;
+  return a.querySelector(".ansbody");
+}
+function lensRender(body,data){
+  if(data.error){body.innerHTML='<div class="lens-thinking" style="color:var(--err)">'+esc(data.error)+'</div>';return;}
+  const blocks=(data.turns||[]).flatMap(t=>t.blocks||[]);
+  if(!blocks.length){body.innerHTML='<div class="lens-thinking">'+(data.running?'working…':'(no output)')+'</div>';return;}
+  body.innerHTML="";body.appendChild(renderBlocks(blocks));
+}
+async function sendLens(){
+  const inp=document.getElementById("lensInput");const q=inp.value.trim();
+  if(!q){return;} if(!state.agentId){lensStatus("pick a run first");return;}
+  stopLens(true); inp.value="";
+  const body=lensAddQuestion(q);
+  lensBusy(true);lensStatus("starting Run Lens…");
+  let res; try{res=await (await fetch("/api/lens/ask",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:state.agentId,question:q})})).json();}catch(e){res={error:String(e)};}
+  if(!res||res.error||!res.job){body.innerHTML='<div class="lens-thinking" style="color:var(--err)">'+esc((res&&res.error)||"failed to start")+'</div>';lensBusy(false);lensStatus("error");return;}
+  state.lensJob=res.job;lensStatus("reading the run…");
+  const m=document.getElementById("lensMsgs");
+  const es=new EventSource("/api/lens/stream?job="+encodeURIComponent(res.job));state.lensEs=es;
+  es.onmessage=ev=>{let d;try{d=JSON.parse(ev.data);}catch(_){return;}
+    const pinned=m.scrollHeight-m.scrollTop-m.clientHeight<120;
+    lensRender(body,d);
+    if(pinned)m.scrollTop=m.scrollHeight;
+    if(d.error||!d.running){es.close();state.lensEs=null;lensBusy(false);lensStatus(d.error?"error":"done");}
+    else lensStatus("investigating…");
+  };
+  es.onerror=()=>{};
+}
+function stopLens(quiet){
+  if(state.lensEs){state.lensEs.close();state.lensEs=null;}
+  if(state.lensJob){fetch("/api/lens/cancel",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({job:state.lensJob})}).catch(()=>{});state.lensJob=null;}
+  lensBusy(false); if(!quiet)lensStatus("stopped");
+}
+
+// ---- Overview dashboard: status of every run + on-demand Run-Lens summaries ----
+const SUMMARY_Q="In 2-3 sentences, say what this agent is doing RIGHT NOW and roughly how far it has gotten. The reader already knows the task, so do NOT restate the proposal or objective. Instead, concretely contextualize the current activity (the specific step, experiment, file, or command it is on), inferred from the most recent messages and tool calls in the active session, plus one detail on overall progress so far. Output only the summary: no preamble, no file citations, no narration of your search.";
+const sumId=p=>"sum-"+p.replace(/[^a-zA-Z0-9]/g,"_");
+const SUMMARY_MAX=50;  // max parallel summary agents; server overrides via LENS_SUMMARY_CONCURRENCY
+function showOverview(){
+  state.view="overview"; state.agentId=null; location.hash="";
+  closeStream();
+  document.getElementById("title").textContent="Overview";
+  const cl=document.getElementById("costlbl"); if(cl)cl.style.display="none";
+  document.getElementById("sesstabs").innerHTML="";
+  state.panes={}; state.paneAgent=null;
+  document.getElementById("content").innerHTML=
+    '<div class="dash"><div class="dash-head"><div class="dash-title">Runs <span id="dashCount"></span></div>'
+    +'<div class="dash-actions"><button id="sumAllBtn" class="tbtn" title="Ask Run Lens for a brief summary of every run (runs in parallel)">\u2726 Generate summaries</button>'
+    +'<button id="sumStopBtn" class="tbtn" hidden>Stop</button></div></div>'
+    +'<div id="dashGrid" class="dash-grid"><div class="empty">Loading runs\u2026</div></div></div>';
+  document.getElementById("sumAllBtn").onclick=summarizeAll;
+  document.getElementById("sumStopBtn").onclick=stopSummaries;
+  if(state.sumActive>0||(state.sumQueue&&state.sumQueue.length))document.getElementById("sumStopBtn").hidden=false;
+  const ob=document.getElementById("overviewBtn"); if(ob)ob.classList.add("active");
+  lensSetOpen(false);   // no specific run on the dashboard -> close + disable the lens
+  renderTree(state.items); updateLensCtx();
+  state.overviewSig=""; loadOverview();
+}
+async function loadOverview(){
+  const res=await jget("/api/overview");
+  if(!res||!res.runs)return;
+  state.overview=res.runs;
+  const sig=JSON.stringify(res.runs.map(r=>[r.path,r.live,r.status,r.turns,r.sessions,r.lastActivity,r.cost,
+    r.goal&&[r.goal.status,r.goal.tokensUsed],
+    r.run_loop&&[r.run_loop.status,r.run_loop.segment,r.run_loop.phase,r.run_loop.stage,r.run_loop.completed]]));
+  if(sig===state.overviewSig)return;            // nothing changed -> no DOM churn
+  state.overviewSig=sig; renderOverview(res.runs);
+}
+function fmtAgo(ms){
+  if(!ms)return "\u2014"; const s=Math.max(0,(Date.now()-ms)/1000);
+  if(s<60)return Math.round(s)+"s ago"; if(s<3600)return Math.round(s/60)+"m ago";
+  if(s<86400)return Math.round(s/3600)+"h ago"; return Math.round(s/86400)+"d ago";
+}
+function runStatusLine(r){
+  const b=[];
+  if(r.cost!=null)b.push(`<b style="color:var(--ok)">$${Number(r.cost).toFixed(2)}</b>`);
+  if(r.goal)b.push(`goal <b>${esc(r.goal.status||"active")}</b>`+(r.goal.tokensUsed!=null?` \u00b7 ${esc(r.goal.tokensUsed)} tok`:""));
+  if(r.run_loop){const rl=r.run_loop;b.push(`run-loop <b>${esc(rl.status||"?")}</b> \u00b7 S${rl.segment}P${rl.phase} ${esc(rl.stage||"")} \u00b7 ${rl.completed} done`);}
+  b.push(`<b>${r.sessions}</b> sess \u00b7 <b>${r.turns}</b> turns`);
+  b.push(fmtAgo(r.lastActivity));
+  return b.join(" \u00b7 ");
+}
+function summaryHTML(path){
+  const s=state.summaries[path];
+  if(!s)return '<span class="ph">No summary yet \u2014 click Summarize.</span>';
+  if(s.status==="queued")return '<span class="ph">queued\u2026</span>';
+  if(s.status==="running")return (s.text?md(s.text):'')+'<span class="working"> \u2026working</span>';
+  if(s.status==="error")return '<span class="err">'+esc(s.text||"error")+'</span>';
+  return s.text?md(s.text):'<span class="ph">(no summary)</span>';
+}
+function updateSummaryCard(path){const el=document.getElementById(sumId(path));if(el)el.innerHTML=summaryHTML(path);}
+function renderOverview(runs){
+  const grid=document.getElementById("dashGrid"); if(!grid)return;
+  const c=document.getElementById("dashCount"); if(c)c.textContent="("+runs.length+")";
+  grid.innerHTML="";
+  if(!runs.length){grid.innerHTML='<div class="empty">No runs found under outputs/.</div>';return;}
+  let curGroup=null;
+  for(const r of runs){
+    if((r.group||"")!==curGroup){curGroup=r.group||"";const g=E("div");g.className="dgroup";g.textContent=curGroup||"runs";grid.appendChild(g);}
+    const card=E("div");card.className="card";
+    const dot=r.live?'<span class="dot live"></span>':'<span class="dot done"></span>';
+    const tag=r.live?'<span class="livetag">LIVE</span>':`<span class="donetag">${esc(r.status||"done")}</span>`;
+    card.innerHTML=`<div class="card-top">${dot}<span class="card-name">${esc(r.name)}</span>`
+      +`${r.mode?`<span class="badge">${esc(r.mode)}</span>`:""}${tag}</div>`
+      +`<div class="card-meta">${runStatusLine(r)}</div>`
+      +`<div class="card-sum" id="${sumId(r.path)}">${summaryHTML(r.path)}</div>`
+      +`<div class="card-actions"><button class="mini" data-act="sum">\u2726 Summarize</button><button class="mini" data-act="open">Open \u2192</button></div>`;
+    card.querySelector('[data-act="open"]').onclick=ev=>{ev.stopPropagation();selectRun(r.path);};
+    card.querySelector('[data-act="sum"]').onclick=ev=>{ev.stopPropagation();summarizeOne(r.path);};
+    card.addEventListener("click",()=>selectRun(r.path));
+    grid.appendChild(card);
+  }
+}
+function summarizeAll(){
+  const runs=state.overview||[]; if(!runs.length)return;
+  state.sumQueue=state.sumQueue||[];
+  for(const r of runs){const s=state.summaries[r.path];
+    if(s&&(s.status==="running"||s.status==="queued"))continue;
+    state.summaries[r.path]={status:"queued",text:""}; updateSummaryCard(r.path); state.sumQueue.push(r.path);}
+  const b=document.getElementById("sumStopBtn"); if(b)b.hidden=false;
+  pumpSummaries();
+}
+function summarizeOne(path){
+  state.sumQueue=state.sumQueue||[];
+  const cur=state.summaries[path];
+  if(cur&&(cur.status==="running"||cur.status==="queued"))return;
+  state.summaries[path]={status:"queued",text:""}; updateSummaryCard(path);
+  state.sumQueue.push(path); const b=document.getElementById("sumStopBtn"); if(b)b.hidden=false; pumpSummaries();
+}
+function pumpSummaries(){
+  while(state.sumActive<SUMMARY_MAX && state.sumQueue && state.sumQueue.length){ startSummary(state.sumQueue.shift()); }
+  if((!state.sumQueue||!state.sumQueue.length)&&state.sumActive===0){const b=document.getElementById("sumStopBtn");if(b)b.hidden=true;}
+}
+async function startSummary(path){
+  const s=state.summaries[path]||(state.summaries[path]={status:"queued",text:""});
+  s.status="running"; s.text=""; updateSummaryCard(path); state.sumActive++;
+  let res; try{res=await (await fetch("/api/lens/ask",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:path,question:SUMMARY_Q})})).json();}catch(e){res={error:String(e)};}
+  if(!res||res.error||!res.job){s.status="error";s.text=(res&&res.error)||"failed to start";updateSummaryCard(path);state.sumActive--;pumpSummaries();return;}
+  s.job=res.job; updateSummaryCard(path); ensureSummaryPoller();
+}
+// One shared poll loop reports progress for ALL running summary jobs in a single
+// request, so the fan-out scales past the browser's ~6-connections-per-host limit
+// to dozens/hundreds of parallel summaries (one EventSource each would not).
+function ensureSummaryPoller(){
+  if(state.sumPoll)return;
+  state.sumPoll=setInterval(pollSummaries,1200); pollSummaries();
+}
+async function pollSummaries(){
+  const entries=Object.entries(state.summaries).filter(([p,s])=>s.job&&s.status==="running");
+  if(!entries.length){clearInterval(state.sumPoll);state.sumPoll=null;return;}
+  const jobs=[...new Set(entries.map(([p,s])=>s.job))];
+  const res=await jget("/api/lens/poll?jobs="+encodeURIComponent(jobs.join(",")));
+  if(!res||!res.jobs)return;
+  for(const [p,s] of entries){
+    const d=res.jobs[s.job]; if(!d)continue;
+    if(d.error){s.status="error";s.text=d.error;}
+    else if(d.text)s.text=d.text;
+    if(d.error||!d.running){ if(s.status!=="error")s.status="done"; s.job=null; state.sumActive--; pumpSummaries(); }
+    updateSummaryCard(p);
+  }
+}
+function stopSummaries(){
+  state.sumQueue=[];
+  if(state.sumPoll){clearInterval(state.sumPoll);state.sumPoll=null;}
+  for(const p in state.summaries){const s=state.summaries[p];
+    if(s.job){fetch("/api/lens/cancel",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({job:s.job})}).catch(()=>{});s.job=null;}
+    if(s.status==="running"||s.status==="queued"){s.status="done";if(!s.text)s.text="(stopped)";updateSummaryCard(p);}}
+  state.sumActive=0; const b=document.getElementById("sumStopBtn"); if(b)b.hidden=true;
 }
 
 // Pick the most useful session tab when a run is first opened: the execution
@@ -871,10 +1632,10 @@ function selectRun(id){
 // planner while planning is still in progress).
 function defaultSess(data){
   const ss=data.sessions||[];
-  const mi=ss.findIndex(s=>s.name==="main" && (s.turns||[]).length);
+  const mi=ss.findIndex(s=>s.name==="main" && (s.turns||[]).length);   // goal: the Worker
   if(mi>=0)return mi;
-  const any=ss.findIndex(s=>(s.turns||[]).length);
-  return any>=0?any:0;
+  for(let i=ss.length-1;i>=0;i--){ if((ss[i].turns||[]).length) return i; }  // else most recent active phase
+  return 0;
 }
 
 // Draggable sidebar width, persisted across sessions.
@@ -888,6 +1649,20 @@ function initResizer(){
   const up=()=>{ if(!dragging)return; dragging=false; r.classList.remove("active");
     document.body.style.userSelect=""; const w=getComputedStyle(document.documentElement).getPropertyValue("--sidebar-w").trim();
     localStorage.setItem("av.sidebarW",parseInt(w,10)||300); };
+  r.addEventListener("mousedown",e=>{dragging=true;r.classList.add("active");document.body.style.userSelect="none";e.preventDefault();});
+  window.addEventListener("mousemove",move); window.addEventListener("mouseup",up);
+}
+// Draggable Run Lens width (it's docked on the right), persisted like the sidebar.
+function initLensResizer(){
+  const r=document.getElementById("lensResizer");if(!r||r._wired)return;r._wired=true;
+  const saved=parseInt(localStorage.getItem("av.lensW")||"",10);
+  if(saved>=280&&saved<=760)document.documentElement.style.setProperty("--lens-w",saved+"px");
+  let dragging=false;
+  const move=e=>{ if(!dragging)return; const w=Math.min(760,Math.max(280,window.innerWidth-e.clientX));
+    document.documentElement.style.setProperty("--lens-w",w+"px"); };
+  const up=()=>{ if(!dragging)return; dragging=false; r.classList.remove("active");
+    document.body.style.userSelect=""; const w=getComputedStyle(document.documentElement).getPropertyValue("--lens-w").trim();
+    localStorage.setItem("av.lensW",parseInt(w,10)||420); };
   r.addEventListener("mousedown",e=>{dragging=true;r.classList.add("active");document.body.style.userSelect="none";e.preventDefault();});
   window.addEventListener("mousemove",move); window.addEventListener("mouseup",up);
 }
@@ -979,32 +1754,21 @@ function nearBottom(el){return el.scrollHeight-el.scrollTop-el.clientHeight<140;
 
 function renderHeader(data){
   document.getElementById("title").textContent=data.id||"";
-  const mp=document.getElementById("modepill");
-  if(data.mode){mp.style.display="";mp.innerHTML=`mode <b>${esc(data.mode)}</b>`;}else mp.style.display="none";
-  const gp=document.getElementById("goalpill");
-  if(data.goal){gp.style.display="";gp.innerHTML=`goal <b>${esc(data.goal.status||"active")}</b> · ${esc(data.goal.tokensUsed??"?")} tok`;}else gp.style.display="none";
-  const rp=document.getElementById("rlpill");const ph=document.getElementById("phases");ph.innerHTML="";
-  if(data.run_loop){
-    const rl=data.run_loop;
-    rp.style.display="";rp.innerHTML=`run-loop <b>${esc(rl.status)}</b> · seg ${rl.segment} ph ${rl.phase} · ${esc(rl.stage)} · $${(rl.cost||0).toFixed?(rl.cost||0).toFixed(2):rl.cost}`;
-    for(const c of (rl.completed||[])){const s=E("span");s.className="phase";s.textContent=`S${c.segment}P${c.phase}:${c.decision}`;ph.appendChild(s);}
-    const cur=E("span");cur.className="phase cur";cur.textContent=`▶ S${rl.segment}P${rl.phase} ${rl.stage}`;ph.appendChild(cur);
-    if(rl.lastError){const s=E("span");s.className="phase";s.style.borderColor="var(--err)";s.style.color="var(--err)";s.textContent="error: "+rl.lastError.slice(0,80);ph.appendChild(s);}
-  }else rp.style.display="none";
+  const cl=document.getElementById("costlbl");
+  if(cl){ if(data.cost!=null){cl.style.display="";cl.textContent="$"+Number(data.cost).toFixed(2);} else cl.style.display="none"; }
 }
 
 function renderTabs(data){
   const tabs=document.getElementById("sesstabs");tabs.innerHTML="";
   const sessions=data.sessions||[];
-  if(sessions.length<=1){return;}
-  let curGroup=null;
+  if(sessions.length<=1){tabs.style.display="none";return;}
+  tabs.style.display="";
   sessions.forEach((s,i)=>{
-    if(s.group && s.group!==curGroup){   // start each phase group on its own row
-      curGroup=s.group;
-      const g=E("span");g.className="sessgroup";g.textContent=s.group;tabs.appendChild(g);
-    }
+    const m=(s.group||"").match(/Segment\s*(\d+).*Phase\s*(\d+)/);   // compact, self-describing label
+    const label=(m?`S${m[1]}P${m[2]} `:"")+(s.label||s.name);
     const b=E("button");b.className="sesstab"+(i===state.sess?" active":"");
-    b.textContent=`${s.label||s.name} (${s.turns.length})`;
+    b.innerHTML=`${esc(label)}<span class="tc">${s.turns.length}</span>`;
+    b.title=s.group||label;
     b.onclick=()=>selectSession(i);
     tabs.appendChild(b);
   });
@@ -1028,7 +1792,6 @@ function applyTranscript(data){
   renderPane(ps,active.turns);   // only the visible tab is updated each tick
   showPane(active.name);
   if(pinned)scroller.scrollTop=scroller.scrollHeight;
-  document.getElementById("updated").textContent="updated "+new Date().toLocaleTimeString();
 }
 
 // Tab switch: show the cached pane (creating + catching it up only if needed).
@@ -1062,7 +1825,18 @@ function openStream(){
 }
 
 if(location.hash.length>1){state.agentId=decodeURIComponent(location.hash.slice(1));}
-_initFilter();initResizer();
+_initFilter();initResizer();initLensResizer();
+function activePane(){const s=((state.data&&state.data.sessions)||[])[state.sess];return s?state.panes[s.name]:null;}
+function setAllDetails(open){const p=activePane();if(p)p.el.querySelectorAll("details").forEach(d=>{d.open=open;});}
+let _allOpen=false;
+document.getElementById("toggleAll").onclick=()=>{_allOpen=!_allOpen;setAllDetails(_allOpen);document.getElementById("toggleAll").textContent=_allOpen?"collapse":"expand";};
+document.getElementById("lensBtn").onclick=()=>lensSetOpen(!state.lensOpen,true);
+document.getElementById("lensClose").onclick=()=>lensSetOpen(false);
+document.getElementById("overviewBtn").onclick=showOverview;
+lensSetOpen(true,false);   // open the lens iff a run is deep-linked; otherwise it stays closed/disabled
+document.getElementById("lensSend").onclick=sendLens;
+document.getElementById("lensStop").onclick=()=>stopLens();
+document.getElementById("lensInput").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendLens();}});
 // Keyboard: 1-9 jump to a session tab, [ / ] cycle prev/next.
 document.addEventListener("keydown",e=>{
   if(/^(input|textarea)$/i.test(e.target.tagName||"")||e.metaKey||e.ctrlKey||e.altKey)return;
@@ -1075,13 +1849,16 @@ document.getElementById("autorefresh").addEventListener("change",openStream); //
 // Open the folder containing a deep-linked run (if any), else the root.
 const startDir=(state.agentId&&state.agentId.includes("/"))?state.agentId.split("/").slice(0,-1).join("/"):"";
 state._pickDefault=!!state.agentId;
-loadDir(startDir).then(()=>{ if(state.agentId)openStream(); });
-setInterval(refreshDir,3000);   // refresh current dir listing; transcript arrives via SSE
+loadDir(startDir).then(()=>{ if(state.agentId){state.view="run";openStream();} else showOverview(); });
+setInterval(()=>{ refreshDir(); if(state.view==="overview")loadOverview(); },3000);   // dir listing + dashboard refresh; run transcripts arrive via SSE
 </script>
 </body></html>
 """
 
 INDEX_HTML = INDEX_HTML.replace("/*__PALETTE__*/", PALETTE_CSS)
+INDEX_HTML = INDEX_HTML.replace(
+    "const SUMMARY_MAX=50;", f"const SUMMARY_MAX={LENS_SUMMARY_CONCURRENCY};"
+)
 
 
 def main() -> None:

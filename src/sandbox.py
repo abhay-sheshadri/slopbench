@@ -111,10 +111,16 @@ def build_argv(
     inner: list[str],
     *,
     extra_ro_binds: tuple[str, ...] = (),
+    workspace_ro: bool = False,
+    extra_binds: tuple[tuple[str, str], ...] = (),
 ) -> list[str]:
     """Build the ``bwrap … -- <inner>`` argv for a sandboxed command.
 
-    ``workspace`` is bind-mounted read-write as ``/workspace`` and is the cwd.
+    ``workspace`` is bind-mounted as ``/workspace`` (read-write, or read-only when
+    ``workspace_ro`` is set — used by the read-only Run Lens oversight agent) and
+    is the cwd. ``extra_binds`` are ``(host, dest)`` read-write mounts (e.g. a
+    writable scratch dir when the workspace is mounted read-only).
+
     The sandbox environment is *not* put on the command line (that would leak
     secrets into ``ps``/``/proc``): bwrap forwards its own process environment
     into the sandbox, so the caller passes :func:`default_env` via the child
@@ -148,14 +154,13 @@ def build_argv(
         "/dev",
         "--tmpfs",
         "/tmp",
-        "--bind",
+        ("--ro-bind" if workspace_ro else "--bind"),
         str(workspace),
         WORKSPACE,
-        "--chdir",
-        WORKSPACE,
-        "--die-with-parent",
-        "--",
     ]
+    for host, dest in extra_binds:
+        argv += ["--bind", str(host), dest]
+    argv += ["--chdir", WORKSPACE, "--die-with-parent", "--"]
     argv += inner
     return argv
 

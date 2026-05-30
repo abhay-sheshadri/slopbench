@@ -14,6 +14,30 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = []
+# The toolchain Python the agent sandboxes mount read-only (src/sandbox.py)
+# carries this common scientific / ML / API stack so agents don't hit avoidable
+# ModuleNotFoundError friction. Mirrors what the old CPU Docker image shipped.
+# Installed by scripts/setup_machine.sh via `uv pip install -e ".[sandbox]"`.
+sandbox = [
+    "anthropic",
+    "openai",
+    "httpx",
+    "requests",
+    "python-dotenv",
+    "numpy",
+    "pandas",
+    "scipy",
+    "scikit-learn",
+    "matplotlib",
+    "jinja2",
+    "tqdm",
+    # Provided-credential SDKs (keys live in .env): the corresponding client
+    # should be importable so agents aren't blocked when they reach for them.
+    "tinker",
+    "modal",
+    "datasets",
+    "huggingface_hub",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -16,7 +16,9 @@ install_python_env() {
     uv python install 3.11
     uv venv --clear
     source .venv/bin/activate
-    uv pip install -e .
+    # `.[sandbox]` adds the scientific/ML/API stack that the agent sandboxes
+    # mount read-only, so agents don't hit avoidable ModuleNotFoundError friction.
+    uv pip install -e ".[sandbox]"
     uv pip install pre-commit
     pre-commit install
 }
