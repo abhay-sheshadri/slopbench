@@ -1492,7 +1492,7 @@ function stopLens(quiet){
 }
 
 // ---- Overview dashboard: status of every run + on-demand Run-Lens summaries ----
-const SUMMARY_Q="In 2-3 sentences, say what this agent is doing RIGHT NOW and roughly how far it has gotten. The reader already knows the task, so do NOT restate the proposal or objective. Instead, concretely contextualize the current activity (the specific step, experiment, file, or command it is on), inferred from the most recent messages and tool calls in the active session, plus one detail on overall progress so far. Output only the summary: no preamble, no file citations, no narration of your search.";
+const SUMMARY_Q="Write a 2-4 sentence status update for a reader who knows this run's task and setup but has NOT followed what the run has done so far. Do not restate the proposal; instead give enough run-specific context that the current activity is self-explanatory: briefly what has already been accomplished, then what the agent is doing right now and why, and whether it is making progress or is stuck/erroring. Explain what key artifacts (files, commands, experiments, results) mean for the task rather than just naming them. Base it strictly on the run's transcripts and state files; output only the summary, with no preamble and no narration of your search.";
 const sumId=p=>"sum-"+p.replace(/[^a-zA-Z0-9]/g,"_");
 const SUMMARY_MAX=50;  // max parallel summary agents; server overrides via LENS_SUMMARY_CONCURRENCY
 function showOverview(){
