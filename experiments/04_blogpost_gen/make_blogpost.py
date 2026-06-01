@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
         "--timeout",
         type=int,
         default=blogpost.DEFAULT_TIMEOUT,
-        help="Max seconds for the agent.",
+        help="Max seconds for the agent (default: no timeout — run to completion).",
     )
     ap.add_argument(
         "--keep-work",
@@ -77,7 +77,7 @@ def main() -> None:
     print(
         f"Run dir:  {run_dir}\n"
         f"Work dir: {work}\n"
-        f"Model: {args.model} | thinking: {args.thinking} | timeout: {args.timeout}s\n"
+        f"Model: {args.model} | thinking: {args.thinking} | timeout: {str(args.timeout) + 's' if args.timeout else 'none'}\n"
         "--- agent auditing the run (this can take many minutes) ---",
         flush=True,
     )

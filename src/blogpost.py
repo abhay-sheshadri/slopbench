@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # override with the BLOGPOST_MODEL env var or --model.
 BLOGPOST_MODEL = os.environ.get("BLOGPOST_MODEL", DEFAULT_GPT_MODEL)
 WRITEUP_THINKING_DEFAULT = "high"
-DEFAULT_TIMEOUT = 3600  # seconds
+DEFAULT_TIMEOUT = None  # no timeout by default: the agent runs to completion
 
 
 def is_run_dir(path: Path) -> bool:
@@ -206,7 +206,7 @@ def generate(
     *,
     model: str | None = None,
     thinking: str = WRITEUP_THINKING_DEFAULT,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: int | None = DEFAULT_TIMEOUT,
     env_text: str | None = None,
     on_log=None,
 ) -> dict:
@@ -255,9 +255,9 @@ def generate(
             stdout=log,
             stderr=subprocess.STDOUT,
         )
-        deadline = time.time() + timeout
+        deadline = (time.time() + timeout) if timeout and timeout > 0 else None
         while proc.poll() is None:
-            if time.time() > deadline:
+            if deadline is not None and time.time() > deadline:
                 proc.kill()
                 timed_out = True
                 break
