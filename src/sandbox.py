@@ -113,6 +113,7 @@ def build_argv(
     extra_ro_binds: tuple[str, ...] = (),
     workspace_ro: bool = False,
     extra_binds: tuple[tuple[str, str], ...] = (),
+    extra_ro_dest_binds: tuple[tuple[str, str], ...] = (),
 ) -> list[str]:
     """Build the ``bwrap … -- <inner>`` argv for a sandboxed command.
 
@@ -160,6 +161,10 @@ def build_argv(
     ]
     for host, dest in extra_binds:
         argv += ["--bind", str(host), dest]
+    # Read-only ``(host, dest)`` mounts (e.g. the source run at /run for the
+    # write-up meta-agent, whose CWD/workspace is instead a writable output dir).
+    for host, dest in extra_ro_dest_binds:
+        argv += ["--ro-bind", str(host), dest]
     argv += ["--chdir", WORKSPACE, "--die-with-parent", "--"]
     argv += inner
     return argv

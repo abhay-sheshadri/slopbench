@@ -55,11 +55,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--force", action="store_true", help="Wipe each run's output dir first."
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume each run from its existing output dir (continue where it stopped).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.force and args.resume:
+        raise SystemExit("--force and --resume are mutually exclusive.")
     base = (ROOT / args.output_dir).resolve()
     env_path = ROOT / ".env"
     env_contents = env_path.read_text() if env_path.exists() else None
@@ -82,6 +89,7 @@ def main() -> None:
                     thinking=args.thinking,
                     command_timeout=None,  # no timeout — run to completion
                     env_contents=env_contents,
+                    resume=args.resume,
                 )
             )
 

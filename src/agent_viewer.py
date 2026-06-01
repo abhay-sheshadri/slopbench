@@ -206,13 +206,67 @@ def _is_run_dir(d: Path) -> bool:
     )
 
 
+# Dirs we never descend into while *discovering* runs: a run's own (often multi-
+# GB) working tree, dependency/cache dirs, and the agent HOME. Run dirs are found
+# by their .pi_transcripts child and never nest, so once one is found we prune
+# everything under it instead of crawling potentially tens of GB of run output.
+_WALK_SKIP_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".home",
+    ".pi_transcripts",
+    ".lens",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".cache",
+    "site-packages",
+    "wandb",
+}
+_RUNDIRS_CACHE: "tuple[float, set] | None" = None
+_RUNDIRS_TTL = 2.0
+_RUNDIRS_LOCK = threading.Lock()
+
+
+def _discover_run_dirs(d: Path) -> set:
+    """Run dirs at/under ``d`` via a pruned top-down walk.
+
+    Recognised by their ``.pi_transcripts`` child; runs never nest, so once one
+    is found we stop descending into its (potentially multi-GB) working tree.
+    Hidden/dependency/cache dirs are pruned, keeping the walk shallow instead of
+    crawling the whole outputs/ tree (the old ``glob('**/.pi_transcripts')``).
+    """
+    found: set = set()
+    for root, dirs, _files in os.walk(d):
+        if _is_run_dir(Path(root)):
+            found.add(Path(root))
+            dirs[:] = []  # don't crawl the run's working files
+            continue
+        dirs[:] = [
+            x for x in dirs if x not in _WALK_SKIP_DIRS and not x.startswith(".")
+        ]
+    return found
+
+
 def _run_dirs_under(d: Path) -> set:
-    """All run directories at or below ``d`` (a run dir has a .pi_transcripts)."""
-    found = set()
-    for t in d.glob("**/.pi_transcripts"):
-        rd = t.parent
-        if _is_run_dir(rd):
-            found.add(rd)
+    """All run directories at or below ``d`` (a run dir has a .pi_transcripts).
+
+    The whole-outputs scan is cached for a short TTL so the 3s dashboard/dir
+    polls don't re-walk the tree on every request; subtrees are walked directly.
+    """
+    if d != OUTPUTS_DIR:
+        return _discover_run_dirs(d)
+    global _RUNDIRS_CACHE
+    now = time.monotonic()
+    with _RUNDIRS_LOCK:
+        if _RUNDIRS_CACHE and now - _RUNDIRS_CACHE[0] < _RUNDIRS_TTL:
+            return set(_RUNDIRS_CACHE[1])
+    found = _discover_run_dirs(d)
+    with _RUNDIRS_LOCK:
+        _RUNDIRS_CACHE = (now, set(found))
     return found
 
 
@@ -651,9 +705,6 @@ def _run_loop_session_files(sessions: dict) -> list[dict]:
 LENS_DIR = OUTPUTS_DIR / ".lens"
 LENS_MODEL = os.environ.get("LENS_MODEL", DEFAULT_MODEL)
 LENS_THINKING = os.environ.get("LENS_THINKING", "medium")
-# The write-up meta-agent reads more and reasons harder than a quick Q&A, so it
-# defaults to a higher thinking level (override via env).
-WRITEUP_THINKING = os.environ.get("LENS_WRITEUP_THINKING", "high")
 # Max number of Run-Lens summary agents the dashboard's "Generate summaries"
 # fan-out runs at once (also injected as the client-side cap). Each one is a full
 # model call, so this is the main throughput/cost knob; override via env.
@@ -796,80 +847,6 @@ def _lens_prompt(rel: str, base: Path, question: str) -> str:
     return "\n".join(lines)
 
 
-def _writeup_prompt(rel: str, base: Path) -> str:
-    """Prompt for the meta-agent that reads a run and writes a clean write-up.
-
-    Mirrors the ``write_up.md`` structure used by the empirical-ml-research
-    workflow: a faithful, self-contained report a task-aware reader can follow.
-    """
-    tdir = base / ".pi_transcripts"
-    status = "running" if (tdir / RUNNING_MARKER).exists() else "completed"
-    data = _transcript_disk(rel)
-    sess = ", ".join(
-        f"{s.get('label') or s['name']}({len(s['turns'])})"
-        for s in data.get("sessions", [])
-    )
-    rl = data.get("run_loop")
-    lines = [
-        "You are a META-AGENT that writes a clean, faithful write-up of an autonomous",
-        "research run produced by ANOTHER agent. Your working directory (/workspace) is",
-        "that run's directory, mounted READ-ONLY: read any file (code, transcripts,",
-        "results, data, existing write-ups) and run read-only shell commands, but you",
-        "cannot modify the run.",
-        "",
-        "FIRST read enough to understand the run (do NOT start writing until you have):",
-        "  - the task spec: proposal.md, planner/OVERALL_PLAN.md, planner/INSTRUCTIONS_*.md",
-        "  - the execution + planner transcripts (see Key locations below)",
-        "  - the agent's OWN write-ups in writeup/ or writeups/ — treat these as EVIDENCE,",
-        "    NOT ground truth: the run's agent may have over- or under-claimed. Verify",
-        "    claims against the actual code and result/data files before repeating them.",
-        "  - the real code and the result/data files it produced.",
-        "",
-        "THEN write ONE clean, self-contained write-up in Markdown for a reader who knows",
-        "the task/setup but did NOT watch the run. Use this structure:",
-        "  - **TL;DR** — 3-5 sentences: what was attempted and the headline outcome.",
-        "  - **Goal / research question**",
-        "  - **What was done** — methodology in order: approach, models, datasets, key steps.",
-        "  - **Key findings / results** — concrete numbers; cite the result file / plot paths.",
-        "  - **Important choices & rationale** — non-obvious decisions and why.",
-        "  - **Failed approaches / dead-ends** — what didn't work and why (don't overstate",
-        "    how thoroughly something was ruled out).",
-        "  - **Limitations & caveats** — including anything the run's own write-ups got",
-        "    wrong or overclaimed.",
-        "  - **Status** — done / in-progress / blocked, and what's next.",
-        "",
-        "Be faithful and grounded: cite specific files/results for claims, never invent",
-        "numbers, and flag uncertainty. Be concise and well-organized (clear prose + short",
-        "lists, not walls of text). Output ONLY the Markdown write-up, with no preamble.",
-        "",
-        f"Run: {rel}",
-        f"Status: {status} | mode: {data.get('mode')} | est. spend: ${data.get('cost', 0) or 0:.2f}",
-    ]
-    if data.get("goal"):
-        g = data["goal"]
-        lines.append(f"Goal: status={g.get('status')} tokensUsed={g.get('tokensUsed')}")
-    if rl:
-        lines.append(
-            f"Run-loop: status={rl.get('status')} segment={rl.get('segment')} "
-            f"phase={rl.get('phase')} stage={rl.get('stage')} "
-            f"completed_phases={len(rl.get('completed') or [])}"
-        )
-    lines += [
-        f"Transcript sessions present (name(turns)): {sess or 'none yet'}",
-        "",
-        "Key locations (relative to /workspace):",
-        "  - execution transcript: .pi_transcripts/session.jsonl",
-        "  - planner transcript:   .pi_transcripts/planner.session.jsonl",
-        "  - run-loop sub-agent sessions: .home/.pi/agent/sessions/*/*.jsonl",
-        "  - run-loop state: planner/RUN_LOOP_STATE.json",
-        "  - the agent's own write-ups: writeup/ and/or writeups/",
-        "",
-        "File index (relative path | bytes):",
-        *_lens_file_index(base),
-    ]
-    return "\n".join(lines)
-
-
 def _prune_lens_jobs(keep: int = 80) -> None:
     """Drop finished lens jobs (and scratch dirs) beyond ``keep``.
 
@@ -945,16 +922,6 @@ def start_lens(rel: str, question: str) -> dict:
     if not (question or "").strip():
         return {"error": "empty question"}
     return _spawn_lens(rel, base, _lens_prompt(rel, base, question), LENS_THINKING)
-
-
-def start_writeup(rel: str) -> dict:
-    """Spawn a read-only meta-agent that reads the run and writes a clean write-up."""
-    if sandbox.available() is None:
-        return {"error": "bubblewrap (bwrap) is not installed"}
-    base = _safe_disk_path(rel)
-    if base is None or not (base / ".pi_transcripts").exists():
-        return {"error": "unknown run"}
-    return _spawn_lens(rel, base, _writeup_prompt(rel, base), WRITEUP_THINKING)
 
 
 def lens_transcript(job: str) -> dict:
@@ -1157,9 +1124,6 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/lens/cancel":
                 body = self._read_body()
                 self._json(cancel_lens(body.get("job") or ""))
-            elif path == "/api/lens/writeup":
-                body = self._read_body()
-                self._json(start_writeup(body.get("id") or ""))
             else:
                 self._send(404, b"not found", "text/plain")
         except (BrokenPipeError, ConnectionError, OSError):
@@ -1291,7 +1255,6 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
   background:var(--panel);border-left:1px solid var(--border);display:flex;flex-direction:column}
 .lens[hidden]{display:none}
 .lens-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 14px;border-bottom:1px solid var(--border);background:var(--panel2)}
-.lens-headbtns{display:flex;gap:6px;align-items:center;flex:none}
 .lens-title{font-weight:700;font-size:13px;display:flex;gap:7px;align-items:center}
 .lens-mark{color:var(--accent)}
 .lens-sub{font-weight:500;font-size:11px;color:var(--muted);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:230px}
@@ -1301,6 +1264,7 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
 .lens-ans{margin:2px 0 16px}
 .lens-ans .who{display:block;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:5px;font-weight:700}
 .lens-thinking{color:var(--muted);font-size:12px;font-style:italic}
+.md-img{max-width:100%;height:auto;border:1px solid var(--border);border-radius:6px;margin:8px 0;background:#fff;display:block}
 .lens-composer{border-top:1px solid var(--border);padding:10px 12px;background:var(--panel2)}
 .lens-composer textarea{width:100%;resize:vertical;min-height:42px;background:var(--bg);border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:8px 10px;font:13px/1.5 var(--sans);outline:none}
 .lens-composer textarea:focus{border-color:var(--accent)}
@@ -1332,6 +1296,7 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
 @keyframes pulse{0%{transform:scale(.7);opacity:.8}100%{transform:scale(2.4);opacity:0}}
 .livetag{font-size:9px;font-weight:700;letter-spacing:.5px;color:var(--ok);border:1px solid rgba(158,206,106,.4);border-radius:5px;padding:0 5px}
 .donetag{font-size:9px;font-weight:700;letter-spacing:.5px;color:var(--faint);text-transform:uppercase}
+.donetag.bad{color:var(--err)}
 /* Overview dashboard (homepage) */
 .dash{max-width:1040px;margin:0 auto;padding:18px 22px}
 .dash-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:2px 2px 14px;flex-wrap:wrap}
@@ -1401,7 +1366,7 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
   <aside class="lens" id="lens" hidden>
     <div class="lens-head">
       <div class="lens-title"><span class="lens-mark">›</span> Run Lens <span class="lens-sub" id="lensCtx">no run</span></div>
-      <div class="lens-headbtns"><button class="tbtn" id="lensWriteup" title="Have a meta-agent read this run's code + transcripts and produce a clean write-up">📝 Writeup</button><button class="tbtn" id="lensClose" title="Close">×</button></div>
+      <button class="tbtn" id="lensClose" title="Close">×</button>
     </div>
     <div class="lens-msgs" id="lensMsgs"><div class="empty" style="padding:30px 14px">Ask a read-only agent about this run — its state, code, or transcripts.<br><br>It can read every file in the run (mounted read-only) and cite evidence.</div></div>
     <div class="lens-composer">
@@ -1432,6 +1397,7 @@ function _md(src){
     .replace(/`([^`]+)`/g,(m,c)=>"<code>"+c+"</code>")
     .replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>")
     .replace(/(^|[^*])\*([^*\n]+)\*/g,"$1<em>$2</em>")
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g,'<img alt="$1" src="$2" class="md-img" loading="lazy">')
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
   const cell=c=>inl(esc(c.trim()));
   const lines=String(src).replace(/\r/g,"").split("\n");
@@ -1540,7 +1506,7 @@ function renderTree(items){
     }else{
       row.className="row run"+(it.path===state.agentId?" active":"");
       const dot=it.live?'<span class="dot live"></span>':'<span class="dot done"></span>';
-      const tag=it.live?'<span class="livetag">LIVE</span>':`<span class="donetag">${esc(it.status||"done")}</span>`;
+      const tag=it.live?'<span class="livetag">LIVE</span>':`<span class="donetag${/fail|error|stop|budget/i.test(it.status||"")?" bad":""}">${esc(it.status||"done")}</span>`;
       row.innerHTML=`<span class="ic">▤</span><span class="name">${esc(it.name)}</span>`+
         `<span class="rmeta">${it.mode?`<span class="badge">${esc(it.mode)}</span>`:""}${dot}${tag}</span>`;
       row.onclick=()=>selectRun(it.path);
@@ -1614,7 +1580,7 @@ function lensRender(body,data){
   if(!blocks.length){body.innerHTML='<div class="lens-thinking">'+(data.running?'working…':'(no output)')+'</div>';return;}
   body.innerHTML="";body.appendChild(renderBlocks(blocks));
 }
-function lensStreamJob(job,body,workingMsg){
+function lensStreamJob(job,body,workingMsg,onDone){
   state.lensJob=job;lensStatus("reading the run…");
   const m=document.getElementById("lensMsgs");
   const es=new EventSource("/api/lens/stream?job="+encodeURIComponent(job));state.lensEs=es;
@@ -1622,7 +1588,7 @@ function lensStreamJob(job,body,workingMsg){
     const pinned=m.scrollHeight-m.scrollTop-m.clientHeight<120;
     lensRender(body,d);
     if(pinned)m.scrollTop=m.scrollHeight;
-    if(d.error||!d.running){es.close();state.lensEs=null;lensBusy(false);lensStatus(d.error?"error":"done");}
+    if(d.error||!d.running){es.close();state.lensEs=null;lensBusy(false);lensStatus(d.error?"error":"done");if(onDone)onDone(!!d.error);}
     else lensStatus(workingMsg||"investigating…");
   };
   es.onerror=()=>{};
@@ -1636,16 +1602,6 @@ async function sendLens(){
   let res; try{res=await (await fetch("/api/lens/ask",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:state.agentId,question:q})})).json();}catch(e){res={error:String(e)};}
   if(!res||res.error||!res.job){body.innerHTML='<div class="lens-thinking" style="color:var(--err)">'+esc((res&&res.error)||"failed to start")+'</div>';lensBusy(false);lensStatus("error");return;}
   lensStreamJob(res.job,body);
-}
-// Meta-agent: read the run's code + transcripts and produce a clean write-up.
-async function requestWriteup(){
-  if(!state.agentId){lensStatus("pick a run first");return;}
-  stopLens(true);
-  const body=lensAddQuestion("\ud83d\udcdd Generate a clean write-up of this run");
-  lensBusy(true);lensStatus("starting writeup…");
-  let res; try{res=await (await fetch("/api/lens/writeup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:state.agentId})})).json();}catch(e){res={error:String(e)};}
-  if(!res||res.error||!res.job){body.innerHTML='<div class="lens-thinking" style="color:var(--err)">'+esc((res&&res.error)||"failed to start")+'</div>';lensBusy(false);lensStatus("error");return;}
-  lensStreamJob(res.job,body,"writing up the run…");
 }
 function stopLens(quiet){
   if(state.lensEs){state.lensEs.close();state.lensEs=null;}
@@ -1720,7 +1676,7 @@ function renderOverview(runs){
     if((r.group||"")!==curGroup){curGroup=r.group||"";const g=E("div");g.className="dgroup";g.textContent=curGroup||"runs";grid.appendChild(g);}
     const card=E("div");card.className="card";
     const dot=r.live?'<span class="dot live"></span>':'<span class="dot done"></span>';
-    const tag=r.live?'<span class="livetag">LIVE</span>':`<span class="donetag">${esc(r.status||"done")}</span>`;
+    const tag=r.live?'<span class="livetag">LIVE</span>':`<span class="donetag${/fail|error|stop|budget/i.test(r.status||"")?" bad":""}">${esc(r.status||"done")}</span>`;
     card.innerHTML=`<div class="card-top">${dot}<span class="card-name">${esc(r.name)}</span>`
       +`${r.mode?`<span class="badge">${esc(r.mode)}</span>`:""}${tag}</div>`
       +`<div class="card-meta">${runStatusLine(r)}</div>`
@@ -1997,7 +1953,6 @@ document.getElementById("lensClose").onclick=()=>lensSetOpen(false);
 document.getElementById("overviewBtn").onclick=showOverview;
 lensSetOpen(true,false);   // open the lens iff a run is deep-linked; otherwise it stays closed/disabled
 document.getElementById("lensSend").onclick=sendLens;
-document.getElementById("lensWriteup").onclick=requestWriteup;
 document.getElementById("lensStop").onclick=()=>stopLens();
 document.getElementById("lensInput").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendLens();}});
 // Keyboard: 1-9 jump to a session tab, [ / ] cycle prev/next.
