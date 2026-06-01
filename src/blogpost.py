@@ -165,9 +165,14 @@ Sweep the ENTIRE run in detail — every phase, not just the latest. Read the
 per-phase write-ups and progress logs and the rolling write_up.md (the agent's OWN
 summary — a map, NOT ground truth). Audit the actual experiment code. Verify
 headline numbers against the raw .csv / .jsonl / .json files the run produced — do
-NOT repeat a number you haven't traced to a file. Sample the per-phase sub-agent
-session transcripts with jq whenever a prose summary is ambiguous about what
-actually happened. Results, ablations, and failed attempts that materially shape
+NOT repeat a number you haven't traced to a file. You MUST also open and sample
+the per-phase sub-agent SESSION TRANSCRIPTS with jq (the .jsonl logs under
+.pi_transcripts/run_loop_sessions/ for finished multi_phase runs, .home/.pi/agent/
+sessions/*/ for live ones, or .pi_transcripts/session.jsonl for goal mode): at
+minimum cross-check the single most important claim AND one failed/abandoned
+approach against what the agent ACTUALLY did, since write-ups routinely
+misdescribe or omit what happened. Do not rely on the write-ups alone. Results,
+ablations, and failed attempts that materially shape
 the story frequently only live in the phase where they were produced, and the run
 agent's own write-ups sometimes over- or under-claim. Do NOT build the write-up by
 compressing one consolidated source — the plots, numbers, and prose must all trace
