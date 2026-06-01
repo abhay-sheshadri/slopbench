@@ -40,10 +40,11 @@ PROMPT = """# Audit a run and turn it into a clean write-up
 
 Audit and clean up the results of another agent that worked on a research project
 autonomously, and convert what it produced into a clear write-up in the style of a
-post on Anthropic's Alignment Science blog: open with motivation; then, if the
-run reproduces a result from prior work that it builds on, that reproduction first;
-then the main new result; then the supporting results presented as a build-up where
-each result leads into the next.
+post on Anthropic's Alignment Science blog. Aim for a short, front-loaded post with
+standard section headings: a brief Introduction (motivation, prior work, a preview of
+the key results), a short Methods section, then Results ordered by importance
+(replication first if there is one), then takeaways — with the technical detail left
+to appendices that can run longer than the post.
 
 Your current working directory (/workspace) is a fresh, WRITABLE output dir. The
 source run is mounted READ-ONLY at /source — read from there freely, but never write
@@ -71,20 +72,55 @@ write-ups alone — the plots, numbers, and prose must all trace to first-hand a
 you opened yourself.
 
 ## Writing Instructions
-Structure:
-- Have a short intro that discusses the context and value of this research.
-- Before diving into new results, highlight the reproduction of previous results from the literature.
-- Structure the blogpost around the key results, not around what the agent did.
-- Model the structure on this LessWrong post: <https://www.lesswrong.com/posts/LqDjxSceFz8tjMe2j/auditbench-evaluating-alignment-auditing-techniques-on>. Enumerate findings ordered by importance, state each finding cleanly, and follow it with a short paragraph elaborating the key analysis.
-- Push technical details, ablations, and minor results into appendices, and reference each appendix from the main body.
+Aim for roughly this structure, using the standard section headings Introduction,
+Methods, and Results, keeping the main body short and leaving the technical detail to
+the appendices:
+
+1. Introduction (a few short paragraphs): brief motivation, a brief note on the prior
+   work this builds on, and a short preview of the key results, ordered by importance.
+   Whenever you reference prior work, cite it (name the paper/authors and include a
+   link), drawing on the references in the proposal's related-work section rather
+   than inventing citations.
+2. Methods (short): the setup and approach in enough detail that the results are
+   interpretable — the model(s), data, and what was actually measured — with the full
+   detail left to the appendices.
+3. Results, organised around the findings rather than what the agent did: the
+   replication of prior results first (if any) — citing the work being replicated
+   and saying how closely it matches — then the findings from biggest to
+   smallest, each as a short claim followed by a short paragraph on the analysis and
+   evidence. This LessWrong post is a useful reference for the style:
+   <https://www.lesswrong.com/posts/LqDjxSceFz8tjMe2j/auditbench-evaluating-alignment-auditing-techniques-on>.
+   If useful, we should also have example representative model outputs/transcripts or examples from the training data
+   so that the reader can quickly verify that the setup makes sense.
+   Wherever possible, contextualize each finding against known results from other
+   papers — say whether it agrees with, extends, quantitatively compares to, or
+   contradicts what prior work found (citing it) — so the reader sees how the result
+   fits into the broader literature rather than in isolation.
+4. Takeaways: a short section on the conclusions, open questions, and implications.
+
+Appendices (which can be longer than the post itself): setup, methods, ablations,
+controls, secondary results, cost, and reproducibility notes. Reference each appendix
+from the main body.
 
 Figures:
 - Spend real time on how to present figures cleanly.
 - AI-generated figures usually have too much text on them. Keep labels and legends clean and elegant, and push detail into the caption below.
+- Define each label fully in the legend: spell out what every series/line/bar is, with no undefined abbreviations or cryptic shorthand, so the reader can tell the labels apart from the legend alone (keep the wording short, but complete).
+- Really avoid cryptic shorthand anywhere a reader looks — legends, axis labels, titles, and tick labels. Internal names from the run (e.g. `cfg3`, `exp_v2`, `kto_sft`, `m1`/`m2`, `acc`, `pp1`) are meaningless to an outside reader: replace every one with the plain-English thing it stands for ("KTO adversarial training", "accuracy", etc.). If an abbreviation is truly unavoidable, define it in the caption. A reader who has never seen the run should understand the figure without guessing.
 - Default to small figsizes with big, short text.
 - Save each cited figure to ./final_plots/ as BOTH .png and .pdf and reference it with a relative path, e.g. `![Fig 1: headline](final_plots/fig1_headline.png)`.
 
 Read the draft from the outside:
+- Go over the draft sentence by sentence and, for each one, ask: "is this a sentence
+  I could actually read in a post on LessWrong?" Cut or rewrite anything that reads
+  like AI filler — throat-clearing, vague hype, hollow contrast ("not just X, but
+  Y"), restating the obvious, or padding. Keep only sentences that carry real content
+  in a voice a thoughtful human would actually write.
+- When you mention prior work, cite it (author/title + link); only use citations
+  that appear in the proposal or that you verified against an artifact in the run —
+  never fabricate a reference. A short "References" list at the end is fine.
+- Try to communicate clearly and use common words or ML terminology.
+- Please don't reference the AI agent doing research, the goal here is to have a finished product that can be submitted to a conference, not a summary of the agent's work
 - Keep the document understandable to humans. Assume the readers are very intelligent but are not familiar with the jargon of this subfield — define or avoid jargon.
 - Re-read your draft as if you had only read the proposal and nothing else from the run. Would you follow it on first read? If not, fix it.
 - Don't miss important things the agent did that the reader should know about. Sweep the run with that lens before calling the writeup done.

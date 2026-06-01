@@ -19,7 +19,7 @@ If yes, the monitorability story becomes much weaker. It would suggest that mode
 ## Related Work
 
 - Chen et al., "Reasoning Models Struggle to Control their Chains of Thought" (arXiv:2603.05706): introduces CoT-Control and finds that reasoning models are much worse at controlling their CoT than their final outputs. For example, Claude Sonnet 4.5 gets 2.7% CoT controllability vs. 61.9% output controllability. They also find that CoT controllability increases with scale, decreases with more reasoning effort and RLVR training, and rises slightly when models are told they are monitored. https://arxiv.org/abs/2603.05706
-- METR, "Fine-tuning experiments on CoT controllability" (April 2026): fine-tunes GPT-OSS and Qwen models on small edited-reasoning datasets and finds that OOD CoTControl compliance rises from 2.9% to 8.8% on average across four models. The biggest gains are on casing, word suppression, and adding specified strings. METR notes that this does not yet show reduced monitorability. https://metr.org/blog/2026-04-01-fine-tuning-cot-controllability/
+- METR, "Fine-tuning experiments on CoT controllability" (April 2026): fine-tunes GPT-OSS and Qwen 3.5 models on small edited-reasoning datasets and finds that OOD CoTControl compliance rises from 2.9% to 8.8% on average across four models. The biggest gains are on casing, word suppression, and adding specified strings. METR notes that this does not yet show reduced monitorability. https://metr.org/blog/2026-04-01-fine-tuning-cot-controllability/
 
 ## Our Project
 

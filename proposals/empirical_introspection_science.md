@@ -17,7 +17,7 @@ The main line of evidence comes from concept-injection experiments: find an acti
 
 **"Latent Introspection: Models Can Detect Prior Concept Injections"** — https://arxiv.org/abs/2602.20031
 
-- Finds that Qwen 32B often denies injections in sampled outputs, but logit-lens analysis reveals latent detection signals.
+- Finds that Qwen 3.5 32B often denies injections in sampled outputs, but logit-lens analysis reveals latent detection signals.
 - Prompting with accurate information about introspection mechanisms increases injection sensitivity from about 0.3% to about 39.9%, with only a small false-positive increase.
 - Suggests some introspective information may be present internally but not normally elicited by default chat behavior.
 
@@ -36,7 +36,7 @@ The main line of evidence comes from concept-injection experiments: find an acti
 Overall, the current literature suggests:
 
 - There is real evidence that some models can compute functions of internal perturbations.
-- The effect was first shown in closed Claude models, and has since been replicated or extended in open-source/open-weight models like Qwen and Llama.
+- The effect was first shown in closed Claude models, and has since been replicated or extended in open-source/open-weight models like Qwen 3.5 and Llama.
 - Detection is more robust than semantic identification.
 - Early-layer interventions are easier for models to detect than later-layer interventions.
 - Post-training and prompting can strongly affect whether introspective information reaches the output.

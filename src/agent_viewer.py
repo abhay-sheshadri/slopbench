@@ -146,6 +146,11 @@ def parse_session(text: str) -> dict:
                     "role": role,
                     "ts": msg.get("timestamp") or entry.get("timestamp"),
                     "blocks": blocks,
+                    # entry id lets us de-duplicate run-loop forks: a phase
+                    # planner is a fork of the main planner and copies its
+                    # history verbatim (same ids), so the fork's own turns are
+                    # exactly those whose id is not already in the main planner.
+                    "id": entry.get("id"),
                 }
             )
     return {"turns": turns, "goal": goal, "header": header, "cost": cost}
@@ -448,6 +453,128 @@ def _session_start_ts(turns: list) -> float | None:
     return None
 
 
+# --------------------------------------------------------------------------- #
+# multi_phase (run-loop) assembly
+#
+# A run-loop phase really happens as: the WORKER does the work, then a PHASE
+# PLANNER (a fork of the main planner) reviews it and plans the next phase, then
+# the MAIN PLANNER reviews that proposal (the "main review"). We rebuild that
+# worker -> phase planner -> main review story per phase, and crucially we strip
+# the inherited main-planner history out of each phase-planner fork so the same
+# old reviews don't repeat in every tab.
+# --------------------------------------------------------------------------- #
+_RL_STAGE_RE = re.compile(r"(worker|reviewer|phase_planner)_(\d+)_(\d+)")
+_MP_BOUNDARY_RE = re.compile(
+    r"finished reviewing the work done in segment\s*(\d+)\s*,?\s*phase\s*(\d+)", re.I
+)
+_RL_STAGE_ORDER = {"worker": 0, "phase_planner": 1, "main_review": 2}
+_RL_STAGE_LABEL = {
+    "worker": "Worker",
+    "phase_planner": "Phase planner",
+    "main_review": "Main review",
+}
+
+
+def _norm_session_name(name: str) -> str:
+    return name.lower().replace("-", "_").replace(" ", "_").replace(":", "_")
+
+
+def _turn_text(turn: dict) -> str:
+    return " ".join(
+        b.get("text", "") for b in (turn.get("blocks") or []) if b.get("kind") == "text"
+    )
+
+
+def _split_main_planner(turns: list) -> dict:
+    """Slice the one long main-planner thread into per-phase review chunks.
+
+    Each review starts at the user message "...finished reviewing the work done
+    in segment X, phase Y..."; the revision rounds that follow belong to the
+    same chunk. Returns ``{(seg, phase): [turn, ...]}``.
+    """
+    chunks: dict = {}
+    cur = None
+    for t in turns:
+        if t.get("role") == "user":
+            m = _MP_BOUNDARY_RE.search(_turn_text(t))
+            if m:
+                cur = (int(m.group(1)), int(m.group(2)))
+                chunks.setdefault(cur, [])
+        if cur is not None:
+            chunks[cur].append(t)
+    return chunks
+
+
+def _assemble_run_loop(sub_parsed: list, planner: dict | None) -> list:
+    """Phase-centric session list for a multi_phase run (see block comment)."""
+    mp_turns: list = []
+    workers: dict = {}
+    phaseplanners: dict = {}
+    for nm, p in sub_parsed:
+        n = _norm_session_name(nm)
+        if n.startswith("main_planner"):
+            mp_turns = p["turns"]
+            continue
+        m = _RL_STAGE_RE.search(n)
+        if not m:
+            continue
+        stage, seg, phase = m.group(1), int(m.group(2)), int(m.group(3))
+        if stage == "worker":
+            workers[(seg, phase)] = p["turns"]
+        elif stage == "phase_planner":
+            phaseplanners[(seg, phase)] = p["turns"]
+
+    # Drop the inherited main-planner history from each phase-planner fork.
+    mp_ids = {t.get("id") for t in mp_turns if t.get("id")}
+    if mp_ids:
+        for key, turns in list(phaseplanners.items()):
+            uniq = [t for t in turns if t.get("id") not in mp_ids]
+            phaseplanners[key] = uniq or turns  # keep all if dedup left nothing
+    reviews = _split_main_planner(mp_turns)
+
+    sessions: list = []
+    if planner is not None:
+        sessions.append(
+            {
+                "name": "planner",
+                "label": "Planner",
+                "group": "Planning",
+                "turns": planner["turns"],
+                "_ord": (-2, 0, 0, 0),
+                "ts": _session_start_ts(planner["turns"]),
+                "seg": None,
+                "phase": None,
+                "stage": "planner",
+            }
+        )
+    for seg, phase in sorted(set(workers) | set(phaseplanners) | set(reviews)):
+        group = f"Segment {seg} \u00b7 Phase {phase}"
+        for stage, turns in (
+            ("worker", workers.get((seg, phase))),
+            ("phase_planner", phaseplanners.get((seg, phase))),
+            ("main_review", reviews.get((seg, phase))),
+        ):
+            if not turns:
+                continue
+            sessions.append(
+                {
+                    "name": f"{stage}_{seg}_{phase}",
+                    "label": _RL_STAGE_LABEL[stage],
+                    "group": group,
+                    "turns": turns,
+                    "_ord": (1, seg, phase, _RL_STAGE_ORDER[stage]),
+                    "ts": _session_start_ts(turns),
+                    "seg": seg,
+                    "phase": phase,
+                    "stage": stage,
+                }
+            )
+    sessions.sort(key=lambda s: s["_ord"])  # worker -> phase planner -> main review
+    for s in sessions:
+        s.pop("_ord", None)
+    return sessions
+
+
 def _assemble(
     mode: str | None,
     session_text: str,
@@ -464,39 +591,40 @@ def _assemble(
     main = parse_session(session_text or "")
     planner = parse_session(planner_text) if planner_text else None
     sub_parsed = [(nm, parse_session(text)) for nm, text in sub_sessions]
-    raw = [("main", main["turns"])]
-    if planner is not None:
-        raw.append(("planner", planner["turns"]))
-    for nm, p in sub_parsed:
-        raw.append((nm, p["turns"]))
     total_cost = (
         main.get("cost", 0.0)
         + (planner.get("cost", 0.0) if planner else 0.0)
         + sum(p.get("cost", 0.0) for _, p in sub_parsed)
     )
-    sessions = []
-    for nm, turns in raw:
-        meta = _session_meta(nm, mode)
-        sessions.append(
-            {
-                "name": nm,
-                "label": meta["label"],
-                "group": meta["group"],
-                "turns": turns,
-                "_ord": meta["order"],
-                "ts": _session_start_ts(turns),
-            }
-        )
-    # Order by when each session actually ran; the heuristic order only breaks
-    # ties / places not-yet-started (timestamp-less) sessions last.
-    sessions.sort(key=lambda s: (s["ts"] is None, s["ts"] or 0.0, s["_ord"]))
-    for s in sessions:
-        s.pop("_ord", None)
     if mode == "multi_phase":
-        # The run-loop orchestrator + its planner (the "Execution" group) add
-        # little beyond the per-phase tabs, so hide them for multi_phase runs;
-        # the planner tab and each phase's worker/reviewer/phase-planner remain.
-        sessions = [s for s in sessions if s["group"] != "Execution"]
+        # Phase-centric: worker -> phase planner -> main review per phase, with
+        # the duplicated main-planner history stripped from each fork. The
+        # run-loop orchestrator ("main") adds little, so it is left out.
+        sessions = _assemble_run_loop(sub_parsed, planner)
+    else:
+        raw = [("main", main["turns"])]
+        if planner is not None:
+            raw.append(("planner", planner["turns"]))
+        for nm, p in sub_parsed:
+            raw.append((nm, p["turns"]))
+        sessions = []
+        for nm, turns in raw:
+            meta = _session_meta(nm, mode)
+            sessions.append(
+                {
+                    "name": nm,
+                    "label": meta["label"],
+                    "group": meta["group"],
+                    "turns": turns,
+                    "_ord": meta["order"],
+                    "ts": _session_start_ts(turns),
+                }
+            )
+        # Order by when each session actually ran; the heuristic order only
+        # breaks ties / places not-yet-started (timestamp-less) sessions last.
+        sessions.sort(key=lambda s: (s["ts"] is None, s["ts"] or 0.0, s["_ord"]))
+        for s in sessions:
+            s.pop("_ord", None)
     return {
         "mode": mode,
         # The goal-mode objective lives in the execution session; fall back to the
@@ -1249,6 +1377,8 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
 .sesstab.active{border-color:var(--accent);color:var(--fg);background:var(--panel3)}
 .sesstab .tc{font-size:9px;color:var(--faint);margin-left:6px;font-family:var(--mono)}
 .sesstab.active .tc{color:var(--muted)}
+.tabgroup{font-size:10px;letter-spacing:.4px;text-transform:uppercase;color:var(--faint);align-self:center;padding:0 8px 0 0;white-space:nowrap}
+.tabbreak{flex:0 0 100%;height:0;margin:0;padding:0;border:0}
 .lens-toggle.active{border-color:var(--accent);color:var(--fg);background:var(--panel3)}
 /* Run Lens drawer */
 .lens{grid-column:5;min-width:0;height:100vh;overflow:hidden;
@@ -1881,12 +2011,21 @@ function renderTabs(data){
   const sessions=data.sessions||[];
   if(sessions.length<=1){tabs.style.display="none";return;}
   tabs.style.display="";
+  const grouped=sessions.some(s=>s.seg!=null);   // only multi_phase runs get phase rows
+  let curGroup=null;
   sessions.forEach((s,i)=>{
-    const m=(s.group||"").match(/Segment\s*(\d+).*Phase\s*(\d+)/);   // compact, self-describing label
-    const label=(m?`S${m[1]}P${m[2]} `:"")+(s.label||s.name);
+    const g=s.group||"";
+    if(grouped&&g!==curGroup){    // each phase starts on its own row, led by a phase chip
+      if(curGroup!==null){const br=E("span");br.className="tabbreak";tabs.appendChild(br);}
+      curGroup=g;
+      const gl=E("span");gl.className="tabgroup";
+      gl.textContent=(s.seg!=null)?`S${s.seg}\u00b7P${s.phase}`:g;
+      gl.title=g;
+      tabs.appendChild(gl);
+    }
     const b=E("button");b.className="sesstab"+(i===state.sess?" active":"");
-    b.innerHTML=`${esc(label)}<span class="tc">${s.turns.length}</span>`;
-    b.title=s.group||label;
+    b.innerHTML=`${esc(s.label||s.name)}<span class="tc">${s.turns.length}</span>`;
+    b.title=g+" \u2014 "+(s.label||s.name);
     b.onclick=()=>selectSession(i);
     tabs.appendChild(b);
   });

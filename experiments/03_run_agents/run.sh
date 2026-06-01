@@ -9,11 +9,18 @@ cd "$(dirname "$0")/../.."
 
 # ------------------------------- config ------------------------------------ #
 PROJECTS=(
-    empirical_cot_controllability_steering_vectors
-    empirical_introspection_science
-    empirical_subliminal_backdoors
+    # empirical_cot_controllability_steering_vectors
+    # empirical_introspection_science
+    # empirical_subliminal_backdoors
+    empirical_prompted_false_facts
+    empirical_slop_probes
+    empirical_impossible_tasks_bullshitting
+    empirical_emergent_collusion
+    empirical_reasoning_recontextualization
+    empirical_functional_emotions_wellbeing
+    empirical_nla_auditbench_quirks
 )
-MODES=(goal multi_phase)
+MODES=(multi_phase)
 THINKING=xhigh
 MODEL="anthropic/claude-opus-4-8"   # Claude Opus 4.8
 # --------------------------------------------------------------------------- #

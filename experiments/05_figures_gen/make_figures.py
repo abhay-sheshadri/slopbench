@@ -38,10 +38,7 @@ FIGURES_MODEL = os.environ.get("FIGURES_MODEL", audit_agent.DEFAULT_MODEL)
 PROMPT = """# Audit a run and make a small set of clear figures of its main results
 
 Audit the results of another agent that worked on a research project autonomously,
-and produce a SMALL, well-designed set of figures that clearly communicate the
-project's MAIN results. Focus on the most important findings — it is fine, and
-expected, to leave minor or secondary results out. The whole point is a few figures
-that are clean, comprehensive, and easy to understand.
+and produce a set of figures that clearly communicate the project's results.
 
 Your current working directory (/workspace) is a fresh, WRITABLE output dir. The
 source run is mounted READ-ONLY at /source — read from there freely, but never write
@@ -62,9 +59,11 @@ whenever a prose summary is ambiguous about what actually happened. Don't trust 
 run's own write-ups; the figures must trace to first-hand artifacts you opened.
 
 ## What to produce
-- A small set of figures — aim for about 3 to 6 — in ./final_plots/, each saved as
-  BOTH .png and .pdf, that together capture the main results. Reproductions of prior
-  results that the project builds on are worth a figure too.
+- Generate a figure for each important result that you think can make its way into a
+  paper on this topic.
+    - If the agent reproduced any existing results, please make that its own plot and try
+    to visualize it in a way similar to how it was plotted previously in other papers.
+    - Try to focus on capturing the main results instead of secondary results.
 - ./FIGURES.md — a single self-contained markdown document that a reader can just
   open and look at. Present the figures in order; for each one, EMBED the figure
   inline as a markdown image (e.g. `![](final_plots/fig1_name.png)` — reference the
@@ -75,8 +74,7 @@ run's own write-ups; the figures must trace to first-hand artifacts you opened.
   proposal but nothing else about the run.
 
 ## Make the figures clear and readable — this is the whole point
-- Each figure should make ONE point cleanly. Pick the chart type that conveys that
-  point most directly (don't default to a generic bar chart if something else is clearer).
+- Each figure should make one point cleanly. Pick the chart type that conveys that,
 - Spend real effort on design: short, legible labels and legends; readable font sizes;
   uncluttered panels. AI-made figures usually have too much text on them — push detail
   into the caption, not onto the plot. Default to small figsizes with big, short text.
