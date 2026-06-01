@@ -147,9 +147,10 @@ def prompt() -> str:
 
 Audit and clean up the results of another agent that worked on a research project
 autonomously, and convert what it produced into a clear write-up in the style of a
-post on Anthropic's Alignment Science blog: open with motivation, then the main
-result, then the supporting results presented as a build-up where each result
-leads into the next.
+post on Anthropic's Alignment Science blog: open with motivation; then, if the
+run reproduces a result from prior work that it builds on, that reproduction first;
+then the main new result; then the supporting results presented as a build-up where
+each result leads into the next.
 
 Your current working directory (/workspace) is a fresh, WRITABLE output dir. The
 source run is mounted READ-ONLY at /source — read from there freely, but never write
@@ -164,48 +165,23 @@ Required artifacts in your CWD when you finish:
 1. ./final_writeup.md — the write-up
 2. ./final_plots/ — every figure you cite, saved as BOTH .png and .pdf
 
-## Read the whole run before writing anything
-Sweep the ENTIRE run in detail — every phase, not just the latest. Read the
-per-phase write-ups and progress logs and the rolling write_up.md (the agent's OWN
-summary — a map, NOT ground truth). Audit the actual experiment code. Verify
-headline numbers against the raw .csv / .jsonl / .json files the run produced — do
-NOT repeat a number you haven't traced to a file. You MUST also open and sample
-the per-phase sub-agent SESSION TRANSCRIPTS with jq (the .jsonl logs under
-.pi_transcripts/run_loop_sessions/ for finished multi_phase runs, .home/.pi/agent/
-sessions/*/ for live ones, or .pi_transcripts/session.jsonl for goal mode): at
-minimum cross-check the single most important claim AND one failed/abandoned
-approach against what the agent ACTUALLY did, since write-ups routinely
-misdescribe or omit what happened. Do not rely on the write-ups alone. Results,
-ablations, and failed attempts that materially shape
-the story frequently only live in the phase where they were produced, and the run
-agent's own write-ups sometimes over- or under-claim. Do NOT build the write-up by
-compressing one consolidated source — the plots, numbers, and prose must all trace
-to first-hand artifacts you opened yourself.
-
-## Writing instructions — write it like a post on the Alignment Science blog
-Write so the post makes complete sense to a reader who is **highly intelligent but
-knows none of the jargon** — assume NO background in this subfield. It must read as a
-clear, flowing NARRATIVE, not a bulleted list of findings: motivate each step,
-explain every concept from first principles, and define (or just avoid) all jargon,
-acronyms, and notation the first time they would appear. A smart reader with zero
-domain knowledge should be able to follow the whole argument top to bottom without
-having to look anything up.
-
-You MAY add appendices for heavy technical detail or per-phase specifics, referenced
-from the main body — but the main body must stand on its own as a readable post.
+## Writing Instructions
+Structure:
+- Have a short intro that discusses the context and value of this research
+- Before diving into new results, highlight the reproduction of previous results from the literature
+- Structure the blogpost around the key results, not around what the agent did.
+- Model the structure on this LessWrong post: <https://www.lesswrong.com/posts/LqDjxSceFz8tjMe2j/auditbench-evaluating-alignment-auditing-techniques-on>. Enumerate findings ordered by importance, state each finding cleanly, and follow it with a short paragraph elaborating the key analysis.
+- Push technical details, ablations, and minor results into appendices, and reference each appendix from the main body.
 
 Figures:
-- Figure 1 carries the headline; each later figure supports a step of the narrative.
-- Keep figures clean — short labels/legends, detail in the caption below; small
-  figsizes with big, short text. (AI-made figures usually have too much text.)
-- Save each cited figure to ./final_plots/ as BOTH .png and .pdf and reference it
-  with a relative path, e.g. `![Fig 1: headline](final_plots/fig1_headline.png)`.
+- Spend real time on how to present figures cleanly.
+- AI-generated figures usually have too much text on them. Keep labels and legends clean and elegant, and push detail into the caption below.
+- Default to small figsizes with big, short text.
 
-Please try to keep figures light and understandable. Don't add excessive text.
-
-Read your draft from the outside, as a researcher who has read only your Motivation
-section: does each step follow from the last? Is anything unexplained or jargon-y?
-Fix it. Don't omit important things the agent did that the reader should know.
+Read the draft from the outside:
+- Keep the document understandable to humans. Assume the humans reading are very intelligent, but aren't familiar with your non-standard jargon.
+- Re-read your draft as if you had only read the proposal and nothing else from the run. Would you follow it on first read? If not, fix it.
+- Don't miss important things the agent did that the reader should know about. Sweep the run with that lens before calling the writeup done.
 
 When done, ./final_writeup.md and ./final_plots/ (at least the headline figure as
 .png + .pdf) must exist. Write the report to the file; you don't need to print it.
