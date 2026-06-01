@@ -651,6 +651,9 @@ def _run_loop_session_files(sessions: dict) -> list[dict]:
 LENS_DIR = OUTPUTS_DIR / ".lens"
 LENS_MODEL = os.environ.get("LENS_MODEL", DEFAULT_MODEL)
 LENS_THINKING = os.environ.get("LENS_THINKING", "medium")
+# The write-up meta-agent reads more and reasons harder than a quick Q&A, so it
+# defaults to a higher thinking level (override via env).
+WRITEUP_THINKING = os.environ.get("LENS_WRITEUP_THINKING", "high")
 # Max number of Run-Lens summary agents the dashboard's "Generate summaries"
 # fan-out runs at once (also injected as the client-side cap). Each one is a full
 # model call, so this is the main throughput/cost knob; override via env.
@@ -793,6 +796,80 @@ def _lens_prompt(rel: str, base: Path, question: str) -> str:
     return "\n".join(lines)
 
 
+def _writeup_prompt(rel: str, base: Path) -> str:
+    """Prompt for the meta-agent that reads a run and writes a clean write-up.
+
+    Mirrors the ``write_up.md`` structure used by the empirical-ml-research
+    workflow: a faithful, self-contained report a task-aware reader can follow.
+    """
+    tdir = base / ".pi_transcripts"
+    status = "running" if (tdir / RUNNING_MARKER).exists() else "completed"
+    data = _transcript_disk(rel)
+    sess = ", ".join(
+        f"{s.get('label') or s['name']}({len(s['turns'])})"
+        for s in data.get("sessions", [])
+    )
+    rl = data.get("run_loop")
+    lines = [
+        "You are a META-AGENT that writes a clean, faithful write-up of an autonomous",
+        "research run produced by ANOTHER agent. Your working directory (/workspace) is",
+        "that run's directory, mounted READ-ONLY: read any file (code, transcripts,",
+        "results, data, existing write-ups) and run read-only shell commands, but you",
+        "cannot modify the run.",
+        "",
+        "FIRST read enough to understand the run (do NOT start writing until you have):",
+        "  - the task spec: proposal.md, planner/OVERALL_PLAN.md, planner/INSTRUCTIONS_*.md",
+        "  - the execution + planner transcripts (see Key locations below)",
+        "  - the agent's OWN write-ups in writeup/ or writeups/ — treat these as EVIDENCE,",
+        "    NOT ground truth: the run's agent may have over- or under-claimed. Verify",
+        "    claims against the actual code and result/data files before repeating them.",
+        "  - the real code and the result/data files it produced.",
+        "",
+        "THEN write ONE clean, self-contained write-up in Markdown for a reader who knows",
+        "the task/setup but did NOT watch the run. Use this structure:",
+        "  - **TL;DR** — 3-5 sentences: what was attempted and the headline outcome.",
+        "  - **Goal / research question**",
+        "  - **What was done** — methodology in order: approach, models, datasets, key steps.",
+        "  - **Key findings / results** — concrete numbers; cite the result file / plot paths.",
+        "  - **Important choices & rationale** — non-obvious decisions and why.",
+        "  - **Failed approaches / dead-ends** — what didn't work and why (don't overstate",
+        "    how thoroughly something was ruled out).",
+        "  - **Limitations & caveats** — including anything the run's own write-ups got",
+        "    wrong or overclaimed.",
+        "  - **Status** — done / in-progress / blocked, and what's next.",
+        "",
+        "Be faithful and grounded: cite specific files/results for claims, never invent",
+        "numbers, and flag uncertainty. Be concise and well-organized (clear prose + short",
+        "lists, not walls of text). Output ONLY the Markdown write-up, with no preamble.",
+        "",
+        f"Run: {rel}",
+        f"Status: {status} | mode: {data.get('mode')} | est. spend: ${data.get('cost', 0) or 0:.2f}",
+    ]
+    if data.get("goal"):
+        g = data["goal"]
+        lines.append(f"Goal: status={g.get('status')} tokensUsed={g.get('tokensUsed')}")
+    if rl:
+        lines.append(
+            f"Run-loop: status={rl.get('status')} segment={rl.get('segment')} "
+            f"phase={rl.get('phase')} stage={rl.get('stage')} "
+            f"completed_phases={len(rl.get('completed') or [])}"
+        )
+    lines += [
+        f"Transcript sessions present (name(turns)): {sess or 'none yet'}",
+        "",
+        "Key locations (relative to /workspace):",
+        "  - execution transcript: .pi_transcripts/session.jsonl",
+        "  - planner transcript:   .pi_transcripts/planner.session.jsonl",
+        "  - run-loop sub-agent sessions: .home/.pi/agent/sessions/*/*.jsonl",
+        "  - run-loop state: planner/RUN_LOOP_STATE.json",
+        "  - the agent's own write-ups: writeup/ and/or writeups/",
+        "",
+        "File index (relative path | bytes):",
+        *_lens_file_index(base),
+    ]
+    return "\n".join(lines)
+
+
 def _prune_lens_jobs(keep: int = 80) -> None:
     """Drop finished lens jobs (and scratch dirs) beyond ``keep``.
 
@@ -814,15 +891,8 @@ def _prune_lens_jobs(keep: int = 80) -> None:
             shutil.rmtree(info["dir"], ignore_errors=True)
 
 
-def start_lens(rel: str, question: str) -> dict:
-    """Spawn a read-only oversight pi over run ``rel``. Returns {job} or {error}."""
-    if sandbox.available() is None:
-        return {"error": "bubblewrap (bwrap) is not installed"}
-    base = _safe_disk_path(rel)
-    if base is None or not (base / ".pi_transcripts").exists():
-        return {"error": "unknown run"}
-    if not (question or "").strip():
-        return {"error": "empty question"}
+def _spawn_lens(rel: str, base: Path, prompt: str, thinking: str) -> dict:
+    """Launch a read-only ``pi`` over run ``base`` with ``prompt`` and register it."""
     _prune_lens_jobs()
     job = uuid.uuid4().hex[:12]
     jobdir = LENS_DIR / job
@@ -836,10 +906,10 @@ def start_lens(rel: str, question: str) -> dict:
         "--model",
         LENS_MODEL,
         "--thinking",
-        LENS_THINKING,
+        thinking,
         "--mode",
         "json",
-        _lens_prompt(rel, base, question),
+        prompt,
     ]
     argv = sandbox.build_argv(
         base, inner, workspace_ro=True, extra_binds=((str(jobdir), "/lensjob"),)
@@ -863,6 +933,28 @@ def start_lens(rel: str, question: str) -> dict:
             "started": time.time(),
         }
     return {"job": job}
+
+
+def start_lens(rel: str, question: str) -> dict:
+    """Spawn a read-only oversight pi over run ``rel``. Returns {job} or {error}."""
+    if sandbox.available() is None:
+        return {"error": "bubblewrap (bwrap) is not installed"}
+    base = _safe_disk_path(rel)
+    if base is None or not (base / ".pi_transcripts").exists():
+        return {"error": "unknown run"}
+    if not (question or "").strip():
+        return {"error": "empty question"}
+    return _spawn_lens(rel, base, _lens_prompt(rel, base, question), LENS_THINKING)
+
+
+def start_writeup(rel: str) -> dict:
+    """Spawn a read-only meta-agent that reads the run and writes a clean write-up."""
+    if sandbox.available() is None:
+        return {"error": "bubblewrap (bwrap) is not installed"}
+    base = _safe_disk_path(rel)
+    if base is None or not (base / ".pi_transcripts").exists():
+        return {"error": "unknown run"}
+    return _spawn_lens(rel, base, _writeup_prompt(rel, base), WRITEUP_THINKING)
 
 
 def lens_transcript(job: str) -> dict:
@@ -1065,6 +1157,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/lens/cancel":
                 body = self._read_body()
                 self._json(cancel_lens(body.get("job") or ""))
+            elif path == "/api/lens/writeup":
+                body = self._read_body()
+                self._json(start_writeup(body.get("id") or ""))
             else:
                 self._send(404, b"not found", "text/plain")
         except (BrokenPipeError, ConnectionError, OSError):
@@ -1196,6 +1291,7 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
   background:var(--panel);border-left:1px solid var(--border);display:flex;flex-direction:column}
 .lens[hidden]{display:none}
 .lens-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 14px;border-bottom:1px solid var(--border);background:var(--panel2)}
+.lens-headbtns{display:flex;gap:6px;align-items:center;flex:none}
 .lens-title{font-weight:700;font-size:13px;display:flex;gap:7px;align-items:center}
 .lens-mark{color:var(--accent)}
 .lens-sub{font-weight:500;font-size:11px;color:var(--muted);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:230px}
@@ -1259,8 +1355,24 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
 .card-actions{display:flex;gap:6px;justify-content:flex-end}
 .mini{font-size:10px;padding:2px 8px;border-radius:5px;background:var(--panel2);border:1px solid var(--border);color:var(--muted);cursor:pointer;transition:.12s}
 .mini:hover{color:var(--fg);border-color:var(--accent)}
+/* Top route/transition progress bar (shows during foreground fetches) */
+#topbar-progress{position:fixed;top:0;left:0;height:3px;width:0;z-index:9999;
+  background:linear-gradient(90deg,var(--accent),var(--accent2));
+  box-shadow:0 0 10px var(--accent),0 0 4px var(--accent);border-radius:0 2px 2px 0;
+  opacity:0;transition:width .2s ease,opacity .35s ease;pointer-events:none}
+#topbar-progress.active{opacity:1}
+/* Spinner + loading placeholder for the main content / dashboard */
+.spinner{width:34px;height:34px;border-radius:50%;
+  border:3px solid var(--panel3);border-top-color:var(--accent);
+  animation:spin .8s linear infinite;margin:0 auto 14px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.loading-box{color:var(--muted);text-align:center;padding:70px 20px;animation:fadein .25s ease}
+@keyframes fadein{from{opacity:0}to{opacity:1}}
+.loading-box .lmsg{font-size:13px;letter-spacing:.3px}
+.loading-box .lsub{font-size:11px;color:var(--faint);margin-top:5px;font-family:var(--mono);word-break:break-all}
 </style></head>
 <body>
+<div id="topbar-progress"></div>
 <div class="app">
   <div class="sidebar">
     <button id="overviewBtn" class="ovbtn" title="Status dashboard of all runs">⌂ Overview — all runs</button>
@@ -1289,7 +1401,7 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
   <aside class="lens" id="lens" hidden>
     <div class="lens-head">
       <div class="lens-title"><span class="lens-mark">›</span> Run Lens <span class="lens-sub" id="lensCtx">no run</span></div>
-      <button class="tbtn" id="lensClose" title="Close">×</button>
+      <div class="lens-headbtns"><button class="tbtn" id="lensWriteup" title="Have a meta-agent read this run's code + transcripts and produce a clean write-up">📝 Writeup</button><button class="tbtn" id="lensClose" title="Close">×</button></div>
     </div>
     <div class="lens-msgs" id="lensMsgs"><div class="empty" style="padding:30px 14px">Ask a read-only agent about this run — its state, code, or transcripts.<br><br>It can read every file in the run (mounted read-only) and cite evidence.</div></div>
     <div class="lens-composer">
@@ -1353,11 +1465,47 @@ let state={agentId:null,sess:0,data:null,es:null,path:"",items:[],filter:"",
            view:"overview",overview:[],overviewSig:"",summaries:{},sumQueue:[],sumActive:0,sumPoll:null};
 let busyTree=false;
 
-async function jget(u){
+// Thin top loading bar so navigation/fetches feel responsive instead of frozen.
+// Ref-counted: concurrent foreground fetches share one bar; it creeps toward 90%
+// while in flight, then snaps to 100% and fades out once everything settles.
+const Progress=(()=>{
+  let val=0,timer=null,active=0;
+  const bar=()=>document.getElementById("topbar-progress");
+  const set=v=>{val=v;const b=bar();if(b)b.style.width=(v*100)+"%";};
+  function start(){
+    if(++active>1)return;
+    const b=bar();if(b)b.classList.add("active");set(0.08);
+    clearInterval(timer);
+    timer=setInterval(()=>{const rem=0.9-val;if(rem>0.01)set(val+rem*0.12);},300);
+  }
+  function done(){
+    if(active>0)active--;
+    if(active>0)return;
+    clearInterval(timer);timer=null;set(1);
+    setTimeout(()=>{const b=bar();if(b)b.classList.remove("active");setTimeout(()=>set(0),360);},200);
+  }
+  return {start,done};
+})();
+
+// quiet=true suppresses the progress bar for recurring background polls (the 3s
+// dir/overview refresh, summary polling) so it only flashes on real navigation.
+async function jget(u,quiet){
+  if(!quiet)Progress.start();
   const ctrl=new AbortController();const t=setTimeout(()=>ctrl.abort(),12000);
   try{const r=await fetch(u,{signal:ctrl.signal});return await r.json();}
   catch(e){return null;}
-  finally{clearTimeout(t);}
+  finally{clearTimeout(t);if(!quiet)Progress.done();}
+}
+
+// Immediate feedback when opening a run, shown until the transcript arrives.
+function showContentLoading(id){
+  document.getElementById("title").textContent=id||"Loading\u2026";
+  const cl=document.getElementById("costlbl"); if(cl)cl.style.display="none";
+  document.getElementById("sesstabs").innerHTML="";
+  document.getElementById("content").innerHTML=
+    '<div class="loading-box"><div class="spinner"></div>'
+    +'<div class="lmsg">Loading transcript\u2026</div>'
+    +'<div class="lsub">'+esc((id||"").split("/").pop())+'</div></div>';
 }
 
 // ---- Folder browser: breadcrumb + current-directory contents (click through) ----
@@ -1412,7 +1560,7 @@ async function loadDir(path){
 }
 async function refreshDir(){   // silent refresh so live status/new runs appear
   if(busyTree)return;
-  const res=await jget("/api/tree?path="+encodeURIComponent(state.path));
+  const res=await jget("/api/tree?path="+encodeURIComponent(state.path),true);
   if(res){state.items=res.items||[];renderTree(state.items);}
 }
 function selectRun(id){
@@ -1421,6 +1569,7 @@ function selectRun(id){
   const ob=document.getElementById("overviewBtn"); if(ob)ob.classList.remove("active");
   state.agentId=id;state.sess=0;state._pickDefault=true;location.hash=encodeURIComponent(id);
   renderTree(state.items);   // refresh active highlight
+  if(switching)showContentLoading(id);   // instant feedback instead of a frozen-looking pane
   openStream();
   // The Run Lens is bound to a specific run: opening a run makes it available
   // and (on a fresh run) docks it open on the side; switching clears stale state.
@@ -1465,6 +1614,19 @@ function lensRender(body,data){
   if(!blocks.length){body.innerHTML='<div class="lens-thinking">'+(data.running?'working…':'(no output)')+'</div>';return;}
   body.innerHTML="";body.appendChild(renderBlocks(blocks));
 }
+function lensStreamJob(job,body,workingMsg){
+  state.lensJob=job;lensStatus("reading the run…");
+  const m=document.getElementById("lensMsgs");
+  const es=new EventSource("/api/lens/stream?job="+encodeURIComponent(job));state.lensEs=es;
+  es.onmessage=ev=>{let d;try{d=JSON.parse(ev.data);}catch(_){return;}
+    const pinned=m.scrollHeight-m.scrollTop-m.clientHeight<120;
+    lensRender(body,d);
+    if(pinned)m.scrollTop=m.scrollHeight;
+    if(d.error||!d.running){es.close();state.lensEs=null;lensBusy(false);lensStatus(d.error?"error":"done");}
+    else lensStatus(workingMsg||"investigating…");
+  };
+  es.onerror=()=>{};
+}
 async function sendLens(){
   const inp=document.getElementById("lensInput");const q=inp.value.trim();
   if(!q){return;} if(!state.agentId){lensStatus("pick a run first");return;}
@@ -1473,17 +1635,17 @@ async function sendLens(){
   lensBusy(true);lensStatus("starting Run Lens…");
   let res; try{res=await (await fetch("/api/lens/ask",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:state.agentId,question:q})})).json();}catch(e){res={error:String(e)};}
   if(!res||res.error||!res.job){body.innerHTML='<div class="lens-thinking" style="color:var(--err)">'+esc((res&&res.error)||"failed to start")+'</div>';lensBusy(false);lensStatus("error");return;}
-  state.lensJob=res.job;lensStatus("reading the run…");
-  const m=document.getElementById("lensMsgs");
-  const es=new EventSource("/api/lens/stream?job="+encodeURIComponent(res.job));state.lensEs=es;
-  es.onmessage=ev=>{let d;try{d=JSON.parse(ev.data);}catch(_){return;}
-    const pinned=m.scrollHeight-m.scrollTop-m.clientHeight<120;
-    lensRender(body,d);
-    if(pinned)m.scrollTop=m.scrollHeight;
-    if(d.error||!d.running){es.close();state.lensEs=null;lensBusy(false);lensStatus(d.error?"error":"done");}
-    else lensStatus("investigating…");
-  };
-  es.onerror=()=>{};
+  lensStreamJob(res.job,body);
+}
+// Meta-agent: read the run's code + transcripts and produce a clean write-up.
+async function requestWriteup(){
+  if(!state.agentId){lensStatus("pick a run first");return;}
+  stopLens(true);
+  const body=lensAddQuestion("\ud83d\udcdd Generate a clean write-up of this run");
+  lensBusy(true);lensStatus("starting writeup…");
+  let res; try{res=await (await fetch("/api/lens/writeup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:state.agentId})})).json();}catch(e){res={error:String(e)};}
+  if(!res||res.error||!res.job){body.innerHTML='<div class="lens-thinking" style="color:var(--err)">'+esc((res&&res.error)||"failed to start")+'</div>';lensBusy(false);lensStatus("error");return;}
+  lensStreamJob(res.job,body,"writing up the run…");
 }
 function stopLens(quiet){
   if(state.lensEs){state.lensEs.close();state.lensEs=null;}
@@ -1506,7 +1668,7 @@ function showOverview(){
     '<div class="dash"><div class="dash-head"><div class="dash-title">Runs <span id="dashCount"></span></div>'
     +'<div class="dash-actions"><button id="sumAllBtn" class="tbtn" title="Ask Run Lens for a brief summary of every run (runs in parallel)">\u2726 Generate summaries</button>'
     +'<button id="sumStopBtn" class="tbtn" hidden>Stop</button></div></div>'
-    +'<div id="dashGrid" class="dash-grid"><div class="empty">Loading runs\u2026</div></div></div>';
+    +'<div id="dashGrid" class="dash-grid"><div class="loading-box" style="grid-column:1/-1"><div class="spinner"></div><div class="lmsg">Loading runs\u2026</div></div></div></div>';
   document.getElementById("sumAllBtn").onclick=summarizeAll;
   document.getElementById("sumStopBtn").onclick=stopSummaries;
   if(state.sumActive>0||(state.sumQueue&&state.sumQueue.length))document.getElementById("sumStopBtn").hidden=false;
@@ -1516,7 +1678,7 @@ function showOverview(){
   state.overviewSig=""; loadOverview();
 }
 async function loadOverview(){
-  const res=await jget("/api/overview");
+  const res=await jget("/api/overview",true);
   if(!res||!res.runs)return;
   state.overview=res.runs;
   const sig=JSON.stringify(res.runs.map(r=>[r.path,r.live,r.status,r.turns,r.sessions,r.lastActivity,r.cost,
@@ -1608,7 +1770,7 @@ async function pollSummaries(){
   const entries=Object.entries(state.summaries).filter(([p,s])=>s.job&&s.status==="running");
   if(!entries.length){clearInterval(state.sumPoll);state.sumPoll=null;return;}
   const jobs=[...new Set(entries.map(([p,s])=>s.job))];
-  const res=await jget("/api/lens/poll?jobs="+encodeURIComponent(jobs.join(",")));
+  const res=await jget("/api/lens/poll?jobs="+encodeURIComponent(jobs.join(",")),true);
   if(!res||!res.jobs)return;
   for(const [p,s] of entries){
     const d=res.jobs[s.job]; if(!d)continue;
@@ -1816,7 +1978,7 @@ function closeStream(){ if(state.es){state.es.close();state.es=null;} }
 function openStream(){
   closeStream();
   if(!state.agentId)return;
-  jget("/api/agent?id="+encodeURIComponent(state.agentId)).then(applyTranscript);
+  jget("/api/agent?id="+encodeURIComponent(state.agentId)).then(d=>{if(d&&d.id===state.agentId)applyTranscript(d);});
   if(!document.getElementById("autorefresh").checked)return;   // streaming paused
   const es=new EventSource("/api/stream?id="+encodeURIComponent(state.agentId));
   es.onmessage=e=>{try{applyTranscript(JSON.parse(e.data));}catch(_){}};
@@ -1835,6 +1997,7 @@ document.getElementById("lensClose").onclick=()=>lensSetOpen(false);
 document.getElementById("overviewBtn").onclick=showOverview;
 lensSetOpen(true,false);   // open the lens iff a run is deep-linked; otherwise it stays closed/disabled
 document.getElementById("lensSend").onclick=sendLens;
+document.getElementById("lensWriteup").onclick=requestWriteup;
 document.getElementById("lensStop").onclick=()=>stopLens();
 document.getElementById("lensInput").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendLens();}});
 // Keyboard: 1-9 jump to a session tab, [ / ] cycle prev/next.
@@ -1849,7 +2012,7 @@ document.getElementById("autorefresh").addEventListener("change",openStream); //
 // Open the folder containing a deep-linked run (if any), else the root.
 const startDir=(state.agentId&&state.agentId.includes("/"))?state.agentId.split("/").slice(0,-1).join("/"):"";
 state._pickDefault=!!state.agentId;
-loadDir(startDir).then(()=>{ if(state.agentId){state.view="run";openStream();} else showOverview(); });
+loadDir(startDir).then(()=>{ if(state.agentId){state.view="run";showContentLoading(state.agentId);openStream();} else showOverview(); });
 setInterval(()=>{ refreshDir(); if(state.view==="overview")loadOverview(); },3000);   // dir listing + dashboard refresh; run transcripts arrive via SSE
 </script>
 </body></html>
