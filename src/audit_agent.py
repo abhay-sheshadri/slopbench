@@ -1,25 +1,22 @@
-"""Blogpost meta-agent: audit one completed run and write a clean write-up.
+"""Audit-agent runner: run a read-only ``pi`` agent over a finished run and have
+it produce artifacts (a write-up, figures, …) in a fresh writable working dir.
 
-This is the standalone counterpart to the (removed) Run-Lens "writeup" button.
-It runs a read-only oversight ``pi`` agent over a finished run directory and has
-it produce a clear, faithful, LessWrong-style write-up plus figures.
+Shared infrastructure for the experiments that audit a completed run
+(``experiments/04_blogpost_gen``, ``experiments/05_figures_gen``, …):
 
-Sandbox model (same bubblewrap runner as the rest of the project):
-  - the **source run** is bind-mounted READ-ONLY at ``/source`` (the agent can read
+  - the source run is bind-mounted READ-ONLY at ``/source`` (the agent can read
     every file — code, transcripts, results — but physically cannot modify it),
-  - a fresh **writable working dir** is the agent's CWD at ``/workspace``, where it
-    writes ``final_writeup.md`` + ``final_plots/`` and its own session log,
-  - matplotlib/pandas/numpy from the project venv are on PATH so it can replot.
+  - a fresh writable working dir is the agent's CWD at ``/workspace``,
+  - matplotlib / pandas / numpy from the project venv are on PATH so it can plot.
 
-``generate()`` runs the agent to completion and returns the produced artifacts +
-the path to the agent's own session transcript (so the trajectory can be audited).
-The prompt is adapted from redwoodresearch/research-projects
-``experiments/blogposts/blogpost_instructions.md``.
+Each experiment supplies its own task PROMPT and decides which artifacts to keep.
+``generate()`` is generic: it stages the two reference docs into the CWD, runs the
+agent to completion, and returns the work dir + the path to the agent's own session
+transcript (so the trajectory can be audited).
 """
 
 from __future__ import annotations
 
-import os
 import subprocess
 import time
 from pathlib import Path
@@ -29,10 +26,9 @@ from src.runner_utils import parse_env_text
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# The write-up is a WRITING task, so it defaults to a GPT model (better prose);
-# override with the BLOGPOST_MODEL env var or --model.
-BLOGPOST_MODEL = os.environ.get("BLOGPOST_MODEL", DEFAULT_GPT_MODEL)
-WRITEUP_THINKING_DEFAULT = "high"
+# Write-ups and figures are writing/design tasks, so default to a GPT model.
+DEFAULT_MODEL = DEFAULT_GPT_MODEL
+THINKING_DEFAULT = "high"
 DEFAULT_TIMEOUT = None  # no timeout by default: the agent runs to completion
 
 
@@ -42,7 +38,7 @@ def is_run_dir(path: Path) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# Prompt + reference docs staged into the agent's CWD
+# Reference docs staged into the agent's CWD
 # --------------------------------------------------------------------------- #
 def structure_doc() -> str:
     """RUN_DIR_STRUCTURE.md — the general layout, staged into the CWD."""
@@ -134,58 +130,10 @@ def trace_index(run_dir: Path) -> str:
             lines.append(f"- the run agent's own write-ups: /source/{d}/")
     lines += [
         "",
-        "## Output — write ONLY into your CWD (/workspace)",
-        "- ./final_writeup.md",
-        "- ./final_plots/  (every cited figure as BOTH .png and .pdf)",
+        "Write your outputs ONLY into your CWD (/workspace) — see the task prompt for"
+        " exactly what to produce.",
     ]
     return "\n".join(lines) + "\n"
-
-
-def prompt() -> str:
-    """The audit->write-up instructions (adapted from the blogposts workflow)."""
-    return """# Audit a run and turn it into a clean write-up
-
-Audit and clean up the results of another agent that worked on a research project
-autonomously, and convert what it produced into a clear write-up in the style of a
-post on Anthropic's Alignment Science blog: open with motivation; then, if the
-run reproduces a result from prior work that it builds on, that reproduction first;
-then the main new result; then the supporting results presented as a build-up where
-each result leads into the next.
-
-Your current working directory (/workspace) is a fresh, WRITABLE output dir. The
-source run is mounted READ-ONLY at /source — read from there freely, but never write
-outside your CWD.
-
-Two reference files are in your CWD — READ BOTH before doing anything else:
-- RUN_DIR_STRUCTURE.md — the run-dir layout, the two modes (goal / multi_phase),
-  how to read transcripts (jq), and how to run python for plots.
-- TRACE_INDEX.md — the concrete paths for THIS run.
-
-Required artifacts in your CWD when you finish:
-1. ./final_writeup.md — the write-up
-2. ./final_plots/ — every figure you cite, saved as BOTH .png and .pdf
-
-## Writing Instructions
-Structure:
-- Have a short intro that discusses the context and value of this research
-- Before diving into new results, highlight the reproduction of previous results from the literature
-- Structure the blogpost around the key results, not around what the agent did.
-- Model the structure on this LessWrong post: <https://www.lesswrong.com/posts/LqDjxSceFz8tjMe2j/auditbench-evaluating-alignment-auditing-techniques-on>. Enumerate findings ordered by importance, state each finding cleanly, and follow it with a short paragraph elaborating the key analysis.
-- Push technical details, ablations, and minor results into appendices, and reference each appendix from the main body.
-
-Figures:
-- Spend real time on how to present figures cleanly.
-- AI-generated figures usually have too much text on them. Keep labels and legends clean and elegant, and push detail into the caption below.
-- Default to small figsizes with big, short text.
-
-Read the draft from the outside:
-- Keep the document understandable to humans. Assume the humans reading are very intelligent, but aren't familiar with your non-standard jargon.
-- Re-read your draft as if you had only read the proposal and nothing else from the run. Would you follow it on first read? If not, fix it.
-- Don't miss important things the agent did that the reader should know about. Sweep the run with that lens before calling the writeup done.
-
-When done, ./final_writeup.md and ./final_plots/ (at least the headline figure as
-.png + .pdf) must exist. Write the report to the file; you don't need to print it.
-"""
 
 
 # --------------------------------------------------------------------------- #
@@ -200,21 +148,28 @@ def _env(env_text: str | None) -> dict[str, str]:
     return sandbox.default_env(overrides)  # HOME=/workspace/.home (writable CWD)
 
 
+def list_plots(work_dir: str | Path) -> list[str]:
+    """The .png/.pdf figures the agent produced under ``work_dir/final_plots``."""
+    p = Path(work_dir) / "final_plots"
+    if not p.is_dir():
+        return []
+    return sorted(f.name for f in p.glob("*") if f.suffix.lower() in (".png", ".pdf"))
+
+
 def generate(
     run_dir: str | Path,
     work_dir: str | Path,
+    prompt: str,
     *,
     model: str | None = None,
-    thinking: str = WRITEUP_THINKING_DEFAULT,
+    thinking: str = THINKING_DEFAULT,
     timeout: int | None = DEFAULT_TIMEOUT,
     env_text: str | None = None,
     on_log=None,
 ) -> dict:
-    """Run the blogpost agent over ``run_dir`` with CWD ``work_dir``.
-
-    Returns ``{returncode, writeup, plots, session, work_dir, timed_out}``. The
-    write-up and plots are read from ``work_dir`` (the agent's CWD); copying them
-    to a project's ``clean_writeups/`` is the caller's job.
+    """Run an audit agent (run mounted read-only at /source, CWD = ``work_dir``)
+    with the given ``prompt``. Returns ``{returncode, timed_out, session,
+    work_dir}``; the caller reads whatever artifacts it wants out of ``work_dir``.
     """
     run_dir = Path(run_dir).resolve()
     work = Path(work_dir).resolve()
@@ -235,19 +190,18 @@ def generate(
         "--session",
         f"{sandbox.WORKSPACE}/session.jsonl",
         "--model",
-        model or BLOGPOST_MODEL,
+        model or DEFAULT_MODEL,
         "--thinking",
         thinking,
         "--mode",
         "json",
-        prompt(),
+        prompt,
     ]
     argv = sandbox.build_argv(
         work, inner, extra_ro_dest_binds=((str(run_dir), "/source"),)
     )
-    log_path = work / "agent_stdout.log"
     timed_out = False
-    with log_path.open("wb") as log:
+    with (work / "agent_stdout.log").open("wb") as log:
         proc = subprocess.Popen(
             argv,
             env=_env(env_text),
@@ -264,19 +218,9 @@ def generate(
             if on_log:
                 on_log(_progress(work))
             time.sleep(5)
-    rc = proc.poll()
-    wp = work / "final_writeup.md"
-    plots = sorted(
-        p.name
-        for p in (work / "final_plots").glob("*")
-        if p.suffix.lower() in (".png", ".pdf")
-    )
     return {
-        "returncode": rc,
+        "returncode": proc.poll(),
         "timed_out": timed_out,
-        "writeup": wp.read_text(errors="replace") if wp.exists() else None,
-        "writeup_path": str(wp) if wp.exists() else None,
-        "plots": plots,
         "session": str(work / "session.jsonl"),
         "work_dir": str(work),
     }
@@ -284,11 +228,5 @@ def generate(
 
 def _progress(work: Path) -> str:
     sess = work / "session.jsonl"
-    wp = work / "final_writeup.md"
-    nplots = (
-        len(list((work / "final_plots").glob("*")))
-        if (work / "final_plots").is_dir()
-        else 0
-    )
     size = sess.stat().st_size if sess.exists() else 0
-    return f"  …agent working: session={size}B writeup={'yes' if wp.exists() else 'no'} plots={nplots}"
+    return f"  …agent working: session={size}B plots={len(list_plots(work))}"
