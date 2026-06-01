@@ -19,15 +19,19 @@ The prompt is adapted from redwoodresearch/research-projects
 
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from pathlib import Path
 
-from src import DEFAULT_MODEL, sandbox
+from src import DEFAULT_GPT_MODEL, sandbox
 from src.runner_utils import parse_env_text
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# The write-up is a WRITING task, so it defaults to a GPT model (better prose);
+# override with the BLOGPOST_MODEL env var or --model.
+BLOGPOST_MODEL = os.environ.get("BLOGPOST_MODEL", DEFAULT_GPT_MODEL)
 WRITEUP_THINKING_DEFAULT = "high"
 DEFAULT_TIMEOUT = 3600  # seconds
 
@@ -142,10 +146,10 @@ def prompt() -> str:
     return """# Audit a run and turn it into a clean write-up
 
 Audit and clean up the results of another agent that worked on a research project
-autonomously, and convert what it produced into a clear, legible write-up. Open
-with a short framing of the proposal, dive into the key results and takeaways, and
-push technical details, ablations, and minor results into appendices that the main
-body actually references.
+autonomously, and convert what it produced into a clear write-up in the style of a
+post on Anthropic's Alignment Science blog: open with motivation, then the main
+result, then the supporting results presented as a build-up where each result
+leads into the next.
 
 Your current working directory (/workspace) is a fresh, WRITABLE output dir. The
 source run is mounted READ-ONLY at /source — read from there freely, but never write
@@ -178,24 +182,30 @@ agent's own write-ups sometimes over- or under-claim. Do NOT build the write-up 
 compressing one consolidated source — the plots, numbers, and prose must all trace
 to first-hand artifacts you opened yourself.
 
-## Writing instructions
-- One short intro paragraph framing the proposal (the reader already knows the
-  project — don't over-summarize it).
-- Structure the write-up around the KEY RESULTS, not around what the agent did.
-  Enumerate findings ordered by importance; state each finding cleanly, then a
-  short paragraph of the key supporting analysis.
-- Push technical details, ablations, and minor results into appendices, and
-  reference each appendix from the main body.
-- Figure 1 carries the headline: highlight the single most central result
-  immediately, right after the intro.
-- Figures: spend real time presenting them cleanly. AI figures usually have too
-  much text — keep labels/legends short and elegant and push detail into the
-  caption. Default to small figsizes with big, short text. Save each as BOTH .png
-  and .pdf in ./final_plots/ and reference it from the markdown with a relative
-  path, e.g. `![Fig 1: headline](final_plots/fig1_headline.png)`.
-- Read the draft from the outside: keep it understandable to a human who has read
-  only the proposal; cut jargon; if you'd not follow it on first read, fix it.
-  Don't miss important things the agent did that the reader should know.
+## Writing instructions — write it like a post on the Alignment Science blog
+Write so the post makes complete sense to a reader who is **highly intelligent but
+knows none of the jargon** — assume NO background in this subfield. It must read as a
+clear, flowing NARRATIVE, not a bulleted list of findings: motivate each step,
+explain every concept from first principles, and define (or just avoid) all jargon,
+acronyms, and notation the first time they would appear. A smart reader with zero
+domain knowledge should be able to follow the whole argument top to bottom without
+having to look anything up.
+
+You MAY add appendices for heavy technical detail or per-phase specifics, referenced
+from the main body — but the main body must stand on its own as a readable post.
+
+Figures:
+- Figure 1 carries the headline; each later figure supports a step of the narrative.
+- Keep figures clean — short labels/legends, detail in the caption below; small
+  figsizes with big, short text. (AI-made figures usually have too much text.)
+- Save each cited figure to ./final_plots/ as BOTH .png and .pdf and reference it
+  with a relative path, e.g. `![Fig 1: headline](final_plots/fig1_headline.png)`.
+
+Please try to keep figures light and understandable. Don't add excessive text.
+
+Read your draft from the outside, as a researcher who has read only your Motivation
+section: does each step follow from the last? Is anything unexplained or jargon-y?
+Fix it. Don't omit important things the agent did that the reader should know.
 
 When done, ./final_writeup.md and ./final_plots/ (at least the headline figure as
 .png + .pdf) must exist. Write the report to the file; you don't need to print it.
@@ -249,7 +259,7 @@ def generate(
         "--session",
         f"{sandbox.WORKSPACE}/session.jsonl",
         "--model",
-        model or DEFAULT_MODEL,
+        model or BLOGPOST_MODEL,
         "--thinking",
         thinking,
         "--mode",

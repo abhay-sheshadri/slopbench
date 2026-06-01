@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src import DEFAULT_MODEL, blogpost  # noqa: E402
+from src import blogpost  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "run_dir", help="Path to a run/project dir (must contain .pi_transcripts/)."
     )
-    ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--model", default=blogpost.BLOGPOST_MODEL)
     ap.add_argument("--thinking", default=blogpost.WRITEUP_THINKING_DEFAULT)
     ap.add_argument(
         "--timeout",
