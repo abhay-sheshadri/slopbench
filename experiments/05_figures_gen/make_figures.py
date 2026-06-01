@@ -8,7 +8,7 @@ results, optimized for understandability. The source run is mounted READ-ONLY;
 the agent works in a throwaway dir, and only the final artifacts are copied into
 ``outputs/05_figures_gen/<run-name>/``:
     final_plots/*.png|*.pdf
-    FIGURES.md                  (one caption per figure)
+    FIGURES.md                  (each figure embedded inline + its caption)
     figures_agent_session.jsonl (the agent's own trajectory, for auditing)
 
 Usage:
@@ -65,10 +65,14 @@ run's own write-ups; the figures must trace to first-hand artifacts you opened.
 - A small set of figures — aim for about 3 to 6 — in ./final_plots/, each saved as
   BOTH .png and .pdf, that together capture the main results. Reproductions of prior
   results that the project builds on are worth a figure too.
-- ./FIGURES.md — a short markdown index. For each figure, give its filename and a
-  2-4 sentence caption that says, in plain language, what the figure shows, what the
-  numbers are, and why it matters. Each caption must make its figure understandable on
-  its own to a smart reader who knows the proposal but nothing else about the run.
+- ./FIGURES.md — a single self-contained markdown document that a reader can just
+  open and look at. Present the figures in order; for each one, EMBED the figure
+  inline as a markdown image (e.g. `![](final_plots/fig1_name.png)` — reference the
+  .png so it renders) immediately followed by a 2-4 sentence caption in plain
+  language saying what the figure shows, the key numbers, and why it matters. The
+  whole file should read as a clean figure-by-figure summary of the run's main
+  results, each figure understandable on its own to a smart reader who knows the
+  proposal but nothing else about the run.
 
 ## Make the figures clear and readable — this is the whole point
 - Each figure should make ONE point cleanly. Pick the chart type that conveys that
