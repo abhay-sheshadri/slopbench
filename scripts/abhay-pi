@@ -1,7 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 
-ABHAY_PI_DIR="${ABHAY_PI_DIR:-/opt/abhay-pi}"
+# Resolve this script's *real* path even when invoked through a symlink
+# (e.g. /usr/local/bin/pi -> <repo>/scripts/abhay-pi), so the pi clone is
+# located relative to the repo no matter how `pi` is called.
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+REPO_DIR="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
+
+# The pi agent is cloned into this project dir (see scripts/setup_abhay_pi.sh).
+# An explicit $ABHAY_PI_DIR (e.g. set by the sandbox) still wins.
+ABHAY_PI_DIR="${ABHAY_PI_DIR:-$REPO_DIR/abhay-pi}"
 
 IS_SANDBOX="${IS_SANDBOX:-1}" \
     "$ABHAY_PI_DIR/node_modules/.bin/tsx" \

@@ -4,8 +4,9 @@ Replaces the old per-run Docker container. The model is deliberately small:
 
   - the run's output directory is bind-mounted read-write as ``/workspace`` and
     is the agent's cwd; the rest of the host root is hidden,
-  - the host toolchain (OS dirs, node, the pi agent at ``/opt/abhay-pi``, and the
-    project venv + its interpreter) is bind-mounted **read-only**,
+  - the host toolchain (OS dirs, node, the pi agent cloned at ``<repo>/abhay-pi``
+    plus its ``scripts/abhay-pi`` launcher, and the project venv + its
+    interpreter) is bind-mounted **read-only**,
   - a fresh ``/dev`` (``--dev``) means the sandbox never sees the host's
     ``/dev/nvidia*`` devices, so CPU-only runs can't touch the GPUs,
   - ``HOME`` lives inside the workspace (``/workspace/.home``) so the agent's
@@ -31,7 +32,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 WORKSPACE = "/workspace"
 HOME = "/workspace/.home"
-ABHAY_PI_DIR = Path(os.environ.get("ABHAY_PI_DIR", "/opt/abhay-pi"))
+ABHAY_PI_DIR = Path(os.environ.get("ABHAY_PI_DIR", str(ROOT / "abhay-pi")))
+
+# The `pi`/`abhay-pi` launchers in /usr/local/bin are symlinks to this wrapper;
+# bind it so those symlinks resolve inside the sandbox (where the agent runs
+# `pi` directly). /usr/local itself is covered by the /usr read-only bind.
+_PI_WRAPPER = ROOT / "scripts" / "abhay-pi"
 
 # Read-only host OS paths bound into every sandbox (only those that exist are
 # used). These provide bash, coreutils (`timeout`), node, the `pi` launcher under
@@ -66,7 +72,7 @@ def _interpreter_store() -> Path | None:
 
 def toolchain_ro_binds() -> list[Path]:
     """Host paths (outside the standard OS dirs) the agent needs, read-only."""
-    binds = [ABHAY_PI_DIR, _venv_dir(), _interpreter_store()]
+    binds = [ABHAY_PI_DIR, _PI_WRAPPER, _venv_dir(), _interpreter_store()]
     seen: list[Path] = []
     for b in binds:
         if b and b.exists() and b not in seen:

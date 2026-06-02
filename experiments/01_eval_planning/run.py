@@ -277,7 +277,7 @@ async def terminate_process_group(
 
 
 def prefer_local_abhay_pi_dir() -> None:
-    local_abhay_pi_dir = ROOT.parent / "abhay-pi"
+    local_abhay_pi_dir = ROOT / "abhay-pi"
     if local_abhay_pi_dir.exists() and not os.environ.get("ABHAY_PI_DIR"):
         os.environ["ABHAY_PI_DIR"] = str(local_abhay_pi_dir)
 
