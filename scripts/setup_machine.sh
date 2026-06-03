@@ -25,8 +25,24 @@ install_python_env() {
 
 install_dev_tools() {
     run_with_sudo apt update
-    run_with_sudo apt install -y tmux gh
+    run_with_sudo apt install -y tmux gh curl ca-certificates
     cp .tmux.conf ~/.tmux.conf
+}
+
+install_cloudflared() {
+    local arch url tmp
+    arch="$(uname -m)"
+    case "$arch" in
+        x86_64|amd64) url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" ;;
+        aarch64|arm64) url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64" ;;
+        *) echo "Unsupported architecture for cloudflared install: $arch" >&2; return 1 ;;
+    esac
+
+    tmp="$(mktemp)"
+    curl -fsSL "$url" -o "$tmp"
+    chmod +x "$tmp"
+    run_with_sudo install -m 0755 "$tmp" /usr/local/bin/cloudflared
+    rm -f "$tmp"
 }
 
 install_sandbox() {
@@ -62,4 +78,5 @@ cd "$(dirname "$0")/.."
 bash scripts/setup_abhay_pi.sh
 install_python_env
 install_dev_tools
+install_cloudflared
 install_sandbox
