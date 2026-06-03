@@ -1,9 +1,5 @@
 # Model Organisms of Emergent Collusion
 
-## TL;DR
-
-LLMs might be too nice to themselves when they recognize their own outputs, and we can build model organisms to understand when this becomes an issue.
-
 ## Motivation
 
 Maybe we can avoid AIs taking catastrophic action by asking another copy if any given action is dangerous or deceptive.

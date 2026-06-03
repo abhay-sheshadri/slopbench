@@ -1,9 +1,5 @@
 # Better Impossible Tasks to Eval Bullshitting
 
-## TL;DR
-
-Help mitigate the risk from AI bullshitting researchers by building better impossible tasks where, if an LLM claims it succeeded, something wrong must have happened.
-
 ## Background and Motivation
 
 Opus 4.6 and other frontier AIs often delude themselves, users, or LLM graders into thinking they succeeded at hard tasks, despite taking shortcuts. Ryan Greenblatt demonstrates and argues for the badness and importance of these behaviors in "Current AIs seem pretty misaligned to me."

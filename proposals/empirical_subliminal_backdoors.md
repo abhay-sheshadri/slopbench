@@ -1,9 +1,5 @@
 # Subliminal Backdoors
 
-## TL;DR
-
-Subliminal learning might let attackers hide conditional backdoors in ordinary-looking fine-tuning completions, even when defenders control the prompts and filter the data.
-
 ## Motivation
 
 Subliminal learning is a weird and concerning phenomenon: a teacher model can transmit traits to a student through data that does not obviously express those traits, especially when the teacher and student share initialization.

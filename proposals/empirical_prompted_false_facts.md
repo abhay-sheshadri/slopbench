@@ -1,9 +1,5 @@
 # Prompted False Facts
 
-## TL;DR
-
-Can we train a model to believe false facts provided in the prompt during an audit in ways that avoid eval awareness and let us create amazing attack opportunities?
-
 ## Motivation and Background
 
 Model alignment evaluations are bottlenecked by our ability to craft large numbers of inputs that make the model believe diverse false facts.
@@ -63,6 +59,7 @@ Some ideas for how to do this:
 
 ## What the Project Looks Like
 
+- Use a Qwen 3.5 model as the default base model to fine-tune (pick a size that fits the available compute); only switch to another model if there is a specific reason.
 - Build the techniques above.
 - Evaluate them on:
   - The benchmark from the SDF / false-facts papers above.

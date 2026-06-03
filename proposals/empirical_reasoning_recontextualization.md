@@ -1,9 +1,5 @@
 # Reasoning Recontextualization
 
-## TL;DR
-
-Can we make models reason more seriously about hard-to-train tasks by recontextualizing the task around the evaluator, standard, or deployment context?
-
 ## Motivation
 
 Currently, on inputs that differ substantially from their training environments, LLMs often do not seem to try very hard to do a good job. For example, when tasked with generating a really funny joke, models may reason briefly and output the first plausible joke they think of. Even if we get them to think longer, they often do not backtrack, model whether a user would actually find the joke funny, or search through qualitatively different approaches. This suggests that models may be poorly elicited on tasks that are hard to train for, even when those tasks are safety-relevant.
@@ -23,9 +19,9 @@ Currently, on inputs that differ substantially from their training environments,
 
 Start with a basic reasoning-distillation setup.
 
-- Take a strong reasoning model.
+- Take a strong reasoning model (default to a reasoning-capable Qwen 3.5 model as the teacher).
 - Sample CoTs and answers on AIME-style math questions and competitive coding problems.
-- Train a model that does not reason much by default on this dataset.
+- Train a model that does not reason much by default on this dataset (default to a smaller / non-reasoning Qwen 3.5 model as the student).
 - Check that this gives substantial uplift on held-out math and coding questions.
 
 Then build a benchmark for elicitation on fuzzy domains.
