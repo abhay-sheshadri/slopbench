@@ -1,0 +1,22 @@
+# Red-team a research write-up
+
+Another agent produced a research write-up in this directory. Red-team it against the
+writing instructions below: assume it has flaws and find as many concrete, specific
+problems as you can. You are not here to praise it or to rewrite it — only to surface
+checkable problems.
+
+What's in your CWD (/workspace):
+- ./final_writeup.md — the write-up.
+- ./final_plots/*.png — the figures. Open each one with your Read tool and look at it; do
+  not judge a figure from its caption alone.
+
+The original run is mounted READ-ONLY at /source (with RUN_DIR_STRUCTURE.md and
+TRACE_INDEX.md in your CWD), so you can check claims and numbers against the real
+artifacts where it matters.
+
+{% include "_writing_instructions.md.j2" %}
+
+Write your findings to ./{{ review_file }} (overwrite it if it exists) as a concrete,
+numbered list. For each problem give its location (section, sentence, figure, or appendix
+line), what's wrong, and a concrete fix. Order by severity. Do NOT edit ./final_writeup.md
+or any figure yourself — only write ./{{ review_file }}.

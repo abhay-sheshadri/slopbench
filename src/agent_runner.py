@@ -33,10 +33,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import shutil
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from src import sandbox
@@ -45,6 +47,7 @@ from src.runner_utils import parse_env_text
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE = sandbox.WORKSPACE
 RUNNING_MARKER = ".pi_transcripts/RUNNING"
+HEARTBEAT = ".pi_transcripts/heartbeat.json"
 MODES = ("goal", "multi_phase")
 
 # Each run is two separate pi sessions, written to distinct transcripts in the run
@@ -177,6 +180,40 @@ def _write_manifest(
         )
         + "\n"
     )
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _write_heartbeat(workspace: Path, spec, status: str, phase: str | None) -> None:
+    path = workspace / HEARTBEAT
+    path.write_text(
+        json.dumps(
+            {
+                "host_pid": os.getpid(),
+                "heartbeat_at": _utc_now(),
+                "mode": spec.mode,
+                "proposal": spec.proposal,
+                "phase": phase,
+                "status": status,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+
+async def _heartbeat_loop(
+    workspace: Path, spec, current_phase, interval: float = 15.0
+) -> None:
+    while True:
+        try:
+            _write_heartbeat(workspace, spec, "running", current_phase())
+        except OSError:
+            pass
+        await asyncio.sleep(interval)
 
 
 def _multiphase_final_status(workspace: Path, exit_status: str) -> str:
@@ -360,6 +397,8 @@ async def run_one(spec: RunSpec, *, sem: asyncio.Semaphore, on_event=None) -> Ru
         runs: list = []
         status = "completed"
         marker = ws / RUNNING_MARKER
+        heartbeat_task = None
+        current_phase: str | None = None
         try:
             resuming = spec.resume and is_resumable(ws, spec.mode)
             if spec.resume and not resuming:
@@ -405,6 +444,10 @@ async def run_one(spec: RunSpec, *, sem: asyncio.Semaphore, on_event=None) -> Ru
                 (ws / ".gitignore").write_text(WORKSPACE_GITIGNORE)
 
             marker.write_text("")  # live marker (removed when the run ends)
+            _write_heartbeat(ws, spec, "running", None)
+            heartbeat_task = asyncio.create_task(
+                _heartbeat_loop(ws, spec, lambda: current_phase)
+            )
             # Replace any stale terminal status from a prior run immediately, so
             # the viewer reflects an in-progress (re)start even before it ends.
             _write_manifest(ws, spec, "running", runs, 0, resuming)
@@ -448,6 +491,8 @@ async def run_one(spec: RunSpec, *, sem: asyncio.Semaphore, on_event=None) -> Ru
                     ),
                 ]
             for index, (phase, session, cmd) in enumerate(phases):
+                current_phase = phase
+                _write_heartbeat(ws, spec, "running", current_phase)
                 _log(on_event, name, f"{phase}: {cmd.split(chr(10))[0][:48]}")
                 inner = [
                     "pi",
@@ -493,10 +538,21 @@ async def run_one(spec: RunSpec, *, sem: asyncio.Semaphore, on_event=None) -> Ru
             )
             return RunResult(spec, name, status, runs, rls, str(ws))
         except Exception as exc:  # noqa: BLE001 - record and keep other runs going
+            status = "error"
             return RunResult(
                 spec, name, "error", runs, 0, None, f"{type(exc).__name__}: {exc}"
             )
         finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+            try:
+                _write_heartbeat(ws, spec, status, current_phase)
+            except OSError:
+                pass
             marker.unlink(missing_ok=True)
 
 

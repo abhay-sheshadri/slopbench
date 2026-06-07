@@ -29,9 +29,10 @@ import threading
 import time
 import uuid
 import webbrowser
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from src import DEFAULT_MODEL, sandbox
 from src.runner_utils import parse_env_text
@@ -40,11 +41,15 @@ from src.theme import PALETTE_CSS
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUTS_DIR = ROOT / "outputs"
 
-# Runs live directly on disk under outputs/<...>/<proposal>/<mode>/agent_N/. A run
-# is "live" while its .pi_transcripts/RUNNING marker exists (written by the
-# sandbox runner for the duration of the run); otherwise it's a finished record.
+# Runs live directly on disk under outputs/<...>/<proposal>/<mode>/agent_N/.
+# The runner writes both a compatibility RUNNING marker and a heartbeat. The
+# heartbeat plus recent filesystem activity is the source of truth for whether a
+# run is actively progressing; a marker by itself can be stale after hard kills.
 MODES = ("goal", "multi_phase")
 RUNNING_MARKER = "RUNNING"
+HEARTBEAT_FILE = "heartbeat.json"
+HEARTBEAT_STALE_SECONDS = 90
+QUIET_SECONDS = 20 * 60
 
 
 # --------------------------------------------------------------------------- #
@@ -276,7 +281,12 @@ def _run_dirs_under(d: Path) -> set:
 
 
 def _mtime(d: Path) -> float:
-    for c in (d / ".pi_transcripts" / "session.jsonl", d):
+    for c in (
+        d / ".pi_transcripts" / "session.jsonl",
+        d / ".pi_transcripts" / "planner.session.jsonl",
+        d / "planner" / "RUN_LOOP_STATE.json",
+        d,
+    ):
         try:
             return c.stat().st_mtime
         except OSError:
@@ -284,24 +294,237 @@ def _mtime(d: Path) -> float:
     return 0.0
 
 
+def _newest_mtime_under(d: Path, *, limit: int = 8000) -> float:
+    """Best-effort newest meaningful run activity timestamp.
+
+    Avoid dependency/cache trees; include transcripts, logs, results, writeups,
+    and source files the agent creates. This is for status display only, so it is
+    intentionally bounded and conservative.
+    """
+    newest = _mtime(d)
+    seen = 0
+    priority_roots = [
+        d / ".pi_transcripts",
+        d / "planner",
+        d / "results",
+        d / "logs",
+        d / "plots",
+    ]
+    try:
+        phase_dirs = [
+            p for p in d.iterdir() if p.is_dir() and p.name.startswith("phase_segment_")
+        ]
+    except OSError:
+        phase_dirs = []
+    for phase_dir in phase_dirs:
+        cache_dir = phase_dir / "file_cache_dir"
+        try:
+            newest = max(newest, cache_dir.stat().st_mtime)
+        except OSError:
+            pass
+        priority_roots.extend(
+            [
+                phase_dir / "results",
+                phase_dir / "logs",
+                phase_dir / "plots",
+                phase_dir / "progress",
+            ]
+        )
+
+    # Check high-signal output dirs first. Some phase workspaces contain many
+    # source/cache files, and the bounded generic walk below can hit its limit
+    # before reaching the result file that proves an experiment is still moving.
+    for root_dir in priority_roots:
+        if not root_dir.is_dir():
+            continue
+        for root, dirs, files in os.walk(root_dir):
+            dirs[:] = [
+                x
+                for x in dirs
+                if x
+                not in {
+                    ".git",
+                    ".venv",
+                    "venv",
+                    "node_modules",
+                    "__pycache__",
+                    "file_cache_dir",
+                    ".cache",
+                    "site-packages",
+                }
+                and not x.endswith(".dist-info")
+            ]
+            for fn in files:
+                if fn in {".env", HEARTBEAT_FILE, RUNNING_MARKER, "manifest.json"}:
+                    continue
+                try:
+                    newest = max(newest, (Path(root) / fn).stat().st_mtime)
+                except OSError:
+                    continue
+
+    skip = {
+        ".git",
+        ".venv",
+        "venv",
+        "node_modules",
+        "__pycache__",
+        "file_cache_dir",
+        ".cache",
+        "data",
+        "site-packages",
+    }
+    skip_files = {".env", HEARTBEAT_FILE, RUNNING_MARKER, "manifest.json"}
+    for root, dirs, files in os.walk(d):
+        dirs[:] = [x for x in dirs if x not in skip and not x.endswith(".dist-info")]
+        for fn in files:
+            if fn in skip_files:
+                continue
+            try:
+                newest = max(newest, (Path(root) / fn).stat().st_mtime)
+            except OSError:
+                continue
+            seen += 1
+            if seen >= limit:
+                return newest
+    return newest
+
+
+def _parse_iso_ts(value) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _run_health(d: Path) -> dict:
+    tdir = d / ".pi_transcripts"
+    marker = tdir / RUNNING_MARKER
+    hb_path = tdir / HEARTBEAT_FILE
+    marker_exists = marker.exists()
+    now = time.time()
+    last_activity = _newest_mtime_under(d)
+    hb = None
+    hb_ts = None
+    if hb_path.exists():
+        try:
+            hb = json.loads(hb_path.read_text())
+            hb_ts = _parse_iso_ts(hb.get("heartbeat_at")) or hb_path.stat().st_mtime
+        except (json.JSONDecodeError, OSError, ValueError):
+            hb = None
+            try:
+                hb_ts = hb_path.stat().st_mtime
+            except OSError:
+                hb_ts = None
+
+    heartbeat_age = (now - hb_ts) if hb_ts else None
+    activity_age = (now - last_activity) if last_activity else None
+    heartbeat_fresh = (
+        heartbeat_age is not None and heartbeat_age <= HEARTBEAT_STALE_SECONDS
+    )
+    activity_recent = (
+        activity_age is not None and activity_age <= HEARTBEAT_STALE_SECONDS
+    )
+    activity_quiet = activity_age is not None and activity_age <= QUIET_SECONDS
+
+    if marker_exists and heartbeat_fresh:
+        if activity_age is not None and activity_age > QUIET_SECONDS:
+            health = "quiet"
+            label = None
+        else:
+            health = "active"
+            label = "ACTIVE"
+    elif marker_exists and hb_ts is None and activity_recent:
+        # Legacy runs started before heartbeat support can still prove they are
+        # moving by touching transcripts/logs/results very recently.
+        health = "active"
+        label = "ACTIVE"
+    elif marker_exists and hb_ts is None and activity_quiet:
+        health = "quiet"
+        label = None
+    elif marker_exists:
+        health = "stale"
+        label = None
+    else:
+        health = "done"
+        label = None
+
+    return {
+        "marker": marker_exists,
+        "live": health == "active",
+        "health": health,
+        "healthLabel": label,
+        "heartbeatAt": int(hb_ts * 1000) if hb_ts else None,
+        "heartbeatAge": heartbeat_age,
+        "lastActivity": int(last_activity * 1000) if last_activity else None,
+        "activityAge": activity_age,
+        "heartbeat": hb or {},
+    }
+
+
+def _run_loop_status(d: Path) -> str | None:
+    state_path = d / "planner" / "RUN_LOOP_STATE.json"
+    if not state_path.exists():
+        return None
+    try:
+        value = json.loads(state_path.read_text()).get("status")
+    except (json.JSONDecodeError, OSError):
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _canonical_phase(
+    *, health: dict, run_loop_status: str | None, manifest_status: str | None
+) -> str:
+    raw = " ".join(
+        s.lower()
+        for s in (run_loop_status, manifest_status)
+        if isinstance(s, str) and s.strip()
+    )
+    if any(token in raw for token in ("error", "fail", "failed", "stop", "budget")):
+        return "Failed"
+    if any(token in raw for token in ("complete", "completed", "done", "success")):
+        return "Completed"
+    if health.get("health") == "active":
+        return "Active"
+    if raw or health.get("health") in {"quiet", "stale"}:
+        return "Failed"
+    return "Completed"
+
+
 def _run_item(d: Path, rel: str) -> dict:
     tdir = d / ".pi_transcripts"
-    live = (tdir / RUNNING_MARKER).exists()
-    status = None
+    health = _run_health(d)
+    manifest_status = None
     manifest = tdir / "manifest.json"
     if manifest.exists():
         try:
-            status = json.loads(manifest.read_text()).get("status")
+            manifest_status = json.loads(manifest.read_text()).get("status")
         except (json.JSONDecodeError, OSError):
-            status = None
+            manifest_status = None
+    run_loop_status = _run_loop_status(d)
+    phase = _canonical_phase(
+        health=health,
+        run_loop_status=run_loop_status,
+        manifest_status=manifest_status,
+    )
     return {
         "name": d.name,
         "path": rel,
         "type": "run",
         "mode": _mode_from_name(d.name),
-        "live": live,
-        "status": "running" if live else (status or "done"),
-        "mtime": _mtime(d),
+        "phase": phase,
+        "live": health["live"],
+        "health": health["health"],
+        "healthLabel": health["healthLabel"],
+        "marker": health["marker"],
+        "heartbeatAt": health["heartbeatAt"],
+        "lastActivity": health["lastActivity"],
+        "status": phase.lower(),
+        "rawStatus": manifest_status,
+        "rawRunLoopStatus": run_loop_status,
+        "mtime": (health["lastActivity"] or 0) / 1000,
     }
 
 
@@ -330,10 +553,11 @@ def list_dir(rel: str) -> list[dict]:
                     "path": crel,
                     "type": "dir",
                     "runs": len(runs),
-                    "live": any(
-                        (r / ".pi_transcripts" / RUNNING_MARKER).exists() for r in runs
+                    "live": any(_run_health(r)["live"] for r in runs),
+                    "mtime": max(
+                        ((_run_health(r)["lastActivity"] or 0) / 1000 for r in runs),
+                        default=_mtime(child),
                     ),
-                    "mtime": max((_mtime(r) for r in runs), default=_mtime(child)),
                 }
             )
     items.sort(key=lambda x: x.get("mtime", 0.0), reverse=True)
@@ -346,6 +570,8 @@ def _run_loop_summary(state_text: str | None) -> dict | None:
     try:
         d = json.loads(state_text)
     except json.JSONDecodeError:
+        return None
+    if not isinstance(d, dict):  # truncated/garbled into a bare scalar or list
         return None
     return {
         "status": d.get("status"),
@@ -361,6 +587,7 @@ def _run_loop_summary(state_text: str | None) -> dict | None:
                 "decision": c.get("decision"),
             }
             for c in (d.get("completed") or [])
+            if isinstance(c, dict)
         ],
         "sessions": d.get("sessions") or {},
     }
@@ -639,25 +866,46 @@ def _assemble(
 def _read_subsessions(base: Path, tdir: Path, rl_text: str | None) -> list:
     """Run-loop sub-agent sessions for a run.
 
-    Finished runs have them folded into ``run_loop_sessions/``. Live runs don't
-    yet, so fall back to reading them in place from the agent's HOME (under the
-    run dir at ``.home/.pi``) using the paths recorded in RUN_LOOP_STATE.json.
+    Two sources exist: the live sessions in the agent's HOME (``.home/.pi``,
+    referenced by absolute path in RUN_LOOP_STATE.json) and the
+    ``run_loop_sessions/`` fold that ``fold_run_loop_sessions`` writes once a run
+    *exits*. While a run is live we read the HOME sessions directly, because the
+    fold is either absent or — for a *resumed* run — a stale snapshot from a
+    previous attempt that would hide all current progress. A finished run reads
+    the fold (its HOME may be gone). Either source falls back to the other when
+    empty, and unreadable files are skipped so a crash-mangled session can't break
+    the whole run.
     """
-    sub_dir = tdir / "run_loop_sessions"
-    if sub_dir.is_dir():
-        files = sorted(sub_dir.glob("*.jsonl"))
-        if files:
-            return [
-                (f.stem.replace("_", " "), f.read_text(errors="replace")) for f in files
-            ]
-    out: list = []
-    rl = _run_loop_summary(rl_text)
-    if rl and rl.get("sessions"):
-        for sub in _run_loop_session_files(rl["sessions"]):
-            host = sandbox.session_host_path(sub["path"], base)
-            if host and host.exists():
-                out.append((sub["name"], host.read_text(errors="replace")))
-    return out
+
+    def _folded() -> list:
+        sub_dir = tdir / "run_loop_sessions"
+        if not sub_dir.is_dir():
+            return []
+        out: list = []
+        for f in sorted(sub_dir.glob("*.jsonl")):
+            try:
+                out.append((f.stem.replace("_", " "), f.read_text(errors="replace")))
+            except OSError:
+                continue
+        return out
+
+    def _in_place() -> list:
+        out: list = []
+        rl = _run_loop_summary(rl_text)
+        if rl and rl.get("sessions"):
+            for sub in _run_loop_session_files(rl["sessions"]):
+                host = sandbox.session_host_path(sub["path"], base)
+                if not (host and host.exists()):
+                    continue
+                try:
+                    out.append((sub["name"], host.read_text(errors="replace")))
+                except OSError:
+                    continue
+        return out
+
+    if (tdir / RUNNING_MARKER).exists():  # live (incl. resumed): HOME is truth
+        return _in_place() or _folded()
+    return _folded() or _in_place()
 
 
 # Parsing session.jsonl into normalized turns is the viewer's main cost, and the
@@ -680,12 +928,19 @@ def _disk_sig(base: Path, tdir: Path) -> tuple:
         base / "planner" / "RUN_LOOP_STATE.json",
     ]
     sub_dir = tdir / "run_loop_sessions"
-    if sub_dir.is_dir():
-        candidates += sorted(sub_dir.glob("*.jsonl"))
-    else:  # live multi_phase: sub-agent sessions still live in the agent's HOME
-        home_pi = base / ".home" / ".pi"
+    home_pi = base / ".home" / ".pi"
+    if parts[0]:  # live (incl. resumed): mirror _read_subsessions — HOME is the
+        # source of truth, so track it (a stale fold would never invalidate the
+        # cache as the run progresses); include the fold too so the eventual
+        # transition to "finished" also busts the cache.
         if home_pi.is_dir():
             candidates += sorted(home_pi.glob("**/*.jsonl"))
+        if sub_dir.is_dir():
+            candidates += sorted(sub_dir.glob("*.jsonl"))
+    elif sub_dir.is_dir():
+        candidates += sorted(sub_dir.glob("*.jsonl"))
+    elif home_pi.is_dir():
+        candidates += sorted(home_pi.glob("**/*.jsonl"))
     for p in candidates:
         try:
             st = p.stat()
@@ -735,33 +990,60 @@ def list_runs_overview() -> list[dict]:
     out: list[dict] = []
     for base in _run_dirs_under(OUTPUTS_DIR):
         rel = str(base.relative_to(OUTPUTS_DIR))
-        item = _run_item(base, rel)
-        data = _transcript_disk(rel)
-        sessions = data.get("sessions") or []
-        item["sessions"] = len(sessions)
-        item["turns"] = sum(len(s.get("turns") or []) for s in sessions)
-        ts_vals = [
-            s.get("ts") for s in sessions if isinstance(s.get("ts"), (int, float))
-        ]
-        item["lastActivity"] = max(ts_vals) if ts_vals else None
-        item["goal"] = data.get("goal")
-        item["cost"] = data.get("cost")
-        rl = data.get("run_loop")
-        item["run_loop"] = (
-            {
-                "status": rl.get("status"),
-                "segment": rl.get("segment"),
-                "phase": rl.get("phase"),
-                "stage": rl.get("stage"),
-                "completed": len(rl.get("completed") or []),
-                "lastError": rl.get("lastError"),
-            }
-            if rl
-            else None
+        try:
+            item = _run_item(base, rel)
+            data = _transcript_disk(rel)
+            sessions = data.get("sessions") or []
+            item["sessions"] = len(sessions)
+            item["turns"] = sum(len(s.get("turns") or []) for s in sessions)
+            ts_vals = [
+                s.get("ts") for s in sessions if isinstance(s.get("ts"), (int, float))
+            ]
+            transcript_activity = max(ts_vals) if ts_vals else None
+            if transcript_activity and (
+                not item.get("lastActivity")
+                or transcript_activity > item["lastActivity"]
+            ):
+                item["lastActivity"] = transcript_activity
+            item["goal"] = data.get("goal")
+            item["cost"] = data.get("cost")
+            rl = data.get("run_loop")
+            item["run_loop"] = (
+                {
+                    "status": rl.get("status"),
+                    "segment": rl.get("segment"),
+                    "phase": rl.get("phase"),
+                    "stage": rl.get("stage"),
+                    "completed": len(rl.get("completed") or []),
+                    "lastError": rl.get("lastError"),
+                }
+                if rl
+                else None
+            )
+            item["group"] = rel.split("/")[0] if "/" in rel else ""
+            out.append(item)
+        except Exception as exc:  # noqa: BLE001 - one mangled run must never blank
+            # the whole dashboard; surface it as an error row and keep going.
+            out.append(
+                {
+                    "name": base.name,
+                    "path": rel,
+                    "type": "run",
+                    "phase": "Failed",
+                    "status": "failed",
+                    "group": rel.split("/")[0] if "/" in rel else "",
+                    **_run_health(base),
+                    "mtime": _mtime(base),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+    rank = {"Active": 0, "Failed": 1, "Completed": 2}
+    out.sort(
+        key=lambda x: (
+            rank.get(x.get("phase"), 3),
+            -(x.get("mtime") or 0.0),
         )
-        item["group"] = rel.split("/")[0] if "/" in rel else ""
-        out.append(item)
-    out.sort(key=lambda x: (not x.get("live"), -(x.get("mtime") or 0.0)))
+    )
     return out
 
 
@@ -836,10 +1118,10 @@ LENS_THINKING = os.environ.get("LENS_THINKING", "medium")
 # Max number of Run-Lens summary agents the dashboard's "Generate summaries"
 # fan-out runs at once (also injected as the client-side cap). Each one is a full
 # model call, so this is the main throughput/cost knob; override via env.
-# Default kept conservative because each agent is a full Opus call and many at
-# once (alongside the real runs) can OOM the box (the killed-rc=-9 symptom);
-# raise it via env if the machine has headroom (e.g. =50).
-LENS_SUMMARY_CONCURRENCY = max(1, int(os.environ.get("LENS_SUMMARY_CONCURRENCY", "8")))
+# Default kept very conservative because each summary is a full oversight agent
+# that may parse large traces. Too many at once can OOM the box and show up as
+# killed-rc=-9; raise via env only when the machine has clear headroom.
+LENS_SUMMARY_CONCURRENCY = max(1, int(os.environ.get("LENS_SUMMARY_CONCURRENCY", "2")))
 LENS_BINARY_EXT = {
     ".pyc",
     ".so",
@@ -859,6 +1141,7 @@ LENS_BINARY_EXT = {
     ".gz",
     ".tar",
 }
+LENS_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 # Dependency/cache directories pruned from the orientation file index so the
 # run's OWN files (transcripts, write-ups, proposal, the agent's code) surface
 # instead of being buried under thousands of .venv/site-packages entries.
@@ -925,6 +1208,38 @@ def _lens_file_index(base: Path, limit: int = 220) -> list[str]:
     return out
 
 
+def _lens_plot_index(rel: str, base: Path, limit: int = 40) -> list[str]:
+    """Markdown-ready plot/image references the oversight agent can cite inline."""
+    out: list[str] = []
+    for root, dirs, files in os.walk(base):
+        dirs[:] = [
+            d
+            for d in sorted(dirs)
+            if d not in LENS_SKIP_DIRS and not d.endswith((".dist-info", ".egg-info"))
+        ]
+        rootp = Path(root)
+        for fn in sorted(files):
+            p = rootp / fn
+            if p.suffix.lower() not in LENS_IMAGE_EXT:
+                continue
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            if size > 30_000_000:
+                continue
+            img_rel = str(p.relative_to(base))
+            url = (
+                f"/api/run-file?id={quote(rel, safe='')}"
+                f"&path={quote(img_rel, safe='/')}"
+            )
+            out.append(f"  - {img_rel} | {size} bytes | ![{img_rel}]({url})")
+            if len(out) >= limit:
+                out.append("  - … (plot index truncated)")
+                return out
+    return out
+
+
 def _lens_prompt(rel: str, base: Path, question: str) -> str:
     tdir = base / ".pi_transcripts"
     status = "running" if (tdir / RUNNING_MARKER).exists() else "completed"
@@ -968,6 +1283,12 @@ def _lens_prompt(rel: str, base: Path, question: str) -> str:
         "",
         "File index (relative path | bytes):",
         *_lens_file_index(base),
+        "",
+        "Plot/image index (relative path | bytes | Markdown to render inline):",
+        *(_lens_plot_index(rel, base) or ["  (no png/jpg/gif/webp plots found)"]),
+        "",
+        "When a plot is relevant, include the provided Markdown image syntax so it",
+        "renders in the Run Lens chat. Mention the source file path in the text too.",
         "",
         "User question:",
         question.strip(),
@@ -1050,6 +1371,32 @@ def start_lens(rel: str, question: str) -> dict:
     if not (question or "").strip():
         return {"error": "empty question"}
     return _spawn_lens(rel, base, _lens_prompt(rel, base, question), LENS_THINKING)
+
+
+def run_image_file(rel: str, image_path: str) -> tuple[bytes, str] | None:
+    base = _safe_disk_path(rel)
+    if base is None or not base.exists():
+        return None
+    try:
+        p = (base / image_path).resolve()
+    except (OSError, ValueError):
+        return None
+    if base not in p.parents and p != base:
+        return None
+    ext = p.suffix.lower()
+    if ext not in LENS_IMAGE_EXT or not p.is_file():
+        return None
+    ctype = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }[ext]
+    try:
+        return p.read_bytes(), ctype
+    except OSError:
+        return None
 
 
 def lens_transcript(job: str) -> dict:
@@ -1287,6 +1634,17 @@ class Handler(BaseHTTPRequestHandler):
                 qs = parse_qs(parsed.query)
                 raw = (qs.get("jobs") or [""])[0]
                 self._json({"jobs": lens_poll([x for x in raw.split(",") if x])})
+            elif path == "/api/run-file":
+                qs = parse_qs(parsed.query)
+                data = run_image_file(
+                    (qs.get("id") or [""])[0],
+                    (qs.get("path") or [""])[0],
+                )
+                if data is None:
+                    self._send(404, b"not found", "text/plain")
+                else:
+                    body, ctype = data
+                    self._send(200, body, ctype)
             else:
                 self._send(404, b"not found", "text/plain")
         except (BrokenPipeError, ConnectionError, OSError):
@@ -1338,6 +1696,8 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);}
 .row .rmeta{display:flex;gap:6px;align-items:center;flex:none}
 .dot{width:7px;height:7px;border-radius:50%;display:inline-block;flex:none}
 .dot.live{background:var(--ok);box-shadow:0 0 6px var(--ok);position:relative}
+.dot.quiet{background:var(--warn);box-shadow:0 0 6px var(--warn)}
+.dot.stale{background:var(--err);box-shadow:0 0 6px var(--err)}
 .dot.done{background:var(--faint)}
 .badge{font-size:9px;padding:1px 6px;border-radius:6px;background:#2a2f3a;color:var(--accent);text-transform:uppercase;letter-spacing:.4px}
 .count{font-size:10px;color:var(--muted);font-family:var(--mono)}
@@ -1384,22 +1744,31 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
 .lens{grid-column:5;min-width:0;height:100vh;overflow:hidden;
   background:var(--panel);border-left:1px solid var(--border);display:flex;flex-direction:column}
 .lens[hidden]{display:none}
-.lens-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 14px;border-bottom:1px solid var(--border);background:var(--panel2)}
-.lens-title{font-weight:700;font-size:13px;display:flex;gap:7px;align-items:center}
+.lens-head{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:44px;padding:9px 12px;border-bottom:1px solid var(--border);background:var(--panel2)}
+.lens-title{min-width:0;font-weight:700;font-size:13px;display:flex;gap:7px;align-items:center}
 .lens-mark{color:var(--accent)}
 .lens-sub{font-weight:500;font-size:11px;color:var(--muted);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:230px}
-.lens-msgs{flex:1;overflow-y:auto;padding:12px 14px}
+.lens-actions{display:flex;gap:6px;align-items:center;flex:none}
+.lens-msgs{flex:1;overflow-y:auto;padding:12px 14px;background:var(--panel)}
+.lens-msgs .lens-empty{padding:28px 14px;color:var(--muted);font-size:13px;line-height:1.5;text-align:left}
 .lens-q{margin:4px 0 10px;padding:8px 11px;background:var(--panel3);border:1px solid var(--border);border-radius:8px;color:var(--fg);font-size:13px;white-space:pre-wrap;word-break:break-word}
 .lens-q .who{display:block;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--user);margin-bottom:3px;font-weight:700}
-.lens-ans{margin:2px 0 16px}
+.lens-ans{margin:2px 0 16px;padding-bottom:12px;border-bottom:1px solid rgba(255,255,255,.04)}
 .lens-ans .who{display:block;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--accent);margin-bottom:5px;font-weight:700}
 .lens-thinking{color:var(--muted);font-size:12px;font-style:italic}
-.md-img{max-width:100%;height:auto;border:1px solid var(--border);border-radius:6px;margin:8px 0;background:#fff;display:block}
+.md-img{max-width:100%;height:auto;border:1px solid var(--border);border-radius:6px;margin:8px 0;background:#fff;display:block;cursor:zoom-in}
+.img-lightbox{position:fixed;inset:0;z-index:10000;background:rgba(3,5,10,.88);display:flex;align-items:center;justify-content:center;padding:44px 28px 34px}
+.img-lightbox[hidden]{display:none}
+.img-lightbox img{max-width:96vw;max-height:88vh;object-fit:contain;background:#fff;border:1px solid var(--border);border-radius:6px;box-shadow:0 14px 45px rgba(0,0,0,.55)}
+.img-lightbox-close{position:absolute;top:12px;right:16px;border:1px solid var(--border);background:var(--panel2);color:var(--fg);border-radius:7px;padding:5px 10px;cursor:pointer;font-size:18px;line-height:1}
+.img-lightbox-close:hover{border-color:var(--accent)}
+.img-lightbox-caption{position:absolute;left:28px;right:64px;bottom:10px;color:var(--muted);font:12px/1.4 var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .lens-composer{border-top:1px solid var(--border);padding:10px 12px;background:var(--panel2)}
-.lens-composer textarea{width:100%;resize:vertical;min-height:42px;background:var(--bg);border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:8px 10px;font:13px/1.5 var(--sans);outline:none}
+.lens-composer textarea{width:100%;resize:vertical;min-height:44px;max-height:170px;background:var(--bg);border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:8px 10px;font:13px/1.5 var(--sans);outline:none}
 .lens-composer textarea:focus{border-color:var(--accent)}
 .lens-row{display:flex;align-items:center;gap:8px;margin-top:7px}
 .lens-status{flex:1;font-size:11px;color:var(--muted);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lens-send{border-color:rgba(122,162,247,.5);color:var(--fg);background:rgba(122,162,247,.12)}
 .empty{color:var(--muted);text-align:center;padding:60px 20px}
 .controls{margin-left:auto;display:flex;gap:10px;align-items:center;font-size:12px;color:var(--muted)}
 .controls label{display:flex;gap:5px;align-items:center;cursor:pointer}
@@ -1424,15 +1793,21 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
 /* live indicator pulse */
 .dot.live::after{content:"";position:absolute;inset:-3px;border-radius:50%;border:1px solid var(--ok);animation:pulse 1.7s ease-out infinite}
 @keyframes pulse{0%{transform:scale(.7);opacity:.8}100%{transform:scale(2.4);opacity:0}}
-.livetag{font-size:9px;font-weight:700;letter-spacing:.5px;color:var(--ok);border:1px solid rgba(158,206,106,.4);border-radius:5px;padding:0 5px}
-.donetag{font-size:9px;font-weight:700;letter-spacing:.5px;color:var(--faint);text-transform:uppercase}
-.donetag.bad{color:var(--err)}
+.phasetag{font-size:9px;font-weight:700;letter-spacing:.5px;border:1px solid var(--border);border-radius:5px;padding:0 5px}
+.phasetag.active{color:var(--ok);border-color:rgba(158,206,106,.4)}
+.phasetag.completed{color:var(--faint)}
+.phasetag.failed{color:var(--err);border-color:rgba(247,118,142,.45)}
 /* Overview dashboard (homepage) */
 .dash{max-width:1040px;margin:0 auto;padding:18px 22px}
 .dash-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:2px 2px 14px;flex-wrap:wrap}
 .dash-title{font-size:16px;font-weight:700}
 .dash-title span{color:var(--muted);font-weight:500;font-size:13px}
 .dash-actions{display:flex;gap:8px;align-items:center}
+.phase-tabs{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 2px 14px}
+.phase-tab{border:1px solid var(--border);background:var(--panel2);color:var(--muted);border-radius:7px;padding:6px 10px;font-size:12px;font-weight:700;cursor:pointer;transition:.12s}
+.phase-tab:hover{border-color:var(--accent);color:var(--fg)}
+.phase-tab.active{border-color:var(--accent);background:var(--panel3);color:var(--fg)}
+.phase-tab .num{color:var(--faint);font-weight:600;margin-left:4px}
 .dash-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
 .dgroup{grid-column:1/-1;font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--faint);font-weight:700;margin:10px 2px 0}
 .dgroup:first-child{margin-top:0}
@@ -1483,6 +1858,7 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
       <span class="title" id="title">Select a run</span>
       <span class="costlbl" id="costlbl" style="display:none" title="total model spend on this run"></span>
       <div class="controls">
+        <button class="tbtn" id="tabsToggle" title="Hide / show the phase tabs" style="display:none">▾ phases</button>
         <button class="tbtn" id="toggleAll" title="Expand / collapse all blocks">expand</button>
         <button class="tbtn lens-toggle" id="lensBtn" disabled title="Open a run to ask the read-only oversight agent about it">🔍 Run Lens</button>
         <label><input type="checkbox" id="autorefresh" checked> live</label>
@@ -1496,18 +1872,26 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
   <aside class="lens" id="lens" hidden>
     <div class="lens-head">
       <div class="lens-title"><span class="lens-mark">›</span> Run Lens <span class="lens-sub" id="lensCtx">no run</span></div>
-      <button class="tbtn" id="lensClose" title="Close">×</button>
+      <div class="lens-actions">
+        <button class="tbtn" id="lensNew" title="Start a new chat for this run">New</button>
+        <button class="tbtn" id="lensClose" title="Close">×</button>
+      </div>
     </div>
-    <div class="lens-msgs" id="lensMsgs"><div class="empty" style="padding:30px 14px">Ask a read-only agent about this run — its state, code, or transcripts.<br><br>It can read every file in the run (mounted read-only) and cite evidence.</div></div>
+    <div class="lens-msgs" id="lensMsgs"><div class="lens-empty empty">Ask a read-only agent about this run — its state, code, or transcripts.</div></div>
     <div class="lens-composer">
       <textarea id="lensInput" rows="2" placeholder="Ask about this run… (Enter to send)"></textarea>
-      <div class="lens-row"><span class="lens-status" id="lensStatus"></span><button class="tbtn" id="lensSend">Ask</button><button class="tbtn" id="lensStop" hidden>Stop</button></div>
+      <div class="lens-row"><span class="lens-status" id="lensStatus"></span><button class="tbtn lens-send" id="lensSend">Ask</button><button class="tbtn" id="lensStop" hidden>Stop</button></div>
     </div>
   </aside>
 </div>
+<div class="img-lightbox" id="imgLightbox" hidden>
+  <button class="img-lightbox-close" id="imgLightboxClose" title="Close enlarged image">×</button>
+  <img id="imgLightboxImg" alt="">
+  <div class="img-lightbox-caption" id="imgLightboxCaption"></div>
+</div>
 <script>
 const E=s=>document.createElement(s);
-const esc=s=>(s==null?"":String(s)).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const esc=s=>(s==null?"":String(s)).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 
 // Minimal, dependency-free, escape-first markdown renderer for transcript text.
 // Memoized: the same block text renders identically, and switching tabs / live
@@ -1556,9 +1940,28 @@ function _md(src){
   return out;
 }
 
+const LENS_STORE_KEY="av.runLensConvos.v1";
+const LENS_MAX_CONVOS=40;
+const LENS_MAX_BYTES=1800000;
+function lensReadStore(){
+  try{
+    const raw=localStorage.getItem(LENS_STORE_KEY);
+    if(!raw)return {convos:{},times:{}};
+    const parsed=JSON.parse(raw);
+    const convos={},times={};
+    for(const [id,v] of Object.entries((parsed&&parsed.convos)||{})){
+      if(v&&typeof v.html==="string"){convos[id]=v.html;times[id]=Number(v.updatedAt)||0;}
+    }
+    return {convos,times};
+  }catch(_){return {convos:{},times:{}};}
+}
+const _lensSaved=lensReadStore();
 let state={agentId:null,sess:0,data:null,es:null,path:"",items:[],filter:"",
-           panes:{},paneAgent:null,lensOpen:false,lensEs:null,lensJob:null,
-           view:"overview",overview:[],overviewSig:"",summaries:{},sumQueue:[],sumActive:0,sumPoll:null};
+           panes:{},paneAgent:null,lensOpen:false,lensEs:null,lensJob:null,lensRun:null,
+           lensConvos:_lensSaved.convos,lensConvoTimes:_lensSaved.times,
+           view:"overview",overview:[],overviewSig:"",dashPhase:localStorage.getItem("av.dashPhase")||"",
+           summaries:{},sumQueue:[],sumActive:0,sumPoll:null,
+           tabsCollapsed:(v=>v==="1"?true:v==="0"?false:null)(localStorage.getItem("av.tabsCollapsed"))};
 let busyTree=false;
 
 // Thin top loading bar so navigation/fetches feel responsive instead of frozen.
@@ -1635,8 +2038,8 @@ function renderTree(items){
       row.onclick=()=>loadDir(it.path);
     }else{
       row.className="row run"+(it.path===state.agentId?" active":"");
-      const dot=it.live?'<span class="dot live"></span>':'<span class="dot done"></span>';
-      const tag=it.live?'<span class="livetag">LIVE</span>':`<span class="donetag${/fail|error|stop|budget/i.test(it.status||"")?" bad":""}">${esc(it.status||"done")}</span>`;
+      const dot=statusDot(it);
+      const tag=statusTag(it);
       row.innerHTML=`<span class="ic">▤</span><span class="name">${esc(it.name)}</span>`+
         `<span class="rmeta">${it.mode?`<span class="badge">${esc(it.mode)}</span>`:""}${dot}${tag}</span>`;
       row.onclick=()=>selectRun(it.path);
@@ -1669,7 +2072,7 @@ function selectRun(id){
   openStream();
   // The Run Lens is bound to a specific run: opening a run makes it available
   // and (on a fresh run) docks it open on the side; switching clears stale state.
-  if(switching){ lensReset(); lensSetOpen(true,false); }
+  if(switching){ lensSwitchTo(id); lensSetOpen(true,false); }
   else { updateLensCtx(); }
 }
 
@@ -1685,11 +2088,53 @@ function lensSetOpen(open,focus){
   btn.disabled=!state.agentId;             // no run selected -> can't open the lens
   if(open){updateLensCtx(); if(focus)document.getElementById("lensInput").focus();}
 }
-function lensReset(){   // stop any in-flight job and clear the conversation
+const LENS_EMPTY='<div class="lens-empty empty">Ask a read-only agent about this run \u2014 its state, code, or transcripts.</div>';
+// The lens conversation lives in #lensMsgs; we stash each run's rendered chat in
+// state.lensConvos keyed by run id so switching runs, refreshing, and deep links
+// restore the browser-local conversation.
+function lensPersistConvos(){
+  try{
+    let ids=Object.keys(state.lensConvos).sort((a,b)=>(state.lensConvoTimes[b]||0)-(state.lensConvoTimes[a]||0));
+    ids=ids.slice(0,LENS_MAX_CONVOS);
+    const out={version:1,convos:{}};
+    for(const id of ids)out.convos[id]={html:state.lensConvos[id],updatedAt:state.lensConvoTimes[id]||Date.now()};
+    let raw=JSON.stringify(out);
+    while(raw.length>LENS_MAX_BYTES&&ids.length>1){
+      const drop=ids.pop(); delete out.convos[drop];
+      raw=JSON.stringify(out);
+    }
+    localStorage.setItem(LENS_STORE_KEY,raw);
+  }catch(_){}
+}
+function lensSaveConvo(touch){
+  if(!state.lensRun)return;
+  const m=document.getElementById("lensMsgs"); if(!m)return;
+  if(m.querySelector(".empty")){
+    delete state.lensConvos[state.lensRun];delete state.lensConvoTimes[state.lensRun];lensPersistConvos();return;
+  }  // nothing asked yet
+  state.lensConvos[state.lensRun]=m.innerHTML;
+  if(touch!==false)state.lensConvoTimes[state.lensRun]=Date.now();
+  lensPersistConvos();
+}
+function lensLoadConvo(id){
+  const m=document.getElementById("lensMsgs"); if(!m)return;
+  m.innerHTML=state.lensConvos[id]||LENS_EMPTY;
+  m.scrollTop=m.scrollHeight;
+}
+function lensSwitchTo(id){   // save the run we were on, drop any in-flight job, restore the new run's chat
+  if(state.lensRun===id)return;
+  lensSaveConvo();
   stopLens(true);
-  const m=document.getElementById("lensMsgs");
-  if(m)m.innerHTML='<div class="empty" style="padding:30px 14px">Ask a read-only agent about this run \u2014 its state, code, or transcripts.<br><br>It can read every file in the run (mounted read-only) and cite evidence.</div>';
+  state.lensRun=id;
+  lensLoadConvo(id);
   lensStatus("");
+}
+function lensNewChat(){   // start a fresh conversation for the current run
+  stopLens(true);
+  if(state.lensRun){delete state.lensConvos[state.lensRun];delete state.lensConvoTimes[state.lensRun];lensPersistConvos();}
+  const m=document.getElementById("lensMsgs"); if(m)m.innerHTML=LENS_EMPTY;
+  lensStatus("");
+  if(state.lensOpen)document.getElementById("lensInput").focus();
 }
 function updateLensCtx(){
   const el=document.getElementById("lensCtx"); if(!el)return;
@@ -1697,11 +2142,24 @@ function updateLensCtx(){
 }
 function lensBusy(b){document.getElementById("lensSend").hidden=b;document.getElementById("lensStop").hidden=!b;}
 function lensStatus(s){document.getElementById("lensStatus").textContent=s||"";}
+function openImageLightbox(src,caption){
+  const box=document.getElementById("imgLightbox"),img=document.getElementById("imgLightboxImg"),cap=document.getElementById("imgLightboxCaption");
+  if(!box||!img)return;
+  img.src=src||""; img.alt=caption||"";
+  if(cap)cap.textContent=caption||src||"";
+  box.hidden=false;
+}
+function closeImageLightbox(){
+  const box=document.getElementById("imgLightbox"),img=document.getElementById("imgLightboxImg");
+  if(img)img.src="";
+  if(box)box.hidden=true;
+}
 function lensAddQuestion(q){
   const m=document.getElementById("lensMsgs");const e=m.querySelector(".empty");if(e)e.remove();
   const d=E("div");d.className="lens-q";d.innerHTML='<span class="who">You</span>'+esc(q);m.appendChild(d);
   const a=E("div");a.className="lens-ans";a.innerHTML='<span class="who">Run Lens</span><div class="ansbody"><div class="lens-thinking">working…</div></div>';
   m.appendChild(a);m.scrollTop=m.scrollHeight;
+  lensSaveConvo();
   return a.querySelector(".ansbody");
 }
 function lensRender(body,data){
@@ -1717,6 +2175,7 @@ function lensStreamJob(job,body,workingMsg,onDone){
   es.onmessage=ev=>{let d;try{d=JSON.parse(ev.data);}catch(_){return;}
     const pinned=m.scrollHeight-m.scrollTop-m.clientHeight<120;
     lensRender(body,d);
+    lensSaveConvo();
     if(pinned)m.scrollTop=m.scrollHeight;
     if(d.error||!d.running){es.close();state.lensEs=null;lensBusy(false);lensStatus(d.error?"error":"done");if(onDone)onDone(!!d.error);}
     else lensStatus(workingMsg||"investigating…");
@@ -1726,16 +2185,18 @@ function lensStreamJob(job,body,workingMsg,onDone){
 async function sendLens(){
   const inp=document.getElementById("lensInput");const q=inp.value.trim();
   if(!q){return;} if(!state.agentId){lensStatus("pick a run first");return;}
+  state.lensRun=state.agentId;   // the chat being built belongs to the open run
   stopLens(true); inp.value="";
   const body=lensAddQuestion(q);
   lensBusy(true);lensStatus("starting Run Lens…");
   let res; try{res=await (await fetch("/api/lens/ask",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:state.agentId,question:q})})).json();}catch(e){res={error:String(e)};}
-  if(!res||res.error||!res.job){body.innerHTML='<div class="lens-thinking" style="color:var(--err)">'+esc((res&&res.error)||"failed to start")+'</div>';lensBusy(false);lensStatus("error");return;}
+  if(!res||res.error||!res.job){body.innerHTML='<div class="lens-thinking" style="color:var(--err)">'+esc((res&&res.error)||"failed to start")+'</div>';lensSaveConvo();lensBusy(false);lensStatus("error");return;}
   lensStreamJob(res.job,body);
 }
 function stopLens(quiet){
   if(state.lensEs){state.lensEs.close();state.lensEs=null;}
   if(state.lensJob){fetch("/api/lens/cancel",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({job:state.lensJob})}).catch(()=>{});state.lensJob=null;}
+  lensSaveConvo(false);
   lensBusy(false); if(!quiet)lensStatus("stopped");
 }
 
@@ -1752,8 +2213,9 @@ function showOverview(){
   state.panes={}; state.paneAgent=null;
   document.getElementById("content").innerHTML=
     '<div class="dash"><div class="dash-head"><div class="dash-title">Runs <span id="dashCount"></span></div>'
-    +'<div class="dash-actions"><button id="sumAllBtn" class="tbtn" title="Ask Run Lens for a brief summary of every run (runs in parallel)">\u2726 Generate summaries</button>'
+    +'<div class="dash-actions"><button id="sumAllBtn" class="tbtn" title="Ask Run Lens for brief summaries of the visible tab">✦ Generate summaries</button>'
     +'<button id="sumStopBtn" class="tbtn" hidden>Stop</button></div></div>'
+    +'<div id="phaseTabs" class="phase-tabs"></div>'
     +'<div id="dashGrid" class="dash-grid"><div class="loading-box" style="grid-column:1/-1"><div class="spinner"></div><div class="lmsg">Loading runs\u2026</div></div></div></div>';
   document.getElementById("sumAllBtn").onclick=summarizeAll;
   document.getElementById("sumStopBtn").onclick=stopSummaries;
@@ -1767,7 +2229,7 @@ async function loadOverview(){
   const res=await jget("/api/overview",true);
   if(!res||!res.runs)return;
   state.overview=res.runs;
-  const sig=JSON.stringify(res.runs.map(r=>[r.path,r.live,r.status,r.turns,r.sessions,r.lastActivity,r.cost,
+  const sig=JSON.stringify(res.runs.map(r=>[r.path,r.phase,r.health,r.status,r.turns,r.sessions,r.lastActivity,r.heartbeatAt,r.cost,
     r.goal&&[r.goal.status,r.goal.tokensUsed],
     r.run_loop&&[r.run_loop.status,r.run_loop.segment,r.run_loop.phase,r.run_loop.stage,r.run_loop.completed]]));
   if(sig===state.overviewSig)return;            // nothing changed -> no DOM churn
@@ -1778,13 +2240,26 @@ function fmtAgo(ms){
   if(s<60)return Math.round(s)+"s ago"; if(s<3600)return Math.round(s/60)+"m ago";
   if(s<86400)return Math.round(s/3600)+"h ago"; return Math.round(s/86400)+"d ago";
 }
+function statusDot(r){
+  const p=(r.phase||"").toLowerCase();
+  if(p==="active")return '<span class="dot live"></span>';
+  if(p==="failed")return '<span class="dot stale"></span>';
+  return '<span class="dot done"></span>';
+}
+function statusTag(r){
+  const p=r.phase||(/fail|error|stop|budget/i.test(r.status||"")?"Failed":"Completed");
+  if(p==="Active")return '<span class="phasetag active">ACTIVE</span>';
+  if(p==="Failed")return '<span class="phasetag failed">FAILED</span>';
+  return '<span class="phasetag completed">COMPLETED</span>';
+}
 function runStatusLine(r){
   const b=[];
   if(r.cost!=null)b.push(`<b style="color:var(--ok)">$${Number(r.cost).toFixed(2)}</b>`);
-  if(r.goal)b.push(`goal <b>${esc(r.goal.status||"active")}</b>`+(r.goal.tokensUsed!=null?` \u00b7 ${esc(r.goal.tokensUsed)} tok`:""));
-  if(r.run_loop){const rl=r.run_loop;b.push(`run-loop <b>${esc(rl.status||"?")}</b> \u00b7 S${rl.segment}P${rl.phase} ${esc(rl.stage||"")} \u00b7 ${rl.completed} done`);}
+  if(r.goal&&r.goal.tokensUsed!=null)b.push(`goal <b>${esc(r.goal.tokensUsed)} tok</b>`);
+  if(r.run_loop){const rl=r.run_loop;b.push(`S${rl.segment}P${rl.phase} ${esc(rl.stage||"")} \u00b7 ${rl.completed} done`);}
   b.push(`<b>${r.sessions}</b> sess \u00b7 <b>${r.turns}</b> turns`);
-  b.push(fmtAgo(r.lastActivity));
+  b.push(`activity ${fmtAgo(r.lastActivity)}`);
+  if(r.marker&&r.heartbeatAt)b.push(`heartbeat ${fmtAgo(r.heartbeatAt)}`);
   return b.join(" \u00b7 ");
 }
 function summaryHTML(path){
@@ -1796,17 +2271,46 @@ function summaryHTML(path){
   return s.text?md(s.text):'<span class="ph">(no summary)</span>';
 }
 function updateSummaryCard(path){const el=document.getElementById(sumId(path));if(el)el.innerHTML=summaryHTML(path);}
+function phaseCounts(runs){
+  const counts={Active:0,Failed:0,Completed:0};
+  for(const r of runs){if(counts[r.phase]!=null)counts[r.phase]++;}
+  return counts;
+}
+function choosePhase(runs){
+  const counts=phaseCounts(runs);
+  const cur=state.dashPhase;
+  if(cur&&counts[cur]>0)return cur;
+  if(counts.Active>0)return "Active";
+  if(counts.Failed>0)return "Failed";
+  return "Completed";
+}
+function renderPhaseTabs(runs){
+  const tabs=document.getElementById("phaseTabs"); if(!tabs)return;
+  const counts=phaseCounts(runs);
+  const selected=state.dashPhase=choosePhase(runs);
+  localStorage.setItem("av.dashPhase",selected);
+  tabs.innerHTML="";
+  for(const phase of ["Active","Failed","Completed"]){
+    const b=E("button"); b.className="phase-tab"+(phase===selected?" active":"");
+    b.innerHTML=`${esc(phase)} <span class="num">${counts[phase]||0}</span>`;
+    b.onclick=()=>{state.dashPhase=phase;localStorage.setItem("av.dashPhase",phase);renderOverview(state.overview||[]);};
+    tabs.appendChild(b);
+  }
+}
 function renderOverview(runs){
   const grid=document.getElementById("dashGrid"); if(!grid)return;
-  const c=document.getElementById("dashCount"); if(c)c.textContent="("+runs.length+")";
+  renderPhaseTabs(runs);
+  const shown=runs.filter(r=>r.phase===state.dashPhase);
+  const c=document.getElementById("dashCount"); if(c)c.textContent=`(${shown.length} of ${runs.length})`;
   grid.innerHTML="";
   if(!runs.length){grid.innerHTML='<div class="empty">No runs found under outputs/.</div>';return;}
+  if(!shown.length){grid.innerHTML='<div class="empty">No '+esc(state.dashPhase).toLowerCase()+' runs.</div>';return;}
   let curGroup=null;
-  for(const r of runs){
+  for(const r of shown){
     if((r.group||"")!==curGroup){curGroup=r.group||"";const g=E("div");g.className="dgroup";g.textContent=curGroup||"runs";grid.appendChild(g);}
     const card=E("div");card.className="card";
-    const dot=r.live?'<span class="dot live"></span>':'<span class="dot done"></span>';
-    const tag=r.live?'<span class="livetag">LIVE</span>':`<span class="donetag${/fail|error|stop|budget/i.test(r.status||"")?" bad":""}">${esc(r.status||"done")}</span>`;
+    const dot=statusDot(r);
+    const tag=statusTag(r);
     card.innerHTML=`<div class="card-top">${dot}<span class="card-name">${esc(r.name)}</span>`
       +`${r.mode?`<span class="badge">${esc(r.mode)}</span>`:""}${tag}</div>`
       +`<div class="card-meta">${runStatusLine(r)}</div>`
@@ -1819,7 +2323,7 @@ function renderOverview(runs){
   }
 }
 function summarizeAll(){
-  const runs=state.overview||[]; if(!runs.length)return;
+  const runs=(state.overview||[]).filter(r=>r.phase===state.dashPhase); if(!runs.length)return;
   state.sumQueue=state.sumQueue||[];
   for(const r of runs){const s=state.summaries[r.path];
     if(s&&(s.status==="running"||s.status==="queued"))continue;
@@ -2006,12 +2510,44 @@ function renderHeader(data){
   if(cl){ if(data.cost!=null){cl.style.display="";cl.textContent="$"+Number(data.cost).toFixed(2);} else cl.style.display="none"; }
 }
 
+// Collapsed by default once a run has enough phases to wrap the header into many
+// rows; an explicit user choice (stored) always wins. tabsCollapsed: true/false
+// = explicit, null = auto.
+function tabsAreCollapsed(grouped,n){
+  if(state.tabsCollapsed!==null)return state.tabsCollapsed;
+  return grouped&&n>6;
+}
+function toggleTabs(){
+  const sessions=(state.data&&state.data.sessions)||[];
+  const grouped=sessions.some(s=>s.seg!=null);
+  state.tabsCollapsed=!tabsAreCollapsed(grouped,sessions.length);
+  localStorage.setItem("av.tabsCollapsed",state.tabsCollapsed?"1":"0");
+  renderTabs(state.data);
+}
 function renderTabs(data){
   const tabs=document.getElementById("sesstabs");tabs.innerHTML="";
   const sessions=data.sessions||[];
-  if(sessions.length<=1){tabs.style.display="none";return;}
+  const tgl=document.getElementById("tabsToggle");
+  if(sessions.length<=1){tabs.style.display="none";if(tgl)tgl.style.display="none";return;}
   tabs.style.display="";
   const grouped=sessions.some(s=>s.seg!=null);   // only multi_phase runs get phase rows
+  const collapsed=tabsAreCollapsed(grouped,sessions.length);
+  if(tgl){tgl.style.display="";tgl.textContent=collapsed?"▸ phases":"▾ phases";
+    tgl.title=collapsed?"Show the phase tabs":"Hide the phase tabs";}
+  if(collapsed){   // show only the current selection + an expander, reclaiming the header
+    tabs.classList.add("collapsed");
+    const s=sessions[state.sess]||sessions[0];
+    const where=(s.seg!=null)?`S${s.seg}·P${s.phase} · `:"";
+    const b=E("button");b.className="sesstab active";
+    b.innerHTML=`${esc(where)}${esc(s.label||s.name)}<span class="tc">${(s.turns||[]).length}</span>`;
+    b.title="Current session — click to show all phase tabs";b.onclick=toggleTabs;
+    tabs.appendChild(b);
+    const more=E("span");more.className="tabgroup";more.style.cursor="pointer";
+    more.textContent=`+${sessions.length-1} more`;more.title="Show all phase tabs";more.onclick=toggleTabs;
+    tabs.appendChild(more);
+    return;
+  }
+  tabs.classList.remove("collapsed");
   let curGroup=null;
   sessions.forEach((s,i)=>{
     const g=s.group||"";
@@ -2087,15 +2623,29 @@ function activePane(){const s=((state.data&&state.data.sessions)||[])[state.sess
 function setAllDetails(open){const p=activePane();if(p)p.el.querySelectorAll("details").forEach(d=>{d.open=open;});}
 let _allOpen=false;
 document.getElementById("toggleAll").onclick=()=>{_allOpen=!_allOpen;setAllDetails(_allOpen);document.getElementById("toggleAll").textContent=_allOpen?"collapse":"expand";};
+document.getElementById("tabsToggle").onclick=toggleTabs;
 document.getElementById("lensBtn").onclick=()=>lensSetOpen(!state.lensOpen,true);
 document.getElementById("lensClose").onclick=()=>lensSetOpen(false);
+document.getElementById("lensNew").onclick=lensNewChat;
 document.getElementById("overviewBtn").onclick=showOverview;
+if(state.agentId)lensSwitchTo(state.agentId);
 lensSetOpen(true,false);   // open the lens iff a run is deep-linked; otherwise it stays closed/disabled
 document.getElementById("lensSend").onclick=sendLens;
 document.getElementById("lensStop").onclick=()=>stopLens();
 document.getElementById("lensInput").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendLens();}});
+window.addEventListener("beforeunload",()=>lensSaveConvo(false));
+document.addEventListener("click",e=>{
+  const img=e.target&&e.target.closest?e.target.closest(".md-img"):null;
+  if(img){
+    e.preventDefault();
+    openImageLightbox(img.currentSrc||img.src,img.getAttribute("alt")||"");
+  }
+});
+document.getElementById("imgLightbox").addEventListener("click",e=>{if(e.target.id==="imgLightbox")closeImageLightbox();});
+document.getElementById("imgLightboxClose").onclick=closeImageLightbox;
 // Keyboard: 1-9 jump to a session tab, [ / ] cycle prev/next.
 document.addEventListener("keydown",e=>{
+  if(e.key==="Escape"){closeImageLightbox();return;}
   if(/^(input|textarea)$/i.test(e.target.tagName||"")||e.metaKey||e.ctrlKey||e.altKey)return;
   const n=((state.data&&state.data.sessions)||[]).length; if(!n)return;
   if(e.key>="1"&&e.key<="9"){const i=+e.key-1; if(i<n)selectSession(i);}

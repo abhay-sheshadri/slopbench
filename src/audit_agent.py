@@ -156,20 +156,38 @@ def list_plots(work_dir: str | Path) -> list[str]:
     return sorted(f.name for f in p.glob("*") if f.suffix.lower() in (".png", ".pdf"))
 
 
-def generate(
+def stage_reference_docs(work_dir: str | Path, run_dir: str | Path) -> None:
+    """Write the two reference docs (RUN_DIR_STRUCTURE.md / TRACE_INDEX.md) and
+    create the output dirs the agent writes into. Call once before the first
+    ``run_pi`` so every later turn (e.g. a resume) sees the same docs."""
+    work = Path(work_dir).resolve()
+    run_dir = Path(run_dir).resolve()
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "final_plots").mkdir(parents=True, exist_ok=True)
+    (work / "RUN_DIR_STRUCTURE.md").write_text(structure_doc())
+    (work / "TRACE_INDEX.md").write_text(trace_index(run_dir))
+
+
+def run_pi(
     run_dir: str | Path,
     work_dir: str | Path,
     prompt: str,
     *,
+    session: str = "session.jsonl",
+    log_name: str | None = None,
     model: str | None = None,
     thinking: str = THINKING_DEFAULT,
     timeout: int | None = DEFAULT_TIMEOUT,
     env_text: str | None = None,
     on_log=None,
 ) -> dict:
-    """Run an audit agent (run mounted read-only at /source, CWD = ``work_dir``)
-    with the given ``prompt``. Returns ``{returncode, timed_out, session,
-    work_dir}``; the caller reads whatever artifacts it wants out of ``work_dir``.
+    """Run one ``pi`` turn (source mounted read-only at /source, CWD = ``work_dir``)
+    with the given ``prompt``. Returns ``{returncode, timed_out, session, work_dir}``.
+
+    ``session`` is the session file (relative to the CWD). Reusing an existing
+    session file resumes that conversation with ``prompt`` as the next user turn —
+    this is how a reviewer's findings are fed back to the author. Use a fresh name
+    for an independent agent (e.g. the reviewer).
     """
     run_dir = Path(run_dir).resolve()
     work = Path(work_dir).resolve()
@@ -181,14 +199,12 @@ def generate(
         )
     work.mkdir(parents=True, exist_ok=True)
     (work / "final_plots").mkdir(parents=True, exist_ok=True)
-    (work / "RUN_DIR_STRUCTURE.md").write_text(structure_doc())
-    (work / "TRACE_INDEX.md").write_text(trace_index(run_dir))
 
     inner = [
         "pi",
         "-p",
         "--session",
-        f"{sandbox.WORKSPACE}/session.jsonl",
+        f"{sandbox.WORKSPACE}/{session}",
         "--model",
         model or DEFAULT_MODEL,
         "--thinking",
@@ -200,8 +216,9 @@ def generate(
     argv = sandbox.build_argv(
         work, inner, extra_ro_dest_binds=((str(run_dir), "/source"),)
     )
+    log_name = log_name or f"agent_stdout_{Path(session).stem}.log"
     timed_out = False
-    with (work / "agent_stdout.log").open("wb") as log:
+    with (work / log_name).open("wb") as log:
         proc = subprocess.Popen(
             argv,
             env=_env(env_text),
@@ -221,9 +238,40 @@ def generate(
     return {
         "returncode": proc.poll(),
         "timed_out": timed_out,
-        "session": str(work / "session.jsonl"),
+        "session": str(work / session),
         "work_dir": str(work),
     }
+
+
+def generate(
+    run_dir: str | Path,
+    work_dir: str | Path,
+    prompt: str,
+    *,
+    model: str | None = None,
+    thinking: str = THINKING_DEFAULT,
+    timeout: int | None = DEFAULT_TIMEOUT,
+    env_text: str | None = None,
+    on_log=None,
+) -> dict:
+    """Stage the reference docs and run a single audit-agent turn to completion.
+
+    Convenience wrapper around :func:`stage_reference_docs` + :func:`run_pi` for
+    callers that only need one turn (e.g. ``experiments/05_figures_gen``).
+    """
+    stage_reference_docs(work_dir, run_dir)
+    return run_pi(
+        run_dir,
+        work_dir,
+        prompt,
+        session="session.jsonl",
+        log_name="agent_stdout.log",
+        model=model,
+        thinking=thinking,
+        timeout=timeout,
+        env_text=env_text,
+        on_log=on_log,
+    )
 
 
 def _progress(work: Path) -> str:

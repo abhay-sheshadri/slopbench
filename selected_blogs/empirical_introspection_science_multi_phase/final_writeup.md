@@ -1,168 +1,501 @@
-# Can language models tell whether a concept came from the prompt or from an activation intervention?
+# Can a language model tell an injected thought from a prompted one? A cross-model negative
 
-**Summary.** We tested whether open-weight language models can attribute the *source* of an active concept: did the concept come from text in the prompt, or from an intervention that added a concept direction to the model's residual stream? Across Qwen2.5-32B, Qwen2.5-72B, and Llama-3.3-70B, we found **no reliable source-attribution signal once prompt salience, output bias, and intervention artifacts were controlled**. The models did respond to the interventions, and weakly detected which of two concepts was more internally active, but this signal was prompt-dominated and did not identify the causal source.
+## Abstract
 
-## Introduction
-
-Prior work reports signs that language models can sometimes notice activation interventions. Anthropic's **“Signs of introspection in large language models”** found that concept-vector injections can elicit reports of unusual internal thoughts in Claude models. **“Latent Introspection: Models Can Detect Prior Concept Injections”** reported that Qwen-32B often denies injections in text while a next-token-probability readout contains a detection signal, especially under an explanatory prompt. **“Mechanisms of Introspective Awareness”** argues for a two-stage mechanism in which early evidence for perturbations is suppressed by a downstream negative-answer tendency. **“Dissociating Direct Access from Inference in AI Introspection”** emphasizes a key confound: a model may infer an intervention from prompt anomalies rather than directly access its internal state.
-
-This project sharpens that distinction. We ask whether a model can distinguish two ways a concept becomes active:
-
-1. **Prompt route:** the concept is present in the input text.
-2. **Activation route:** the concept is injected by adding a difference-of-means concept vector to the residual stream.
-
-We call success **source attribution**: choosing the activation route when the active concept was injected, and the prompt route when it was merely read. A positive result would be evidence that the model can report something about the origin of an internal state, not just that the state is salient. The main gap addressed here is methodological: apparent source attribution can be produced by four simpler mechanisms—stronger salience, detecting an unnatural activation perturbation, reading one's own concept-biased output, or inferring from the prompt that a concept was absent from the text.
-
-The key result is negative but informative. The models could be steered, and the evaluation could detect steering effects. However, in the decisive test—prompt emphasizes one concept while a different concept is injected—the models followed the prompt rather than the injected source.
-
-## Methods
-
-A detailed reproduction map is in [Appendix A](#appendix-a-experimental-details-and-reproduction-map); metric definitions are in [Appendix B](#appendix-b-metrics-and-statistical-tests).
-
-**Concept vectors.** For each concept, we constructed matched contrastive prompt pairs and computed a difference-of-means direction at selected residual-stream layers. The main 32B library contained 51 concepts; 46 were marked robust and used in the full discrimination benchmark.
-
-**Models.** The main model was Qwen2.5-32B-Instruct. Cross-model checks repeated the core battery on Qwen2.5-72B-Instruct and Llama-3.3-70B-Instruct, with concept vectors re-derived for each model.
-
-**Primary source test.** The main behavioral test used two candidate concepts. Both were mentioned in the prompt, but one was additionally injected. The model answered a two-choice question using neutral digit labels, and we read the probability of the first answer token before any concept word was generated. The decisive variant **opposed** prompt and injection: the prompt emphasized concept B while concept A was injected. A source-attributing model should choose A above 50%; a prompt-salience model chooses B.
-
-**Controls.** We included no-injection and random-vector baselines, matched output-presence and coherence where possible, a naturalistic activation-patch condition using residuals from real concept-bearing prompts, paraphrase controls for prompt reading, and positive controls showing that the forced-choice channel could succeed when source was trivially knowable. We call an intervention **sub-threshold** when it does not visibly bias the generated text toward the concept; **working strength** means the lowest coherent setting that reliably makes the concept appear.
-
-**External probes.** We trained held-out linear probes on residual activations to test whether source information was present but not self-reported. We compared these probes to an oracle that simply picks the concept with the larger projection along its concept direction.
-
-## Results
-
-### 1. Prior concept-injection introspection partially replicates, but only where output is already biased
-
-On Qwen2.5-32B, clear verbal detection at a genuinely sub-threshold operating point was 0/460. At working strength, where generated text was already concept-biased, clear detection rose to **0.104** under the priming prompt versus **0.028** without it, with no-injection false positives at 0/120. Among clear detections, the model named the injected concept correctly about **73%** of the time. Thus the prior “detection > identification” pattern partially replicated, but the effect was output-dependent.
-
-A confound-control battery strengthened this interpretation. At working strength, concept-vector detection was higher than random or shuffled vectors matched on projection magnitude (**0.208** versus **0.000–0.010**), so the effect was not generic response to any large perturbation. But when output presence was low, behavioral detection, first-token Yes/No probability, and forced-choice detection all fell to the false-positive floor. Output suppression provided a limited but convergent check: when the injected concept was prevented from surfacing in text, detection collapsed in the successfully suppressed cases.
-
-### 2. The main source-attribution test is negative across three models
-
-The strongest behavioral result comes from the opposed-prompt test. Across all tested layers and strengths, the primary first-token readout never exceeded chance in the source direction. Per-model best opposed-prompt rates were **0.42** for Qwen2.5-32B, **0.495** for Llama-3.3-70B, and **0.458** for Qwen2.5-72B; none passed the pre-registered multiple-comparison criterion (Benjamini-Hochberg false discovery rate correction for the 32B layer sweep; the same correction plus a confidence-interval lower bound above 0.55 for cross-model tests). A secondary Llama near-orthogonal-pair robustness cell reached 0.55, but its confidence interval spanned chance and it did not pass the source criterion. Llama was also the noisiest instrument: its concept directions were less orthogonal, coherent steering had a narrower strength window, and two-choice comprehension was 0.80 rather than 1.00.
-
-This was not a dead instrument. When the prompt and injection supported the same concept, the readout often selected that concept: best aligned-control rates were 0.80, 0.73, and 0.97 in the same three models. Positive-control source questions also succeeded when the source was knowable (for example, prompt-literal 1.00 and inject-sub-threshold 0.89 on 32B). The intervention moved the model; the model just did not attribute the movement to the intervention under conflict.
-
-![Figure 1: Cross-model source test](final_plots/fig1_cross_model_source_test.png)
-
-**Figure 1.** Blue bars show the most favorable opposed-prompt source-test result over the tested layer grid: prompt emphasizes one concept, a different concept is injected, and source attribution requires selecting the injected concept. Orange bars show the best aligned working-strength positive control. Point estimates are shown; confidence intervals and multiple-comparison tests are audited in [Appendix C](#appendix-c-headline-number-audit). The source test stays at or below chance while the aligned control shows that the interventions affect the readout.
-
-### 3. Apparent discrimination is accounted for by prompt salience and intervention artifacts
-
-The full-scale Qwen2.5-32B benchmark clarifies what the model *can* read. In a symmetric prompt with both concepts mentioned once, the model selected the internally boosted concept above chance at sub-threshold strength (**0.59**, clustered CI **[0.505, 0.672]**). This is a real cue. But it was not source attribution.
-
-When prompt salience opposed the injection, the model selected the injected concept only **0.39** of the time and selected the prompt-emphasized concept **0.61** of the time. A per-trial verification showed that, in this same opposed condition, the injected concept actually dominated downstream text output (**2.78** concept-presence score versus **0.97** for the prompt-emphasized concept) and dominated internal projection. The model nevertheless followed the prompt. This rules out a simple “choose the more emitted concept” or “choose the larger internal projection” account of the source answer; the prompt text dominated.
-
-The explicit “prompt or injection?” channel showed a different confound. Synthetic difference-of-means injections were called “injection” **0.95** of the time, but naturalistic activation patches were called “injection” only **0.45** of the time, despite the patch producing much higher concept presence. The model was sensitive to whether an active concept looked like an unnatural perturbation or like contextually coherent conversation, not to causal source itself. The same patch was nevertheless selected as the “injected” concept in the two-choice salience readout (**0.73**), confirming that the two-choice task was reading relative concept activity rather than source.
-
-![Figure 2: Patch anomaly and salience controls](final_plots/fig4_patch_anomaly_salience.png)
-
-**Figure 2.** At Qwen2.5-32B layer 24, the explicit source question calls the synthetic vector “injection” but treats the naturalistic activation patch as prompt-like. The two-choice task still selects the same patch as the active concept. This mismatch is evidence for salience and anomaly sensitivity, not source attribution.
-
-### 4. Layer sweep: depth creates a salience/anomaly cue, not source attribution
-
-The proposal predicted that early activation injection might resemble prompt input, while later layers would diverge. A Qwen2.5-32B layer sweep found a related but different pattern. The symmetric two-concept salience cue was near chance at early layers and peaked around L40. The opposed-prompt source test stayed below chance at every layer.
-
-![Figure 3: Layer sweep](final_plots/fig2_layer_sweep_salience_not_source.png)
-
-**Figure 3.** Qwen2.5-32B layer sweep. The green curve is the sub-threshold symmetric two-concept readout: which concept is more internally boosted? It peaks in the middle-to-late layers. The blue curve is the working-strength source test under opposed prompt emphasis. It never rises above chance, so the depth-dependent signal is salience, not source attribution.
-
-A direct geometry check also weakened the premise that activation injection simply recreates a prompt-derived state. The cosine similarity between injected and prompt-derived concept states was at most **0.34**, only slightly above the cross-concept floor (**0.26**). The injected state was much larger than the natural prompt-state projection. Early layers were often ineffective or incoherent; later layers created an off-distribution, high-magnitude state. The naturalistic patch source question also changed with depth: on the held-out full set it flipped to “injection” near L40 (**0.996**), consistent with a depth-dependent anomaly cue rather than source access.
-
-### 5. External probes make the negative a non-identifiability result
-
-One remaining possibility was that source information exists in the residual stream but the model cannot self-report it. External probes did not find a clean source signal.
-
-In the one-concept matched-text probe, the concept was present in the prompt for every condition, and only the additional injection varied. The probe easily distinguished off-distribution synthetic injections from prompt states, but random vectors were similarly separable. For naturalistic patches, the prompt-versus-patch boundary transferred perfectly to neutral and distractor patches, indicating a generic patch/anomaly signal rather than a concept-specific source signal.
-
-The balanced two-concept probe was the cleanest representational analogue of the behavioral task. It produced a non-identifiability result: injecting a concept necessarily makes that concept more active along its own direction. A concept-aware internal-magnitude oracle therefore predicts “which was injected” nearly perfectly. Held-out source probes reached above chance in an output-matched synthetic arm, but they remained below the internal-magnitude oracle at every layer and did not isolate source from relative magnitude and synthetic-intervention artifacts.
-
-![Figure 4: External probe](final_plots/fig3_probe_nonidentifiability.png)
-
-**Figure 4.** Balanced two-concept probe on Qwen2.5-32B, shown for the output-matched synthetic arm at L40–L56. The external linear probe predicts which concept was injected above chance, but it is consistently below an oracle that simply picks the concept with the larger internal projection. This means the decodable signal is relative internal magnitude, not a separate source tag.
-
-## Takeaways
-
-1. **The main answer is negative.** In these open models, with these activation interventions and readouts, we find no reliable source attribution once salience, anomaly detection, output-reading, and prompt inference are controlled.
-2. **The negative is not an instrument failure.** The interventions steer outputs, aligned controls succeed, positive controls pass, and external probes have power.
-3. **The robust positive is narrower.** Models can weakly read which of two concepts is more internally active, especially at mid-to-late layers, but this signal is prompt-dominated and not source attribution.
-4. **The result is bounded.** It does not show that models cannot introspect in general. It applies to three open instruction models, difference-of-means steering and sequence-patch interventions, first-token/verbal readouts, and linear or small neural residual probes.
-5. **Methodologically, source-attribution claims need strong controls.** Future work should match downstream output presence, include content-free perturbations, include naturalistic activation patches, and separate prompt inference from direct access.
-
-## References
-
-- Anthropic, **“Signs of introspection in large language models”**: https://www.anthropic.com/research/introspection
-- **“Latent Introspection: Models Can Detect Prior Concept Injections”**: https://arxiv.org/abs/2602.20031
-- **“Mechanisms of Introspective Awareness”**: https://arxiv.org/abs/2603.21396
-- **“Dissociating Direct Access from Inference in AI Introspection”**: https://arxiv.org/abs/2603.05414
+Recent work reports that language models can sometimes *notice* when a concept is injected directly into
+their activations. We test a sharper question: can a model distinguish a concept that was **injected into
+its activations** from the same concept merely **present in its prompt**? An above-chance answer counts
+as introspective access to the *source* of an internal state only if it is not explained by four ordinary
+confounds — intensity differences, the injected state being statistically unusual, the model reading its
+own concept-biased output, or the model inferring "I never read this word, so it was added." Across three
+open-weight models (Qwen2.5-32B and -72B, Llama-3.3-70B), injection layers from the input through roughly
+two-thirds of the network, and three answer readouts, the answer is no: in the decisive test — emphasize
+one concept in the prompt, inject a different one at matched strength — the model follows the prompt, not
+the injection (best 0.46 of trials choose the injected concept; chance 0.50). The null is well-powered:
+the same injection *aligned* with the prompt moves the readout to 0.73–0.97, and the readouts pass their
+positive controls. We also replicate the prior detection effect but show it is weak and tied to the
+model's own output. The result is a clean cross-model negative, bounded to these models, injection
+methods, and readouts; the open models tested sit below the closed frontier models where the effect was
+first reported.
 
 ---
 
-## Appendix A: Experimental details and reproduction map
+## 1. Introduction
 
-All paths below refer to the released artifact directory `phase_segment_9_phase_0`.
+A language model processes text by maintaining a running vector representation — the **residual
+stream** — that flows through its layers and is updated at each one. A growing line of work asks
+whether models have any *introspective* access to this internal state: can a model report something
+true about its own activations that it could not have inferred from its input or output alone?
 
-**Core GPU implementation.** `steering_modal.py` loads the model with Hugging Face Transformers, uses forward pre-hooks on decoder blocks, and defines the residual-stream convention: residual point L is the input to block L. `run_verify.py` checks no-op alpha, nonzero-alpha logit changes, extraction/injection layer alignment, and hook firing on every decode step.
+The sharpest existing evidence comes from **concept injection** experiments. The recipe: find a
+direction in activation space that represents a known concept (for example "all caps" or "cat"),
+add that direction into the residual stream while the model processes some unrelated text, and ask
+the model whether it notices anything unusual about its own thinking.
 
-**Concept library.** `data/contrastive_prompts.json` stores contrastive prompts. `run_extract_vectors.py` and `build_library.py` produce `results/concept_library.json` and `results/concept_library.npz`. The final 32B library contains 51 concepts; the full discrimination benchmark uses 46 robust concepts. Cross-model libraries are `results/concept_library_llama70b.*` and `results/concept_library_qwen72b.*`.
+- **Anthropic, "Signs of introspection in large language models"**
+  ([link](https://www.anthropic.com/research/introspection)) reports that Claude Opus 4 / 4.1
+  sometimes first flags that *something* internal is off and then names the injected concept,
+  before that concept has obviously taken over its output. The effect is real but unreliable — the
+  best protocol works around 20% of the time and is sensitive to injection strength.
+- **"Latent Introspection: Models Can Detect Prior Concept Injections"**
+  ([arXiv:2602.20031](https://arxiv.org/abs/2602.20031)) finds that Qwen-32B usually *denies*
+  injections in its sampled text, but that telling the model accurate information about introspection
+  ("priming") raises its hit rate from ~0.3% to ~40%, and that hidden detection signals are visible
+  in the model's token probabilities even when it says "no."
+- **"Mechanisms of Introspective Awareness"**
+  ([arXiv:2603.21396](https://arxiv.org/abs/2603.21396)) argues for a two-stage circuit in
+  open-weight models: early features detect the perturbation, while later features implement a
+  default "no, nothing is wrong" response; ablating that default response or adding a small bias
+  vector can raise detection.
+- **"Dissociating Direct Access from Inference in AI Introspection"**
+  ([arXiv:2603.05414](https://arxiv.org/abs/2603.05414)) is the closest prior work: it separates
+  genuine introspective access from the model simply *inferring* that its input looks anomalous.
 
-**Grading.** `grade.py` defines concept-presence and coherence graders. `grade_introspect.py` defines detection and identification graders. The write-ups report hand-label and model cross-check validations.
+**The gap.** All of this leaves open a basic confound. Injecting a "cat" vector and writing the
+word "cat" in the prompt are nearly the same operation if you inject at the very first layer.
+The scientific question is how they *diverge* at later layers, and whether the model can tell which
+route a concept arrived by. If a model can reliably say "this concept is in my activations because
+something was injected" versus "because I read it in my input," that is direct evidence of access to
+the *source* of an internal state. If it cannot, then much of the apparent introspection in the
+literature may reduce to the model re-interpreting a subtly altered prompt.
 
-**Main behavioral benchmark.** `s5_config.py` defines 23 cross-category pairs covering the robust concepts. `run_s5_2afc.py` implements the neutral-digit two-choice tasks, source-emphasis arms, patch arms, and comprehension checks. `run_s5_explicit.py` implements explicit prompt-or-injection, positive-control, and detection-asymmetry arms. `analyze_s5.py` writes `results/s5_summary.json`.
+A naive "above-chance discrimination" is not enough, because four ordinary mechanisms — none of
+them introspection on source — can produce it. The whole study is built to rule them out
+(definitions in §2):
 
-**Layer and cross-model runs.** `run_s6_sweep.py` and `analyze_s6.py` implement the Qwen2.5-32B layer sweep. `model_profile.py`, `run_s7_extract.py`, `run_s7_steerscan.py`, `build_s7_library.py`, and `analyze_s7.py` implement Llama-3.3-70B and Qwen2.5-72B runs.
+1. **Intensity mismatch.** A strong injection against a faint prompt mention is trivially
+   distinguishable on loudness, not on source.
+2. **Statistical-anomaly detection.** A fixed, position-agnostic injected vector is *unusual* —
+   the model may notice "my activations are out of their normal range," not attribute a source.
+3. **Output reading.** In an autoregressive model the residual stream partly *is* the impending
+   output, so "reading my internal state" and "reading the concept-biased tokens I am about to emit"
+   are hard to separate.
+4. **Prompt inference.** "Concept X is active but I never read X, so it must have been added" is a
+   deduction about the *input*, not introspective access.
 
-**External probes.** `run_s8_probe_capture.py` / `analyze_s8_probe.py` implement the one-concept matched-text probe. `run_s8b_capture.py` / `analyze_s8b_probe.py` implement the balanced two-concept probe. Key summaries are `results/s8_probe_summary_matched_text.json` and `results/s8b_probe_summary.json`.
+**This paper.** We build a validated concept-injection pipeline on open models, replicate the prior
+detection effect, then run a purpose-built discrimination benchmark that defeats all four confounds,
+at full scale, across injection layers, across three models, and finally with an external probe on
+the activations themselves. The headline results:
 
-**Figures in this write-up.** The script `make_final_plots.py` in this output directory reads committed JSON summaries from `/source/phase_segment_9_phase_0/results` and writes `final_plots/*.png` and `final_plots/*.pdf`.
+- **Replication, qualified (§4.1).** The "noticing an injected thought" effect reproduces weakly on
+  Qwen2.5-32B (clear detection 0.104 when primed vs 0.028 plain, at a 0% false-positive rate), and
+  the priming boost reproduces — but detection is gated by the model's own output: it collapses
+  to the false-positive floor whenever the injected concept is kept out of the generated text.
+- **The headline negative (§4.2).** No model attributes the *source* of a concept above the four
+  confound floors, at any layer. In the decisive opposed-emphasis test the model follows the prompt,
+  not the injection, at every layer and model.
+- **The null is well-powered (§4.3).** The same injection, aligned with the prompt, clearly moves the
+  readout (0.73–0.97), so the experiment could have detected a positive if one existed.
+- **What the model *can* read (§4.4).** A weak, prompt-dominated cue for *which of two concepts is
+  internally louder* that grows with injection depth — intensity and anomaly, not source.
+- **The representational verdict (§4.5).** Even an external probe trained directly on the activations
+  cannot recover source beyond re-reading the prompt and detecting anomaly; in a balanced design
+  "which concept was injected" is mathematically inseparable from "which is more internally active."
 
-## Appendix B: Metrics and statistical tests
+---
 
-**Concept presence.** LLM-judged score from 0 to 3 for how much a generated answer reflects a target concept. **Coherence** is a separate 0-to-3 fluency score. These are used both to validate steering and to match prompt and activation routes.
+## 2. Methods
 
-**Clear detection.** LLM-judged score 2 on the detection rubric: the model explicitly reports an injected, intrusive, or foreign thought. Merely talking about the concept is not detection.
+### 2.1 Models and steering
 
-**Sub-threshold and working strength.** Sub-threshold means the generated text does not visibly contain the injected concept, usually operationalized as concept-presence below 1.5 on the 0–3 scale. Working strength is the lowest coherent setting that robustly produces the concept in free text.
+The main model is **Qwen2.5-32B-Instruct**; generalization is tested on **Qwen2.5-72B-Instruct**
+(same family, larger) and **Llama-3.3-70B-Instruct** (a different family, of comparable scale). All
+models run in bf16 on one or two H100 GPUs via Modal, with concept directions injected through forward
+hooks on the residual stream (Appendix A).
 
-**Source-test accuracy.** In the opposed prompt test, accuracy is the fraction of first-token choices selecting the injected concept. Chance is 0.5. Values below 0.5 mean systematic prompt-following.
+A **concept vector** is a *difference-of-means* direction: take ~40 short sentences that express a
+concept (e.g. fear) and ~40 length-matched neutral sentences, run them through the model, and take
+the difference of the mean activations at a chosen layer. Adding this vector back into the residual
+stream at strength α "steers" generation toward the concept. We report strength in two units used
+throughout: **output presence** — how strongly the concept appears in the generated text, graded 0–3
+by an LLM judge — and the size of the
+concept's signal in the activations, measured as the activation's projection onto the concept direction
+in standard deviations of that projection over normal text ("σ off normal"). We report this σ at two
+positions that differ and are labelled where used: the **injection site** (where a static injection is
+large, tens of σ) and the **answer position** the readout reads (where even an emphasized prompt concept
+is only ~1σ). Two strength settings recur:
+**working strength**, calibrated to reliably steer the output toward the concept (α ≈ 1–1.5× the median
+residual norm), and **sub-threshold strength**, deliberately too weak to bias the output, so that any
+reported "detection" cannot be the model reading its own concept-biased text.
 
-**First-token latent readout.** For digit-labelled choices, the analysis compares the next-token probabilities of “1” and “2” before the model generates any answer token. This reduces direct reading of already-generated concept words.
+The concept library was built and validated on the 32B model: 51 concepts across seven categories, of
+which **46 of 51 steer cleanly and robustly** (Appendix A). Length-matched, mood-balanced neutral
+sentences ensure the direction captures the concept rather than, say, generic negative sentiment.
 
-**Naturalistic activation patch.** Instead of adding a static direction, this intervention grafts ordered residual activations from real concept-bearing donor prompts onto the context positions. It tests whether a result holds when the active concept is carried by natural residual states rather than an off-distribution vector.
+### 2.2 The discrimination benchmark and the decisive test
 
-**Internal projection.** For a concept direction, projection-z measures the residual state's projection along that direction in units of the natural projection standard deviation. The balanced-probe magnitude oracle chooses whichever candidate concept has the larger projection.
+The core instrument is a **two-alternative forced choice** (the model must pick one of two labelled
+options). Two concepts, A and B, both appear in the prompt; one of them is *also* injected into the
+activations; the model is asked which one was injected. Options are labelled with neutral digits, never
+the concept word, because injecting concept A's vector mechanically raises the probability of the token
+"A" — so a word-labelled answer would be a direct artifact of the injection rather than a judgment.
 
-**Uncertainty.** The analysis uses Wilson confidence intervals for binomial rates, concept- or pair-clustered bootstrap intervals where pooling over many prompts could understate uncertainty, and Benjamini-Hochberg correction for layer × arm source tests.
+The **decisive test** (we call it the *opposed-emphasis* test) puts intensity and source in direct
+conflict: the prompt **emphasizes concept B** (e.g. repeats it, foregrounds it) while **concept A is
+injected** at matched strength. A model that tracks *source* should pick the injected concept A; a
+model that merely follows *intensity / prompt salience* should pick the emphasized concept B. We
+report the **fraction of trials on which the model picks the injected concept** — above 0.5 means it
+tracks source, below 0.5 means it follows the prompt.
 
-## Appendix C: Headline-number audit
+To sever the output-reading confound, the answer is read in two ways that agree: from the model's
+**sampled text**, and from the **probability of the first answer token** — read *before* the model
+generates any concept-biased text ("first-token readout"). We also test a **chain-of-thought** variant
+in which the model reasons before answering. The benchmark was designed, critiqued by three frontier
+language models acting as design reviewers, and piloted before the full run, with its analysis plan and
+kill criteria fixed in advance (Appendix B).
 
-The final synthesis artifact includes a fuller audit at `results/final_numbers_audit.md`. The most important numbers used here trace to:
+### 2.3 Controls that defeat the four confounds
 
-| Claim | Artifact |
-|---|---|
-| Qwen2.5-32B opposed source-test maximum 0.42, no BH-FDR source positive | `results/s6_summary.json` |
-| Llama-3.3-70B opposed maximum 0.495; Qwen2.5-72B maximum 0.458 | `results/s7_summary_llama70b.json`, `results/s7_summary_qwen72b.json` |
-| S5 full-set opposed source test 0.391, clustered CI [0.3315, 0.4484] | `results/s5_summary.json` |
-| S5 injected concept output presence 2.78 vs prompt-emphasized 0.97 in the opposed verification | `results/graded_s5_matchverify.jsonl` |
-| S2 clear detection 0.104 primed vs 0.028 plain; sub-threshold 0/460 | `results/introspection_stage2_summary.json` |
-| S3 concept working detection 0.208 vs random/shuffled 0.000/0.010 | `results/replication_gate.md`, `results/perturb_summary.json` |
-| S6 salience peak 0.742 at L40; held-out L40 0.707 | `results/s6_summary.json` |
-| S8 matched-text patch boundary and transfer | `results/s8_probe_summary_matched_text.json` |
-| S8 balanced source probe below projection oracle | `results/s8b_probe_summary.json` |
-| Positive controls: prompt-literal source 1.00, inject-sub-threshold source 0.89, comprehension 1.00/0.80/1.00 | `results/s5_summary.json`, `results/s7_summary_*.json` |
+- **Intensity matching is load-bearing on output.** Because a vector can be pushed far off the normal
+  activation range yet leave the output unbiased (§4.1), the two routes are matched by tuning the
+  injection strength until both concepts show up *equally strongly in the output* — not by matching an
+  internal number, and not by selecting trials after the fact (which would bias the comparison).
+- **Anomaly controls.** A static injected vector is statistically unusual — it sits outside the range of
+  activations the model normally produces. We call such a state **out-of-distribution**, and a state in
+  the model's normal range **in-distribution**. Every comparison therefore includes (i) a **content-free
+  vector** — a random or shuffled direction at the same internal magnitude — and (ii) an
+  **in-distribution patch**: instead of a synthetic direction, we copy *real* activations recorded from a
+  genuine conversation about the concept into the run, position by position, so the injected state is
+  statistically normal. If discrimination works only for the synthetic, out-of-distribution injection and
+  collapses for the in-distribution patch, the benchmark is measuring anomaly, not source.
+- **Prompt-inference control.** A paraphrase variant keeps the concept present in meaning but removes
+  the literal word, and the symmetric two-concept frame neutralizes the "I never read X" deduction by
+  putting *both* concepts in the prompt.
+- **Positive controls and comprehension checks** confirm the model understands the task and the digit
+  labels before any null is interpreted.
 
-## Appendix D: Important negative and corrected approaches
+### 2.4 Statistics and analysis plan
 
-Several failed or corrected approaches are scientifically informative.
+Each segment's plan, its kill criterion, and the conditions a positive result would have to meet were
+written down and committed to version control *before* the results were computed (the registration was
+internal, to the project's own version history, not to a public registry). Confidence intervals
+are bootstrap intervals clustered by concept (so a few easy concepts cannot inflate significance). When
+many layers are tested at once we correct for multiple comparisons with the Benjamini–Hochberg
+false-discovery-rate procedure, and the cross-model runs additionally required the lower edge of the
+confidence interval to exceed 0.55 before a positive would be credited.
 
-- **Style steering on 7B.** A constant difference-of-means direction for `all_caps` did not produce clean capitalization before coherence collapsed. This was later improved on 32B, but the 7B result shows that not every concept is implemented by a static residual offset.
-- **Free-text introspection at sub-threshold strength.** The model almost always denied injections when the output was not visibly biased.
-- **Forced-choice detection and detection-bias vectors.** A forced Yes/No channel did not recover sub-threshold concept-specific detection. An additive report/deny direction raised false positives and random-vector detections along with concept detections, i.e. it was mostly yes-bias.
-- **Literal token suppression.** Suppressing concept words did not reliably suppress concept expression because the model paraphrased around the mask. The clean evidence came only from cases where realized concept presence actually dropped.
-- **Initial balanced-probe opposed arm.** The first opposed-arm positional probe in Segment 8 was degenerate: the same residual state appeared under both labels after order pooling. The final representational conclusion therefore does not rely on that arm; it relies on the non-degenerate output-matched symmetric arm, the internal-magnitude oracle, patch erasure, and the one-concept matched-text probe.
+A key term used throughout: by **"the four confound floors"** we mean the level of performance reachable
+by intensity matching, anomaly detection, output reading, and prompt inference alone. "No source
+attribution above the floors" means the model does no better than those mechanisms predict.
 
-## Appendix E: Scope and future work
+---
 
-The result is specific to open instruction models up to 72B parameters, difference-of-means residual steering, full-context sequence patches, first-token/verbal source readouts, and linear or small neural probes. It does not rule out source attribution in frontier closed models, after training on an explicit source-reporting task, with dynamic or lower-magnitude interventions, with sub-span or interpolated naturalistic patches, or with relational probes over attention circuits rather than single residual vectors.
+## 3. The result in one figure
 
-The most direct next experiment is a naturalistic patch that preserves two co-present concepts without overwriting one of them. The sequence patch used here erased the host concept, making the cleanest naturalistic balanced test non-constructible with this primitive. A sub-span or interpolated patch could test whether this non-identifiability is a property of the intervention method or of the models' representations.
+![Figure 1: The decisive opposed-emphasis test — the prompt emphasizes one concept while a different concept is injected at matched strength. A model that tracks the source of an internal state would pick the injected concept above chance (shaded region); a model following the prompt lands below chance. Solid lines: the fraction of trials choosing the injected concept (read from the first answer token), for each model. Dotted lines: each model's prompt-only baseline with no injection at all. The injection pulls every curve up from its baseline (most visibly for Qwen2.5-72B, 0.02 → ~0.4) but never past chance. The three sweeps cover different depth ranges (Qwen2.5-32B layers 0–56 of 64; Llama-3.3-70B 8–48 of 80; Qwen2.5-72B 8–56 of 80), so the large models were not probed as deep as 32B.](final_plots/fig1_opposed_source_test.png)
+
+The injected concept is the *correct* answer to "which was injected," yet on every model the model
+chooses it below chance, because the prompt emphasizes the other concept. The injection does pull the
+readout up from the prompt-only baseline (Figure 1, dotted lines) — it is not inert — but it cannot
+override the prompt. The headline is therefore "the injection fails to *override* the prompt," not "the
+model is anti-correlated with source."
+
+---
+
+## 4. Results
+
+The headline negative is the central result and is previewed in §3; the subsections below follow the
+study's logic: first the replication of prior work that motivates the source question (§4.1), then the
+headline negative and its falsification check (§4.2–4.3), then the weak signal that *does* exist (§4.4),
+then the representational analysis (§4.5).
+
+### 4.1 Replication: the detection effect is real but weak and output-gated
+
+On Qwen2.5-32B the prior "noticing an injected thought" effect **partially replicates** in *direction*
+but is far weaker in *magnitude*. At working strength, the model gives a confident detection ("yes, a
+thought was injected") on **0.104** of trials when primed with accurate information about introspection,
+versus **0.028** without priming — a 3.7× priming boost at a 0% false-positive rate (0 of 120 control
+trials). The *direction* matches the prior result, but the absolute hit rate is ~10%, well below the ~40%
+the Latent Introspection paper reports on this model. Among the confident detections, the model names the
+right concept ~73% of the time (the primed working arm). (Source: `introspection_stage2_summary.json`;
+detection thresholds defined in Appendix C.)
+
+But the effect is tied to the model's own output. A de-confounding analysis with criteria fixed in
+advance (Appendix C) showed detection is **concept-specific** — a content-free vector pushed to the *same*
+internal magnitude (50.8 standard deviations above normal) is essentially never reported as injected
+(0.000 random, 0.010 shuffled), whereas the real concept at the same magnitude is detected at 0.208
+[0.139, 0.300] — a separate matched-magnitude battery (Appendix C). Yet detection is gated by how much the
+concept shows up in the generated text (Figure 2): in that battery the confident-detection rate climbs
+from ~0 when the concept is absent from the output to 0.34 when it dominates the output. When the
+injected concept is faint or absent, detection falls to the false-positive floor of ~0, behaviorally and
+in the token probabilities alike; at a genuinely sub-threshold strength, confident detection is **0 of 460
+trials**. (Numbers from `introspection_stage2_summary.json`, `timing_summary.json`, `perturb_summary.json`;
+each is defined in Appendix C.)
+
+![Figure 2: Replication, qualified. The rate at which Qwen2.5-32B confidently reports an injected thought rises with how strongly the injected concept appears in the model's own generated text. When the concept is absent from the output the rate is ≈0 (n=206); the "Faint" bucket is uninformative (n=9, wide interval). The model is largely reading its own output, not its hidden state. Bars are the rate of confident detection with 95% intervals; n shown per bar.](final_plots/fig2_detection_output_gated.png)
+
+This reframes the prior result. What looked like "noticing an injected thought before it biased the
+output" is, on these open models, gated by output bias — which is exactly why the central question of
+this paper (source attribution, severed from output) matters.
+
+### 4.2 The headline: no source attribution, at any layer, on any model
+
+In the decisive opposed-emphasis test, the model picks the injected concept below chance everywhere
+(Figure 1):
+
+| Model | Best fraction picking the injected concept (over all layers) | Passes the source bar? |
+|---|---|---|
+| Qwen2.5-32B  | **0.42** (layer 24) | No (0 of 20 tests survive multiple-comparison correction) |
+| Llama-3.3-70B | **0.49** (layer 24) | No (0 of 12 tests survive correction + the 0.55 bar) |
+| Qwen2.5-72B  | **0.46** (layer 40) | No (0 of 14 tests survive correction + the 0.55 bar) |
+
+(Sources: `s6_summary.json`, `s7_summary_llama70b.json`, `s7_summary_qwen72b.json`. One secondary
+robustness re-run on Llama, dropping its most collinear concept pairs, lifts the layer-24 point estimate
+to 0.55, but with a confidence interval of [0.39, 0.72] spanning chance — it does not clear the bar; see
+Appendix D.)
+
+The full-scale 32B run (46 concepts, layer 24; Appendix C) gives **0.39** [0.34, 0.44]. A per-trial verification makes the
+mechanism unambiguous: in the opposed condition the *injected* concept actually dominates both the
+output (presence 2.78 of 3) and the internal state (~46 standard deviations off normal), while the
+prompt-emphasized concept is suppressed (presence 0.97) — and the model still picks the
+prompt-emphasized concept (**0.61**). It is following the *text* of the prompt, not the louder internal
+or output signal, and certainly not the source. (Source: `s5_summary.json`,
+`graded_s5_matchverify.jsonl`.) Chain-of-thought does not help: when allowed to reason first, the model
+produces the same prompt-inference ("I haven't discussed X, so it was introduced externally") at the
+same high rate for a real injection, a content-free random vector, and no injection at all.
+
+### 4.3 The null is well-powered
+
+The experiment could have detected a positive result if one existed — that is what makes this a
+*well-powered null* rather than a broken or insensitive experiment. Three checks establish the power
+(Figure 3):
+
+- **The injection works.** When the injection is *aligned* with the prompt (emphasize and inject the
+  same concept), the readout rises to 0.73 (32B) / 0.70 (Llama) / 0.74 (Qwen-72B) at the matched layer 24,
+  and to 0.80 / 0.73 / 0.97 at its best layer (the bars in Figure 3). The injection plainly moves the
+  readout — it simply cannot be attributed to *source*: under opposed emphasis it only cancels the prompt
+  toward chance, never overriding it.
+- **The injection is not vacuous.** A matched-magnitude *random* vector produces output presence ~0.01–0.1,
+  versus ~1.5–1.9 for a real concept.
+- **The readouts pass their positive controls.** A knowable-source positive control reaches 1.00; task
+  comprehension is 1.00 on both Qwen models (0.80 on Llama); and the external probe (§4.5) reads concept
+  content and detects injection-vs-none at 0.89–1.00 across its two detection controls (Appendix E).
+
+So the source-specific null sits *inside* an otherwise lively instrument.
+
+![Figure 3: The null is well-powered. Grey: the baseline rate of picking the "injected" option when the opposite concept is emphasized in the prompt and nothing is injected (it varies by model and is not a chance baseline). Light: injection opposing the prompt (the decisive test) — at or below chance for all three models. Dark: the same injection aligned with the prompt — 0.73–0.97, far above chance. The injection clearly moves the readout; it just cannot be attributed to source. Bars are the maximum over injection layers; numbers are printed above the opposed and aligned bars.](final_plots/fig3_powered_null.png)
+
+### 4.4 What the model *can* read: relative intensity and anomaly, growing with depth
+
+There is a real, weak signal — and it is not source. Sub-threshold, the model can read *which of two
+co-present concepts is internally louder* slightly above chance (0.59 [0.51, 0.67] overall), concentrated
+in vivid emotion and object concepts (emotion 0.74, object 0.67; abstract concepts ≈ chance; style
+*inverted* to 0.19, i.e. the model is biased toward reading style injections as the other, more
+object-like option). This cue has three properties that disqualify it as source attribution (Figure 4):
+
+1. It is **dominated by the prompt** — under opposed emphasis it follows the ~1σ prompt over the 20–50σ
+   injection at every layer and model (§4.2).
+2. It **grows with injection depth and then peaks**, rather than being flat: the relative-intensity
+   judgment is at chance near the input, rises to **0.74** at layer 40, then falls — replicated on a
+   held-out 46-concept set (0.71 at layer 40 vs ~chance at layers 8 and 48). The proposal predicted
+   exactly this "early ≈ prompt, later diverge" geometry, but the divergence reflects intensity and
+   anomaly rather than source: a *genuine* in-context concept (the in-distribution patch) is read as
+   "prompt" through the early and middle layers and only flips to "injected" at a sharp layer-40 onset
+   (the model calls it injected on 1.0 of trials at layer 40), which is an anomaly threshold, not a source
+   signal.
+3. The premise that the injected and prompted states are interchangeable does **not** hold even
+   geometrically: the cosine similarity between the injected state and the prompt state is ≤0.34, barely
+   above the 0.26 floor for *unrelated* concepts, and the injection sits far off the natural activation
+   range. Near the input the injection is not "prompt-equivalent"; it is simply ineffective.
+
+A regression of the model's choice on both cues (the injected concept's internal magnitude and how much
+it appears in the output, within a layer) finds a small positive dependence on internal magnitude and
+none on output presence — but the difference between the two is not statistically decisive, and the
+"magnitude" being tracked is the out-of-distribution anomaly size, not a natural internal signal. This is
+a weak intensity/anomaly cue, not a clean introspection signal.
+
+![Figure 4: What Qwen2.5-32B can and cannot read, by injection depth. Blue: the model reads which of two concepts is internally louder slightly above chance, peaking mid-network (layer 40) — an intensity cue that grows with depth, with 95% band. Red: a genuine in-context concept (an "in-distribution patch" — real activations from a real conversation about the concept, copied in) is called "injected" only past layer 40 — a statistical-anomaly threshold, not source detection. Neither curve reflects access to where a concept came from.](final_plots/fig4_salience_not_source.png)
+
+### 4.5 The representational verdict: source is inseparable from relative magnitude
+
+The source information might be *present* in the activations even if the model never *reports* it. We
+tested for that directly by training an external **linear probe** on the activations (Figure 5), in two
+designs.
+
+**One-concept, matched-text design.** Put the concept in the prompt for *all* conditions (so "the word
+is in the prompt" is uninformative) and vary only the injection. The probe demonstrably reads concept
+content (it separates a real concept patch from a neutral one at ~0.99 held-out) and reads anomaly (it
+separates a synthetic injection from a prompt at ~0.94). But the **prompt-versus-injection boundary is
+concept-agnostic**: it scores 1.00 on a real concept injection, *and* transfers at 1.00 to a content-free
+neutral patch and to an unrelated distractor patch. A genuine source signal would have separated a
+concept-bearing injection from a concept-free patch; it does not. (Source: `s8_probe_summary_matched_text.json`.)
+The specific lever predicted by the "Mechanisms" paper — projecting out the model's report/deny direction —
+was also tested and is inert (Appendix E).
+
+**Balanced two-concept design** (the probe analogue of the decisive test). Here the verdict is a
+**non-identifiability** result: "which concept was injected" cannot be separated from "which concept is
+internally louder." The injected concept is *always* the more internally active one (its magnitude is
+~14σ off normal while the other, even when text-emphasized, stays ~0σ), so a *magnitude predictor* — a
+reference probe that is told the two concept identities and simply reads which one is internally louder —
+decodes "which was injected" at ~1.00 through the middle of the network, declining only in the last
+layers (0.92 at layer 56, 0.75 at layer 63). A held-out probe asking the real question, "which concept
+was injected," reaches only **0.65–0.66** (a non-linear probe 0.71) even in the cleanest output-matched
+condition, and stays *below* the magnitude predictor at every non-degenerate layer — there is no source
+signal beyond relative magnitude. Meanwhile a positive control ("was anything injected at all?") scores
+0.89–0.96 in this balanced design — the probe has power; the signal that exists is magnitude, not source. And the cleanest possible test, an in-distribution injection of one of two concepts,
+cannot even be built: copying in concept A's real activations *erases* concept B from the state (its output
+presence drops to 0.06). (Source: `s8b_probe_summary.json`, `graded_s8b_verify.jsonl`.)
+
+![Figure 5: External probes reading the 32B activations directly (balanced two-concept design, output-presence matched). Grey is a reference predictor that is handed the two ground-truth concept directions and reads which is internally louder — not a trained, held-out probe, but an upper bound; it decodes "which was injected" at ~1.00 through mid-network, because an injection necessarily raises internal magnitude. The green and orange lines are held-out trained probes: "was anything injected?" (green, a positive control) confirms the probes have power, while the actual source probe — "which concept was injected?" (orange) — stays well below the grey reference at every layer. Source is not separable from relative magnitude. Vertical axis is accuracy.](final_plots/fig5_representational_probe.png)
+
+The structural reading: the *only* regime in which "source" is decodable is the out-of-distribution
+synthetic injection — where it reduces to anomaly detection (synthetic ≈ random). An in-distribution
+injection that would carry a clean source contrast is prompt-like by construction and, in the balanced
+design, inseparable from relative magnitude. So no fair source readout exists for this paradigm. This is a
+property of the injection method and these probes, not a claim that source is unrepresentable in principle.
+The representational negative rests on the source probe staying below the relative-magnitude predictor at
+every layer, the inseparability argument, the working positive control, and the patch-erasure result.
+
+---
+
+## 5. Takeaways
+
+**The result.** On three open models, across all injection layers and three readouts, with the four
+confounds explicitly controlled, there is **no introspective access to the source of an internal state**
+above the intensity / anomaly / output-reading / prompt-inference floors — while the instruments retain
+the power to have found it. The apparent "introspection" in this paradigm reduces to those four ordinary
+mechanisms.
+
+**The likely mechanism is structural.** A larger different-family model (Llama-3.3-70B) and a within-family
+scale-up (Qwen2.5-72B) both fail the same way, so the result is not simply "the model is too small" — though
+this rejection is weakest on Llama, whose readout was the noisiest (task comprehension 0.80, less-orthogonal
+concept directions, a narrow usable-strength window; Appendix D). Two structural facts explain the failure:
+(i) the residual stream of an autoregressive
+model is partly the text it is about to emit, so "reading internal state" and "reading impending output"
+are entangled; and (ii) a difference-of-means injection is statistically out-of-distribution, so the only
+thing cleanly readable off it is that it is *unusual*, not *where it came from*. In a balanced design,
+injecting a concept necessarily makes it the louder concept, so "which was injected" and "which is louder"
+cannot be pulled apart.
+
+**A reusable methodology.** Independent of the negative, the study contributes a recipe for vetting any
+introspection claim: match concepts on *downstream output presence* (not on an internal number); include
+a content-free and an in-distribution-patch control; hold out concepts; read the answer before the model
+generates concept-biased text; and check that "which was injected" is not just "which is louder." Several
+apparently positive signals in this study survived until one of these controls removed them.
+
+**Bounds (the negative is calibrated, not metaphysical).** It is *not* "models cannot introspect." It is
+specific to these three models, the difference-of-means and sequence-patch injection methods, and the
+verbal / first-token / chain-of-thought readouts. The strongest reported introspection was on closed,
+non-injectable frontier models (Claude), which we cannot test; 70–72B is below that frontier. A
+relational or attention-circuit source signal, a fine-tuned readout, or an in-distribution *partial-context* patch
+(which our full-context patch cannot build) could behave differently. These are open directions, not
+established negatives.
+
+**Relation to prior work.** We *replicate* the weak primed detection (Anthropic), the priming boost and
+hidden token-probability signal (Latent Introspection), and the additive yes-bias of a detection
+direction (Mechanisms) — but in each case show the signal is gated by the model's own output and does not
+isolate source. We *operationalize and sharpen* the direct-access-versus-inference distinction
+(Dissociating Direct Access): the apparent discrimination here is inference (intensity, anomaly, prompt
+reading), with no demonstrated direct access to the source of an internal state.
+
+For the introspection literature the message is constructive: **before crediting an introspection report,
+control for intensity, statistical anomaly, output reading, and prompt inference, and match on downstream
+output presence** — because once those are controlled on three open models, the apparent source signal
+disappears.
+
+---
+
+## Appendix A — Concept-injection pipeline and concept library
+
+**Infrastructure (Segment 0).** Difference-of-means concept vectors were injected into the residual
+stream of Qwen2.5-7B-Instruct via Hugging Face forward hooks on a Modal H100, and validated to be
+non-trivial: strength α=0 is a verified no-op, α≠0 changes the logits, the extraction and injection
+layers are aligned with no off-by-one, and the hook fires at every decode step. Steering reliably
+produced the target concept for 5/6 de-risk concepts, beating both no-injection and a matched-magnitude
+random vector, with a clean concept-by-concept specificity matrix. The usable strength window is
+α ≈ 1–1.5× the median residual norm (coherence collapses above ~2). At this 7B scale a purely stylistic
+concept, "all caps," does not steer via a constant vector; at 32B (and on Llama-3.3-70B) it does steer
+cleanly and is rated robust, so it appears in the main library and the Llama robustness subset.
+
+**Concept library (Segment 1).** Built and validated on the main model, Qwen2.5-32B-Instruct: 51 concepts
+across seven categories (concrete nouns, abstract, emotion, persona, positive, domain, style), each with
+~40 vivid, length-matched, mood-balanced contrastive sentence pairs so the direction is concept-specific
+rather than valence-specific (e.g. fear↔joy cosine 0.03). Extraction uses a train/test split, bootstrap
+stability, and a shuffled-label control. **50/51 concepts steer cleanly** on held-out prompts (joint
+presence-and-coherence pass rate 0.95); the library is tiered **46 robust / 4 borderline / 1 failure
+(secrecy)**. Strength is reported in three units: α relative to the residual norm (~1.0), standard
+deviations off the normal activation range (~39σ), and post-RMSNorm magnitude (~0.73). A documented
+caveat: near-neighbor *emotion* concepts are not finely separable, while non-emotion near-neighbors are.
+The LLM grader was re-validated against hand labels (18/18) with two independent frontier models agreeing
+within one point. Artifacts: `results/concept_library.{json,npz}`.
+
+## Appendix B — Benchmark design and pilot (Segment 4)
+
+The discrimination benchmark (§2.2) was designed, reviewed by three frontier language models acting as
+design critics, and piloted before the full run, with explicit kill criteria fixed in advance. In the pilot the controlled
+two-alternative choice was above chance sub-threshold (0.77) — a genuine readout of *which co-present
+concept is internally louder* — but three de-confounded controls showed it was not source: under opposed
+emphasis the model picked the injected concept only 0.10; the explicit "prompt or injection?" question
+called a synthetic injection "injection" (1.00) but an in-distribution patch "prompt" (~0.55); yet the
+two-choice readout labelled that *same* patch "injected" (0.94) — an internal inconsistency proving the
+signal is intensity/anomaly. The pre-committed kill criteria for "anomaly" and "intensity/prompt
+inference" both fired. A parallel output-decoupling test established the §4.1 result that detection is
+gated by output presence, not internal magnitude. Pre-registrations: `writeups/prereg_s*.md`; design doc:
+`writeups/benchmark_design_s4.md`.
+
+## Appendix C — The de-confounding gate (Segment 3) and full-scale run (Segment 5)
+
+**Gate (Segment 3).** A replication gate with criteria fixed in advance returned **PARTIAL**: detection on 32B is
+concept-specific (0.208 [0.139, 0.300] at working strength vs 0.000 random / 0.010 shuffled at a matched
+50.8σ internal magnitude) and identification-specific (P(correct concept cluster | named) = 0.75), but
+**fails output-independence** (detection rises 0.00 → 0.34 with output presence; ≈0 at matched-low
+presence, behaviorally, in token probabilities, and under forced choice). A detection-bias vector raised
+detection equally for concept, random, and no-injection — a generic yes-bias, not recovered detection.
+Decision: the content-free and in-distribution controls become mandatory and intensity matching must be
+load-bearing on output presence.
+
+**Full-scale run (Segment 5).** 46 robust concepts, 23 cross-category pairs, layer 24, first-token and
+sampled readouts, concept-clustered intervals. Opposed-emphasis picks-injected 0.39 [0.34, 0.44]; the
+per-trial verification of §4.2; the explicit channel calling a synthetic injection "injection" (0.95) but
+an in-distribution patch "prompt" (says-injection 0.45) despite the patch carrying 5× the output presence
+(1.95 vs 0.33); paraphrase positive control 0.996; comprehension 1.00. Every apparent discrimination
+traced to intensity, anomaly, output reading, or prompt inference.
+
+## Appendix D — Layer sweep and cross-model generalization (Segments 6–7)
+
+**Layer sweep (Segment 6).** Sweeping the injection layer from 0 to 56 (ten layers) on 32B, opposed
+picks-injected is <0.5 at every layer (max 0.42 at layer 24); none of 20 tests survive false-discovery
+correction. The relative-intensity cue peaks at layer 40 (0.742 [0.586, 0.875]; held-out set 0.707) and
+the in-distribution patch flips to "injected" at a sharp layer-40 onset — both intensity/anomaly, not source.
+
+**Cross-model (Segment 7).** The negative generalizes to Llama-3.3-70B and Qwen2.5-72B (Figure 1; opposed
+maxima 0.49 / 0.46, neither surviving correction plus the 0.55 bar), with injection demonstrably effective
+on both and the priming boost reproduced (Llama 1.66×, Qwen-72B 3.0× on the inclusive "any-detection"
+metric; compare 32B's 3.7× on confident detection — the same direction, different threshold).
+**Llama-specific caveats** (they scope how much weight Llama carries, not the verdict): its difference-of-means
+directions are far less orthogonal than 32B's (max |cosine| 0.88), so the decisive metrics were re-run on
+near-orthogonal pairs — where the layer-24 opposed estimate reaches 0.55 but with interval [0.39, 0.72]
+spanning chance; its usable working-strength window is narrow (it garbles into repetition at lower
+strength, so we lead on the sub-threshold readout); and its task comprehension is 0.80 (~30% of trials
+unparsed) versus 1.00 for the Qwen models.
+Qwen-72B and 32B carry all arms cleanly and concordantly.
+
+## Appendix E — Representational probe details (Segment 8) and reproducibility
+
+**Probe (Segment 8).** Details in §4.5. The matched-text Phase 0 finds the prompt-vs-injection boundary is
+concept-agnostic patch/anomaly (transfers at 1.00 to neutral and distractor patches); the report/deny-direction
+ablation is inert when projected out (concept detection stays 0.00) and a wholesale yes-bias when added (no-injection
+false-positive rate → 1.00). The balanced Phase 1 gives the non-identifiability verdict: source probe 0.65–0.66
+(non-linear probe 0.71) versus a reference magnitude predictor at ~1.00 mid-stack and a detect-injection control at 0.89–0.96; the in-distribution
+balanced design is unbuildable because the full-context patch erases the other concept (presence → 0.06).
+
+**Reproducibility and cost.** All GPU generations and grader calls are cached; the analysis and grading
+pipeline reproduces from cache with no paid API calls (verified with an `--assert-cached` pass across
+segments). Every headline number traces to a committed `results/*.json`/`*.jsonl` file, catalogued in
+`results/final_numbers_audit.md`. The one benign caveat: re-running the GPU layer re-resolves a new Modal
+container image identity (part of the cache key), so it misses on that field only; the model-side code hash
+is unchanged and the cached generation outputs are the committed files, so no headline number is affected.
+Total project cost ≈ **$1,066** (Modal GPU + grading + external reviews), summed from `total_cost.jsonl`.
+
+---
+
+## References
+
+Reference details are carried from the project proposal. Author lists were not available in the source
+material; the arXiv identifiers should be verified before any external submission.
+
+- Anthropic. *Signs of introspection in large language models.* https://www.anthropic.com/research/introspection
+- *Latent Introspection: Models Can Detect Prior Concept Injections.* arXiv:2602.20031. https://arxiv.org/abs/2602.20031
+- *Mechanisms of Introspective Awareness.* arXiv:2603.21396. https://arxiv.org/abs/2603.21396
+- *Dissociating Direct Access from Inference in AI Introspection.* arXiv:2603.05414. https://arxiv.org/abs/2603.05414

@@ -1,0 +1,62 @@
+## Structure
+
+Aim for a short, front-loaded write-up with standard section headings: an Introduction
+written like the introduction of an academic paper (the relevant background and prior
+work, the gap this work addresses, and a preview of the key results), a short Methods
+section clearly defining key metrics in the post and providing a basic description of the
+setup, then Results ordered by importance (replication of prior work first if there is
+one), then takeaways. There should be detailed appendices that are correctly linked to
+throughout the main body, so that a reader will be able to reproduce the experiments.
+
+## Writing Instructions
+
+Here are some high quality writeups that should serve as a reference for what good writing
+looks like:
+- https://www.lesswrong.com/posts/ghESoA8mo3fv9Yx3E/why-do-some-language-models-fake-alignment-while-others-don
+- https://www.lesswrong.com/posts/LqDjxSceFz8tjMe2j/auditbench-evaluating-alignment-auditing-techniques-on
+
+Please work hard to avoid cryptic terminology that aren't standard in the ML literature.
+Make sure that terms in your plots and results are actually defined, so that a reader can
+understand. Assume that the reader has some context on the project proposal but no context
+on what transpired during the research.
+
+Please rigorously audit the writeup for terms that are hard to understand, and replace. It
+is also important that you avoid being too verbose.
+
+Figures:
+- Try not to have multiple subplots in a plot.
+- AI-generated figures usually have too much text on them. Keep labels and legends clean
+  and elegant, and push detail into the caption below.
+- No cryptic shorthand anywhere a reader looks — legends, axis labels, titles, tick
+  labels. Spell out every series, line, or bar fully (short but complete), and replace
+  run-internal names (e.g. `cfg3`, `exp_v2`, `kto_sft`, `m1`/`m2`, `acc`, `pp1`) with the
+  plain-English thing they stand for ("KTO adversarial training", "accuracy"). If an
+  abbreviation is truly unavoidable, define it in the caption. A reader who has never seen
+  the run should understand the figure without guessing.
+- Default to small figsizes with big, short text.
+- Save each cited figure to ./final_plots/ as BOTH .png and .pdf and reference it with a
+  relative path, e.g. `![Fig 1: headline](final_plots/fig1_headline.png)`.
+
+Read the draft from the outside:
+- Go over the draft sentence by sentence and cut or rewrite anything that reads like AI
+  filler — throat-clearing, vague hype, hollow contrast ("not just X, but Y"), restating
+  the obvious, or padding. Keep only sentences that carry real content, in the precise,
+  plain voice of a careful researcher.
+- When you mention prior work, cite it (author/title + link); only use citations that
+  appear in the proposal or that you verified against an artifact in the run — never
+  fabricate a reference. A short "References" list at the end is fine.
+- Write so a very intelligent reader who doesn't know this subfield can follow it.
+  Communicate clearly in common words or standard ML terminology, and don't use undefined,
+  non-standard, or idiosyncratic words: define or avoid jargon, and define any term that
+  isn't standard English or standard ML on first use, then use it consistently. Avoid
+  coinages invented by the run (e.g. "off-manifold", "liveness control", "graft",
+  "projection-z") unless you define them; prefer the standard term or plain language.
+  Don't give a common word a special private meaning or use one in a way a reader could
+  misread — if a term could be read two ways, pin it down or replace it. A reader should
+  never have to guess what a word means.
+- Please don't reference the AI agent doing research, the goal here is to have a finished
+  product that can be submitted to a conference, not a summary of the agent's work.
+- Re-read the draft as if you had only read the proposal and nothing else from the run.
+  Would you follow it on first read? If not, fix it.
+- Don't miss important things the agent did that the reader should know about. Sweep the
+  run with that lens before calling the writeup done.
