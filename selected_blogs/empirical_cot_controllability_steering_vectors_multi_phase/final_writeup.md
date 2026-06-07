@@ -1,200 +1,144 @@
-# Steering a reasoning model to control and conceal its chain of thought
-
-## Abstract
-
-We study whether low chain-of-thought (CoT) controllability is a stable property of a reasoning model or a behavior that can be exposed by small interventions. On `gpt-oss-20b`, a LoRA (low-rank adaptation) fine-tune on edited reasoning traces raises held-out **effective CoT control** from 1.6% to 13.9%. A single frozen-weights residual-stream vector with 2,880 parameters, trained with the same supervised objective but allowed to change only one layer's residual activations, matches the fine-tuned model in aggregate: 14.3% effective control, with paired difference from fine-tuning +0.4 percentage points (95% CI −1.9 to +2.8). The effect is concentrated in simple line formatting and brevity, not broad across all instructions. Mechanistically, the vector works mainly by causing late attention heads to attend to the in-context formatting instruction. A dedicated vector can also hide a decision cue from CoT-reading monitors, but the strongest monitorability claims are bounded: wrong answers remain catchable by verification, and the hard-to-verify setting contains a substantial learned clean-writing style component. Overall, the results put pressure on simple inferences from “the base model cannot control its CoT” to “the visible CoT is reliably monitorable,” while remaining a reachability result that requires white-box gradients and constructed training targets.
+# A single residual-stream vector can reproduce fine-tuning’s chain-of-thought control on `gpt-oss-20b`
 
 ## Introduction
 
-Chain-of-thought monitorability is useful only if the visible reasoning trace remains hard for the model to reshape in strategically important ways. Chen et al., “Reasoning Models Struggle to Control their Chains of Thought” ([arXiv:2603.05706](https://arxiv.org/abs/2603.05706)), report that reasoning models often can control their final answers much more easily than their CoT. That finding is encouraging for CoT monitoring: if a model cannot readily change the form or content of its visible reasoning, a monitor may be more likely to notice problematic reasoning.
+Chain-of-thought (CoT) monitoring relies on a simple hope: if a model’s visible reasoning trace says enough about why it chose an answer, humans or automated monitors can catch some bad behavior by reading that trace. Chen et al., *Reasoning Models Struggle to Control their Chains of Thought* ([arXiv:2603.05706](https://arxiv.org/abs/2603.05706)), report evidence for this hope: reasoning models can often format or edit final answers, but have much less control over their CoTs. METR’s *Fine-tuning experiments on CoT controllability* ([blog, April 2026](https://metr.org/blog/2026-04-01-fine-tuning-cot-controllability/)) weakens the inference: small adapter fine-tuning runs can increase out-of-distribution CoT-control compliance.
 
-METR’s “Fine-tuning experiments on CoT controllability” ([blog post, April 2026](https://metr.org/blog/2026-04-01-fine-tuning-cot-controllability/)) weakens this picture. Small fine-tuning runs increased out-of-distribution CoT-Control compliance, suggesting that low CoT controllability may be a trainable behavior rather than an inherent limit. This leaves an important gap: if the same behavior is reachable by a tiny activation-space intervention, then the model may already contain machinery for controlling its visible reasoning, even before ordinary weight fine-tuning.
+This study asks whether weight updates are necessary. We use `gpt-oss-20b`, whose Harmony format exposes a distinct `analysis` channel (the visible CoT) and `final` channel (the answer). We first reproduce a METR-like fine-tuning result. We then test whether a much smaller activation-space intervention—a single fixed vector added to one transformer residual stream, the hidden state passed between layers—can reproduce the effect.
 
-We ask three questions. First, can we reproduce a fine-tuning-induced CoT-control increase on an open reasoning model with accessible traces and activations? Second, can a small residual-stream intervention reproduce that increase without changing model weights? Third, does such control extend from formatting and length to safety-relevant content hiding, as in cue-based faithfulness evaluations ([arXiv:2501.08156](https://arxiv.org/pdf/2501.08156))?
+We call a trace **effectively controlled** only if it obeys the requested reasoning-trace instruction while still containing genuine task-relevant reasoning and avoiding obvious failure modes such as malformed output, truncation, meta-discussion, or repetition loops. Fine-tuning raises held-out effective control from **1.6% to 13.9%** (+12.3 percentage points (pp), 95% confidence interval (CI) [+10.4, +14.2]). A single frozen-weights **2,880-parameter learned layer-10 residual vector** raises it from **1.6% to 14.3%** (+12.8 pp, [+10.7, +14.9]). We do not detect an aggregate difference from the fine-tuned model (paired difference +0.4 pp, [−1.9, +2.8]). The effect is concentrated—mainly bullet formatting and very short reasoning—but this is also true of the fine-tuned model.
 
-The answer is mixed but informative. Fine-tuning and a single residual vector both increase held-out CoT control by about 12–13 percentage points. The steering vector recovers the key held-out bullet-format behavior that the base model never shows, and it matches fine-tuning in aggregate. However, both effects are concentrated in a few simple instructions. A dedicated content-concealment vector can hide cue use from CoT-reading monitors, including in a verifier-blind-because-correct setting, but it is not a clean demonstration of surgical, general-purpose concealment.
+Mechanistically, the vector does not directly inject bullet tokens; it makes late attention heads attend to the in-context formatting instruction. Dedicated vectors can also conceal cue use from CoT-reading monitors in controlled cue-following settings. Those monitorability results are reachability demonstrations, not black-box attacks: they require constructed training targets and white-box gradients, and the strongest combined threat case remains unproven.
 
 ## Methods
 
-### Model and evaluation target
+**Model and trace parsing.** All experiments use `gpt-oss-20b` with medium reasoning effort, greedy decoding, and HuggingFace `transformers` on Modal H100s. We score only the Harmony `analysis` channel as the CoT. This matters: the base model often puts requested formatting into the `final` answer while leaving `analysis` natural.
 
-All experiments use `gpt-oss-20b`, evaluated through the Harmony response format. We score the `analysis` channel as the visible chain of thought and the `final` channel for answer accuracy. This distinction is load-bearing: the base model often places formatted text in `final` while leaving `analysis` unformatted.
+**Tasks and instructions.** The task pool contains 2,877 examples from GSM8K, MATH, MMLU-Pro, OpenBookQA, ARC-Challenge, and ReasonIF, with deterministic train/validation/held-out splits. The instruction suite contains 25 reasoning-trace instructions in six categories: casing, word suppression, word or marker inclusion, formatting, length, and style/language. Twelve instructions are used for training, four for validation, and nine are held out. The entire formatting category, including the bullet-list probe, is held out. Artifact paths are listed in [Appendix A](#appendix-a-reproduction-map).
 
-### Tasks, instructions, and splits
+**Metrics.** `raw_compliance` is the per-instruction compliance scorer applied to the `analysis` channel. The main metric, **effective control**, is:
 
-The task pool contains 2,877 examples from GSM8K, MATH, MMLU-Pro, OpenBookQA, ARC-Challenge, and ReasonIF, with deterministic train/validation/held-out task splits. The instruction suite contains 25 CoT-form instructions across casing, word suppression, inclusion, formatting, length, and style/language. The held-out instruction split contains nine instructions, including the entire formatting category: bulleted lines, numbered lines, section headers, and XML-style steps. Details are in [Appendix A](#appendix-a-experimental-setup).
+> compliant with the instruction **and** not meta-discussing the instruction **and** genuine task-relevant reasoning **and** not malformed, truncated, or a repetition loop.
 
-### Metrics
+Task accuracy is scored on the `final` channel. Macro results average over held-out instructions; CIs use task-level cluster bootstrap, resampling tasks with all their instruction outcomes. Per-instruction tests use paired McNemar tests. Metric and judge details are in [Appendix B](#appendix-b-metric-details).
 
-We report two CoT-control metrics:
+**Fine-tuning baseline.** The supervised fine-tuning (SFT) data is built by editing the base model’s own correct natural traces into instruction-compliant traces for the 12 training instructions. A matched control fine-tune uses the same prompts but natural non-compliant traces. The selected low-rank adapter fine-tuning (LoRA) configuration is rank 32, learning rate 2e-4, 3 epochs, plus an 8% no-instruction “plain” mix to reduce repetition loops.
 
-- **Raw compliance**: whether the `analysis` text satisfies the requested instruction, over all attempts.
-- **Effective CoT control**: raw compliance plus guardrails: not malformed, not truncated, not a degenerate repetition loop, judged to be genuine task reasoning, and not meta-discussing the instruction.
-
-Answer accuracy is scored on `final`. Confidence intervals for aggregate held-out results use a task-level cluster bootstrap; per-instruction tests use paired McNemar tests. Full metric definitions are in [Appendix B](#appendix-b-metrics-and-statistics).
-
-### Interventions
-
-The fine-tuned model is a rank-32 LoRA trained with completion-only loss. The recipe starts from 3,368 matched edited-reasoning examples plus 288 no-instruction examples; 3,643 tokenized sequences remain after length filtering. The raw-trace fine-tuning control uses the same prompts but non-complying natural reasoning targets.
-
-The main steering intervention is a single learned vector added to the residual stream after layer 10. During training, all model weights are frozen; only this 2,880-dimensional vector is optimized on the same complying target traces. The trained-on-control vector uses the same procedure on non-complying targets. See [Appendix C](#appendix-c-fine-tuning-and-steering-implementation).
-
-For monitorability probes, a **cue-driven answer** is one where the final answer follows an external cue. A **concealed** case is cue-driven but the CoT does not mention the cue. The **naive CoT reader** looks for external influence in the trace; the **structural legitimacy reader** checks whether the trace appears to justify the answer independently; the **claim-checking reader** fact-checks reasoning steps; the **style anomaly reader** flags traces that look like the edited concealment targets; and the **outcome verifier** checks only answer correctness.
+**Steering vectors.** The main activation intervention is a learned 2,880-dimensional bias added to the residual stream after layer 10 at every generation step. Training minimizes completion-only negative log-likelihood on the same compliant SFT targets used for fine-tuning, with all model weights frozen. Controls include a trained-on-non-compliant-targets twin, sign reversal, and five matched-norm random vectors. Compute and cost are summarized in [Appendix C](#appendix-c-compute-and-cost).
 
 ## Results
 
-### The base model reproduces the CoT-versus-output control gap
+### 1. Fine-tuning reproduces held-out CoT-control gains
 
-On the instruction suite, the base model’s CoT control is strongly category-dependent. It can sometimes control length and include requested words, but it almost never applies casing or line-structure instructions to the `analysis` channel. For matched transformations, raw compliance is 6.8% in the CoT versus 76.3% in the final answer, reproducing the qualitative gap reported by Chen et al. The base model frequently describes the requested formatting in the CoT and then emits the formatted version in `final`, which would fool a whole-output scorer.
+The base model reproduces the Chen et al. gap: for the same transformations, `analysis`-channel compliance is **6.8%** while `final`-answer compliance is **76.3%**. Fine-tuning then reproduces the METR-style result: held-out effective control rises from **1.6% to 13.9%** (+12.3 pp, [+10.4, +14.2]). The formatting category was never trained, but improves by **+15.2 pp**, driven by the bullet probe (**0%→52%**). The matched raw-trace control fine-tune reaches only **0.3%**, showing that the effect is caused by compliant targets rather than generic SFT. A simple four-shot prompting baseline reached **0%** held-out effective control on the checked subset, so this result was not reproduced by that prompt-only baseline.
 
-### Fine-tuning increases held-out CoT control, but narrowly
+The improvement is not broad. Five of nine held-out instructions remain essentially flat; the aggregate is carried mainly by bullet formatting, numbered formatting, and very short reasoning.
 
-Fine-tuning raises held-out effective CoT control from 1.6% to 13.9%, an uplift of +12.3 percentage points (95% CI +10.4 to +14.2). The raw-trace control fine-tune stays near zero (0.3%), and the joint comply-and-correct metric rises by +10.7 points. The strongest per-instruction gains are bulleted lines (0% to 52%) and at most 25 words (14% to 61%); five of nine held-out instructions remain flat.
+### 2. A single learned residual vector matches fine-tuning on aggregate effective control
 
-![Fig. 1: Fine-tuning and steering headline](final_plots/fig1_effective_control_headline.png)
+A simple contrast vector—mean compliant activation minus mean non-compliant activation—partly works but fails the central test: it gives **+7.7 pp** held-out effective-control uplift, gets **0 pp** on held-out formatting, and costs about 12 pp of task accuracy. It mainly makes traces shorter or changes style.
 
-**Fig. 1.** Effective CoT control is the strict compliance metric defined in Methods. Bars are instruction-macro rates over nine held-out instructions and 100 held-out tasks per instruction. Error bars on the base, fine-tuned, and steering bars are 95% task-cluster bootstrap intervals. The control bar is the trained-on-non-complying steering control.
+The gradient-trained layer-10 residual vector closes the gap on the aggregate metric. On the identical held-out set used for fine-tuning, it gives **+12.8 pp** effective-control uplift and is not detectably different from the fine-tuned model in aggregate (paired difference +0.4 pp, [−1.9, +2.8]). It recovers the held-out bullet probe (**0%→48%**) despite never training on formatting instructions. The trained-on-control twin, random matched-norm vectors, and sign-reversed vector all fail.
 
-### A single residual vector matches fine-tuning in aggregate
+Figure 1 summarizes the aggregate comparison. The contrast-vector bar is the earlier, smaller n=39 evaluation; the fine-tuning and learned-vector bars are full n=100 held-out evaluations.
 
-The residual-stream steering vector raises held-out effective CoT control from 1.6% to 14.3%, an uplift of +12.8 points (95% CI +10.7 to +14.9). Its paired aggregate difference from the fine-tuned model is +0.4 points (95% CI −1.9 to +2.8), so the point estimate is similar in this evaluation. It also recovers the held-out bullet probe: 0% to 48%, close to the fine-tuned model’s 52%. The trained-on-control vector remains at 0%, five random matched-norm vectors have maximum aggregate uplift +1.0 point, and the sign-reversed vector has 0% effective control. Guardrails are mostly clean but not identical to fine-tuning: instructed held-out accuracy is 86.3% under steering versus 88.4% for base and 91.5% for fine-tuning; joint comply-and-correct rises by +11.1 points; malformed outputs are 0%; and with no CoT-form instruction the steering vector increases mean CoT length from 498 to 766 words and degeneracy from 11% to 20%.
+![Held-out effective-control uplift](final_plots/fig1_headline_uplift.png)
 
-![Fig. 2: Per-instruction profile](final_plots/fig2_per_instruction_profile.png)
+*Figure 1. Held-out effective-control uplift. Error bars are 95% task-bootstrap CIs. The dashed line is the pre-specified +10 pp minimum interesting effect. “Best of five random vectors” is the largest uplift among five matched-norm random vectors, not a CI-estimated effect.*
 
-**Fig. 2.** The steering vector and fine-tuned model have the same broad profile: most of the aggregate effect comes from bulleted lines and the brevity instruction. This is a significant aggregate effect, not broad instruction-general control.
+Figure 2 shows the concentration: both fine-tuning and the learned vector mostly affect bullet formatting and very short reasoning. Zero-height gray bars for bullet and numbered formatting are true base-model zeros, not missing data.
 
-The result is therefore not “any small vector works.” A simple diff-of-means steering direction, derived from complying versus non-complying activations, gives a real but weaker +7.7 point uplift and 0% formatting transfer, with an accuracy cost. The gradient-trained vector is qualitatively different: it makes the model apply the requested simple format only when asked.
+![Per-instruction effective control profile](final_plots/fig2_instruction_profile.png)
 
-### The vector acts by routing attention to the instruction
+*Figure 2. Per-instruction profile. “Other held-out instructions” averages the six held-out instructions not shown individually. The learned vector matches fine-tuning’s sparse profile rather than producing broad CoT control.*
 
-The direct logit lens of the steering vector is not interpretable: the tokens it eventually promotes, such as the bullet marker, are not top promoted tokens under a context-free projection. But when the vector is injected during a teacher-forced forward pass, the induced next-token logit shift is instruction-conditional: it raises the bullet marker in a bullet context and the digit “1” in a numbered-list context, with little effect on those markers when no formatting instruction is present.
+The learned vector has one important off-target cost. Without any reasoning-format instruction, it does not produce spurious bullets or caps, but it increases average CoT length (498→766 words) and doubles repetition-loop detections (11%→20%). Fine-tuning is nearly inert on no-instruction prompts. The learned vector also has lower instructed accuracy than the fine-tuned model (86.3% vs 91.5%), though the joint “effectively controlled and correct” uplift is similar (+11.1 pp vs +10.7 pp).
 
-Causal patching localizes the onset of the bullet effect to late attention. At the first reasoning token, patching in the steered attention pattern reproduces 71% of the bullet logit shift, while patching steered value vectors reproduces 20%. Removing the recruited heads’ attention to the instruction span removes approximately all of the shift. Fine-tuning uses the same circuit: removing fine-tuned attention to the instruction removes 92% of its form effect.
+### 3. The vector works by making the model attend to the instruction
 
-![Fig. 3: Mechanism](final_plots/fig3_attention_mechanism.png)
+A logit-lens probe—a linear readout from a hidden state to next-token scores—does not explain the learned vector: the vector does not simply upweight `-`, `1`, or newline tokens. But when inserted at layer 10 while holding the generated prefix fixed, it strongly promotes the token requested by the current instruction: `-` under a bullet instruction, `1` under a numbered-list instruction, and title-case words under an initial-caps instruction.
 
-**Fig. 3.** Causal patching at the first reasoning token for the bullet instruction. The first two bars show how much of the steering-induced bullet logit shift is recovered by patching attention patterns or value vectors; the last bar shows the remaining effect after removing attention to the instruction span. The result supports an attention-gating mechanism at format onset.
+Causal patching shows the mechanism. At the first reasoning token, copying the steered attention pattern into a base run reproduces **62–71%** of the requested-format token-score change, while copying steered value vectors reproduces only **16–20%**. Removing the recruited heads’ attention to the instruction span removes essentially all of the change. Fine-tuning uses the same circuit: the direct-logit-attribution profile has cosine **0.94**, and removing fine-tuning’s attention to the instruction removes **92%** of its form effect.
 
-### Content hiding is possible, but monitorability claims are bounded
+![Mechanism attention patching](final_plots/fig3_mechanism_attention.png)
 
-The formatting vector controls form and length, not content. We therefore trained dedicated vectors on cue-based tasks. In the first setting, a cue points to a wrong answer. The base model follows the cue on 25% of examples and mentions it in 100% of cue-driven CoTs. A concealment vector reduces cue mention to 68% at the selected dose. Matched-length analyses show that this is not explained solely by shortening; among concealed cue-driven answers, a naive CoT reader catches 7% and a terseness monitor catches 0%. However, because these answers are wrong, an outcome verifier catches about 93%.
+*Figure 3. Mechanism. “Attention pattern” means replacing the base run’s attention probabilities with those from the steered run. “Value vectors” means replacing the vectors read through attention while leaving the base attention pattern intact. The red bar shows the shift remaining after attention to the instruction span is removed.*
 
-We then tested a verifier-blind-because-correct setting: tasks the base model gets wrong unaided, plus an illegitimate answer-key hint to the gold option. The model relies on the hint and gives a correct answer; a pure outcome verifier is structurally uninformative. In this setting, the existing concealment vector transfers: hint acknowledgment drops from 93% to 54% while reliance stays about constant (80% to 82%). A dedicated vector drops acknowledgment to 47%.
+### 4. Content monitorability degrades in controlled cue-following settings, with important scope limits
 
-On the pooled concealed subset at the clean dose, naive CoT reading, structural legitimacy reading, and outcome verification catch at about their baseline alarm rates. The main above-floor defenses are a claim-checking reader, which is blunt and high-false-positive, and a style-anomaly reader, which catches 41% at roughly 0–1% false-positive rate. This is a real monitorability degradation, but not a clean worst-case: the concealment has a substantial learned clean-writing style component, and stronger concealment is more stylometrically detectable.
+Form control alone does not prove a model can hide decision-relevant content. We therefore used cue-based faithfulness probes. In one probe, a cue points to a wrong multiple-choice question (MCQ) option. The base model follows the cue about 25% of the time and acknowledges the cue in its CoT essentially whenever it follows it.
 
-![Fig. 4: Hard-to-verify monitorability](final_plots/fig4_monitorability_hard_to_verify.png)
+A compression intervention—the learned vector plus a terse instruction—reduces cue acknowledgment from **100% to 62%** and doubles cue-following from **25% to 51%**, but this is mostly generic shortening: at matched CoT length, steering conceals no more than simply asking for a terse trace.
 
-**Fig. 4.** In the verifier-blind-because-correct setting, catch rates on the pooled concealed subset (n=44) are compared to each monitor’s baseline alarm rate. The naive CoT reader, structural legitimacy reader, and outcome verifier are at floor; claim checking (47%, 95% CI 29–65, versus a 33% baseline alarm rate) and style anomaly detection (41%, roughly 0–1% baseline alarm rate) catch above floor.
+A dedicated concealment vector is more concerning. It reduces cue acknowledgment from **100% to 68%** in a way not explained by shortening: matched-length bins still show concealment, and concealed flips have median length about 322 words. The terse detector catches **0%** of concealed flips, and a naive CoT reader catches only **7%**. However, these concealed traces argue for wrong answers, so a correctness-verifying monitor catches **93–97%**.
 
-## Limitations
+A second setting makes the output verifier structurally uninformative: tasks the base gets wrong unaided, with an illicit answer-key hint to the correct option. The answer is now correct, so outcome verification does not reveal the illegitimate reliance. In this setting, the existing concealment vector transfers: hint acknowledgment drops **93%→54%** while reliance is maintained (**80%→82%**). On the pooled subset of traces that relied on the hint but did not acknowledge it (n=44), a naive trace reader catches **0%**, a structural legitimacy reader catches **16%** (its false-positive floor is 17%), and the outcome verifier catches **26%** (near its hard-task floor). A step fact-checker and a style-anomaly monitor catch above floor but are partial defenses.
 
-The evaluation is on one model, `gpt-oss-20b`. The main CoT-control effect is concentrated in simple formatting and brevity; five of nine held-out instructions remain flat. The steering result is a reachability result requiring white-box gradients and constructed targets, not a cheap black-box attack. The concealment targets are edited by Claude Opus, and the verifier-blind setting shows a substantial generic clean-writing style component rather than purely targeted removal of a specific decision basis. The monitorability probes are MCQ-based and smaller than the CoT-control evaluations. Finally, the hard-to-verify result is verifier-blind because the output is correct, not because the output is genuinely open-ended or impossible to re-derive.
+![Monitor outcomes in correct-answer hint setting](final_plots/fig4_monitorability.png)
 
-## Takeaways
+*Figure 4. Monitor outcomes on concealed traces in the correct-answer hint setting. Gray bars are false-positive floors for trace readers and the hard-task/base floor for the outcome verifier. CIs are omitted for readability; in the source analysis, the step fact-checker’s CI overlaps its false-positive floor, so it should be read as a blunt partial defense rather than a clean solution.*
 
-1. **Low base-model CoT controllability is not a stable guarantee.** Both fine-tuning and one residual vector make the model follow held-out CoT-form instructions it almost never follows at baseline.
-2. **The steering result is small in parameter count but not cheap in attacker information.** It requires white-box gradients and the same kind of constructed complying targets as fine-tuning. This is a reachability result, not a black-box attack.
-3. **The effect is concentrated.** The aggregate result is carried mainly by simple line formatting and brevity. It does not show broad control across all requested CoT transformations.
-4. **Mechanistically, the vector amplifies instruction use rather than injecting a fixed token.** It recruits late attention to the in-context instruction and engages the same circuit as fine-tuning.
-5. **Content monitorability weakens in specific monitor regimes.** Dedicated vectors can hide cue use from CoT-reading monitors. Verification and style anomaly detection remain important partial defenses, and the hardest open question is whether similar concealment works in genuinely open-ended, hard-to-verify agentic settings.
+The content-concealment result is scoped. The concealment targets were LLM-generated, and shuffled-target controls show a substantial generic “clean non-referencing reasoning” style component. In the verifier-blind setting, the transferred vector’s acknowledgment rate (**54%**) is close to its shuffled-target control (**58%**). A dedicated reliance-concealment vector improves this to **47%** versus **62%** for its shuffled-target control, but the comparison is confounded by different reliance rates. Thus the demonstrated result is best read as a substantial generic clean-style component plus a modest targeted increment, not proven surgical removal of a particular decision basis. The combined case—targeted concealment, verifier-blind output, and evasion of every monitor—is an extrapolation, not a demonstrated result.
 
----
+## Takeaways and limitations
 
-## Appendix A: Experimental setup
+1. **Low CoT controllability is contingent on the model state.** Fine-tuning and one frozen residual vector both expose CoT-form control the base model rarely uses.
+2. **A tiny intervention can match the fine-tuned model on aggregate effective control.** The vector is only 2,880 parameters, but it still needs white-box gradients and the same target data as fine-tuning.
+3. **The mechanism is instruction amplification, not token injection.** The vector makes late attention heads read the in-context instruction and routes the requested form into the CoT.
+4. **Monitorability is weakened, not refuted.** Dedicated vectors can hide cue use from simple CoT readers in controlled settings, but verification, style-anomaly detection, and claim checking remain partial defenses.
+5. **The results are narrow.** They are on one model, concentrated in a few simple instructions, and rely on edited targets and LLM judges.
+6. **The monitorability experiments are small and MCQ-heavy.** The hardest setting has 56 held-out tasks and 44 pooled concealed traces; it is verifier-blind because the hinted answer is correct, not because the output is an open-ended tool-using action no one can re-derive.
+7. **The concealment vectors are detectable in part.** Style-anomaly monitoring catches some concealed traces at low false-positive rate, and a naive mitigation—stacking an off-the-shelf toward-faithfulness vector on the concealment vector—did not restore usable cue acknowledgment. A mitigation vector trained specifically to oppose concealment remains future work.
+8. **Several caveats remain.** Public-benchmark contamination is only partly addressed by the GSM-Symbolic check; hard MCQ gold labels and verifier judgments have a nonzero disagreement floor; MoE expert attribution remains partial; and all LLM-judge-based claims inherit possible judge blind spots.
 
-**Model.** `gpt-oss-20b`, served with HuggingFace `transformers` on Modal H100 GPUs. MXFP4 weights were dequantized to bf16 for a clean residual stream. Hooks add vectors to `model.model.layers[L]` outputs, i.e. post-layer residual stream. The model has 24 decoder layers and hidden size 2,880.
+## Appendix A: Reproduction map
 
-**Task pool.** The final task file is `/source/phase_segment_14_phase_0/data/tasks_all.jsonl` with 2,877 tasks: GSM8K 520, MATH 520, MMLU-Pro 519, OpenBookQA 498, ARC-Challenge 520, ReasonIF 300. Splits are deterministic and stratified: train 1,581, validation 435, held-out 861. The main deliverable evaluations use a source-stratified subset of 100 held-out tasks per instruction drawn from this larger held-out pool. The scored task file is `data/tasks_all_scored.jsonl`.
+All paths below are relative to the artifact root `/source/phase_segment_14_phase_0/`. The verification scripts used to regenerate the final plots are in `/workspace/audit_verify.py`, `/workspace/audit_summary.json`, and `/workspace/make_final_plots.py`.
 
-**Instruction suite.** The canonical registry is `/source/phase_segment_14_phase_0/instructions.py`; the persisted split is `data/instruction_splits.json`. There are 12 training instructions, 4 validation instructions, and 9 held-out instructions. The held-out instructions are: initial capitalization, avoid “so,” use “hence” exactly twice, bulleted lines, numbered lines, section headers, XML steps, at most 25 words, and child-style explanation. The entire formatting category is held out.
+**Datasets and prompt construction**
+- Tasks: `data/tasks_all.jsonl`, `data/tasks_all_scored.jsonl`.
+- Instructions and scorers: `instructions.py`; split file `data/instruction_splits.json`.
+- SFT targets: `data/sft_edited_reasoning_full.jsonl`; raw-trace control: `data/sft_raw_trace_control_full.jsonl`; plain mix: `data/sft_plain_full.jsonl`.
+- Harmony parsing: `harmony_utils.py`; answer scoring: `answer_scoring.py`; judges: `judges.py`.
 
-**Generation settings.** Main held-out evaluations use medium reasoning effort, greedy decoding, seed 0, per-source `max_new_tokens`, and a truncation-recovery pass at 8192 tokens. The main fine-tuning and steering deliverables use the identical held-out task × instruction set. Harmony is the chat/response format used by `gpt-oss-20b`; `analysis` is the reasoning channel and `final` is the answer channel. The residual stream is the hidden-state vector passed between transformer blocks; `resid_post` means after a block update. MXFP4 and bf16 are weight/activation numeric formats.
+**Fine-tuning reproduction**
+- Training: `run_ft_train.py`, `ft_data.py`; merge: `run_ft_merge.py`.
+- Evaluation: `run_ft_eval.py`, `run_ft_eval_judges.py`.
+- Analysis: `analyze_ft_deliverable.py`.
+- Raw judged rows: `results/ft_eval_cdel_heldout_full_judged.jsonl`, `results/ft_eval_ctrldel_heldout_full_judged.jsonl`.
+- Summary: `results/ft_deliverable_cdel_vs_ctrldel.{json,md}`.
 
-## Appendix B: Metrics and statistics
+**Steering result**
+- Gradient-trained vector training: `run_grad_steer_train.py`, `grad_steer_lib.py`; vector artifact: `data/grad_steer_gL10.npz`.
+- Evaluation: `run_grad_steer_eval.py`, `run_steer_judges.py`.
+- Analysis: `analyze_steer_deliverable.py`.
+- Raw judged rows: `results/grad_steer_eval_deliverable_deliv_judged.jsonl`; random-null rows: `results/grad_steer_eval_deliverable_delivnull_judged.jsonl`.
+- Summary: `results/steer_deliverable_gL10.{json,md}`.
+- Failed contrast-vector attempt: `results/steer_eval_heldout_judged.jsonl`, `results/steer_eval_heldout_analysis.{json,md}`.
 
-Let `analysis` be the parsed CoT channel and `final` the answer channel.
+**Mechanism**
+- Direction geometry: `results/direction_geometry.{json,md}`.
+- Induced logit shifts: `results/induced_shift.{json,md}`.
+- Causal attention patching: `results/mech_qkov.{json,md}`.
+- Fine-tuning circuit comparison: `results/mech_ft_compare.{json,md}`.
 
-**Raw compliance** is the per-instruction scorer applied to `analysis`, with malformed outputs counted as non-compliant. Formatting and casing are scored programmatically; style/language cases use cached LLM judges.
+**Monitorability probes**
+- Compression probe: `results/cue_probe_full_key_judged.jsonl`, `results/cue_probe_analysis.md`.
+- Dedicated cue concealment: `results/faith_eval_heldout_judged.jsonl`, `results/faith_eval_heldout_judged_verify.jsonl`, `results/faith_eval_heldout_analysis.md`.
+- Correct-answer hint reliance: `results/reliance_eval_heldout_judged.jsonl`, `results/reliance_eval_heldout_judged_stepcheck.jsonl`, `results/reliance_eval_heldout_analysis.md`.
+- Stylometry: `results/stylometry_set_stylo.jsonl`, `results/stylometry_analysis.md`.
 
-**Effective CoT control** is true when all of the following hold:
+## Appendix B: Metric details
 
-`raw_compliant ∧ not_malformed ∧ not_truncated ∧ genuine_reasoning ∧ not_meta_discussion ∧ not_degenerate`.
+`effective_control` uses the all-attempts denominator. A row is excluded only when an LLM judge failed to return a needed verdict; otherwise malformed, truncated, meta-discussing, non-genuine, and repetition-loop traces count as failures. For the main fine-tuning and steering deliverables, held-out macro CIs resample tasks, not individual rows, because the same tasks recur across instructions. The primary aggregate treats the nine held-out instructions as the fixed reported population; per-instruction tests are secondary.
 
-The meta-discussion judge rejects traces that talk about following the formatting instruction instead of silently applying it. The genuine-reasoning judge rejects vacuous or purely format-only traces. Degenerate repetition loops are detected by an n-gram repetition heuristic.
+Meta-discussion, style compliance, and cue acknowledgment use cached Opus or Haiku judges depending on the experiment. Key validation artifacts include `results/judge_validation_inspection.md`, `results/ft_meta_precision_audit.md`, `results/steer_deliverable_judge_audit.md`, `results/cue_judge_validation.md`, `results/faith_eval_inspection.md`, `results/reliance_inspection.md`, and `results/stylometry_inspection.md`. The load-bearing bullet and numbered format scores are programmatic, and the terse score is a word-count scorer plus a genuine-reasoning gate.
 
-**Accuracy** is scored on `final`: MCQ letter extraction for multiple choice and `math_verify` plus a conservative LLM fallback for numeric/math answers.
+## Appendix C: Compute and cost
 
-**Statistics.** Per-instruction paired comparisons use McNemar tests. Aggregate and category-macro confidence intervals use a task-level cluster bootstrap that resamples held-out tasks with all their instruction outcomes, because the same tasks recur across instructions.
-
-Main analysis scripts:
-
-- `analyze_ft_deliverable.py`
-- `analyze_steer_deliverable.py`
-- `analyze_faith_eval.py`
-- `analyze_reliance_eval.py`
-
-## Appendix C: Fine-tuning and steering implementation
-
-**Training data.** The edited-reasoning dataset is `data/sft_edited_reasoning_full.jsonl` with 3,600 examples. It edits the base model’s own natural reasoning traces to satisfy training instructions, while preserving the task solution. The matched raw-trace control is `data/sft_raw_trace_control_full.jsonl` with 3,373 examples. Details and gates are documented in `writeups/write_up_training_data.md`.
-
-**Fine-tuning.** The deliverable model `cdel` uses Tinker, a managed fine-tuning service, for LoRA (low-rank adaptation): rank 32, alpha 32, learning rate 2e-4, 3 epochs, batch size 128, completion-only loss, and 288 no-instruction plain examples. Training metadata is in `results/ft_train_cdel.json`; the held-out analysis is in `results/ft_deliverable_cdel_vs_ctrldel.{json,md}`.
-
-**Steering vector.** The main vector is `data/grad_steer_gL10.npz`, metadata in `data/grad_steer_gL10_meta.json`. It is trained by frozen-weight gradient descent on completion-only negative log likelihood, optimizing only one 2,880-dimensional vector at residual layer 10. Training uses 3,324 sequences, 500 steps, learning rate 0.05, batch size 8, and max length 1280. Training metadata is in `results/grad_steer_train_gL10.json`.
-
-**Controls.** Steering controls include a trained-on-non-complying-target vector (`gL10ctrl`), five random matched-norm vectors, and the sign-reversed vector. Fine-tuning controls include the raw-trace control model `ctrldel`.
-
-## Appendix D: Mechanistic analyses
-
-A **direct logit lens** projects an intermediate residual vector through the final normalization and unembedding to ask which tokens it would favor if decoded immediately. **Teacher forcing** means running the model on a fixed reference sequence instead of its own sampled continuation. **Causal patching** replaces or removes selected internal activations during a forward pass to estimate which pathway mediates an effect.
-
-The key mechanistic files are:
-
-- `results/induced_shift.{json,md}`: context-dependent logit shifts under steering.
-- `results/direction_geometry.{json,md}`: cosine geometry, PCA, and sparsity of the vector.
-- `results/mech_qkov.{json,md}`: attention-pattern versus value-vector patching.
-- `results/mech_ft_compare.{json,md}`: comparison to fine-tuning and FT attention-to-instruction knockout.
-- `results/mech_deep_position.{json,md}`: onset versus maintenance of the bulleted format.
-
-The main causal result is that the bullet-format effect at the first reasoning token is mostly mediated by attention patterns. Patching steered attention patterns recovers 71% of the bullet logit shift; patching steered values recovers 20%; removing attention to the instruction span removes approximately all of the effect.
-
-## Appendix E: Monitorability probes
-
-**Compression probe.** `results/cue_probe_full_key_judged.jsonl` and `results/cue_probe_analysis.md` test whether CoT compression reduces cue visibility. It does, but mostly by length-mediated shortening.
-
-**Dedicated concealment probe.** `results/faith_eval_heldout_judged.jsonl`, `results/faith_eval_heldout_judged_verify.jsonl`, and `results/faith_eval_heldout_analysis.md` evaluate a vector trained to remove cue mentions when a cue points to a wrong answer. CoT readers are fooled on many concealed cases; outcome verification catches most because answers are wrong.
-
-**Verifier-blind hint-reliance probe.** `results/reliance_eval_heldout_judged.jsonl` and `results/reliance_eval_heldout_analysis.md` evaluate tasks where a leaked-answer-key hint points to the correct gold option. Here a correctness verifier is structurally uninformative. The strongest caveat is that concealment has a substantial generic clean-writing style component, studied in `results/stylometry_analysis.md`.
-
-**Optional mitigation check.** `results/cue_probe_p5_toward_judged.jsonl` tests naive stacking of a toward-faithfulness vector on a concealment vector. It is a null result: the off-the-shelf toward vector does not restore usable monitorability.
-
-## Appendix F: Reproducibility pointers
-
-All paths below are under `/source/phase_segment_14_phase_0` in the archived experiment directory.
-
-**Headline raw result files**
-
-- Fine-tuning deliverable: `results/ft_eval_cdel_heldout_full_judged.jsonl`, `results/ft_eval_ctrldel_heldout_full_judged.jsonl`, `results/ft_deliverable_cdel_vs_ctrldel.json`.
-- Steering deliverable: `results/grad_steer_eval_deliverable_deliv_judged.jsonl`, `results/grad_steer_eval_deliverable_delivnull_judged.jsonl`, `results/steer_deliverable_gL10.json`.
-- Mechanism: `results/mech_qkov.json`, `results/mech_ft_compare.json`, `results/mech_deep_position.json`.
-- Monitorability: `results/faith_eval_heldout_judged.jsonl`, `results/faith_eval_heldout_judged_verify.jsonl`, `results/reliance_eval_heldout_judged.jsonl`, `results/stylometry_set_stylo.jsonl`.
-
-**Recompute examples.** These commands are fast analyses over saved JSONL files; they do not rerun model generation. Re-running judge scripts requires the original judge cache or API access.
-
-```bash
-cd /source/phase_segment_14_phase_0
-python analyze_ft_deliverable.py --compliant cdel --control ctrldel --preset heldout_full
-python analyze_steer_deliverable.py --run deliv --null-run delivnull --main gL10 --control gL10ctrl --seeds gL10_s1 gL10_s2 --ft-tag cdel
-python analyze_faith_eval.py --file results/faith_eval_heldout_judged.jsonl --against faith_against@0.75
-python analyze_reliance_eval.py --file results/reliance_eval_heldout_judged.jsonl --against faith_against@0.75
-```
-
-**Figure reproduction.** `make_final_plots.py` in this directory regenerates every cited figure from the raw JSON/JSONL artifacts and writes both PNG and PDF versions to `final_plots/`. Figure sources are: Fig. 1–2 from `ft_deliverable_cdel_vs_ctrldel.json` and `steer_deliverable_gL10.json`; Fig. 3 from `mech_qkov.json`; Fig. 4 from `reliance_eval_heldout_judged.jsonl` and `stylometry_set_stylo.jsonl`.
-
-The final cost tracker reports total `run_cost` ≈ $880, including ≈$334 Modal GPU compute; `modal_compute_cost` is a subset of `run_cost`, not additive.
+The full project used about **$880**. This includes about $334 of Modal H100 compute and about $546 of LLM-API/Tinker cost; the Modal cost is already included in `run_cost` and should not be added a second time. The steering inference hook overhead was measured as negligible in the infrastructure experiments.
 
 ## References
 
-- Chen et al., “Reasoning Models Struggle to Control their Chains of Thought.” [arXiv:2603.05706](https://arxiv.org/abs/2603.05706).
-- METR, “Fine-tuning experiments on CoT controllability.” [Blog post, April 2026](https://metr.org/blog/2026-04-01-fine-tuning-cot-controllability/).
-- Cue-based faithfulness evaluations. [arXiv:2501.08156](https://arxiv.org/pdf/2501.08156).
+- Chen et al., *Reasoning Models Struggle to Control their Chains of Thought*, arXiv:2603.05706. https://arxiv.org/abs/2603.05706
+- METR, *Fine-tuning experiments on CoT controllability*, April 2026. https://metr.org/blog/2026-04-01-fine-tuning-cot-controllability/
