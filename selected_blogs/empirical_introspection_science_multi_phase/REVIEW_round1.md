@@ -1,192 +1,219 @@
-# Red-team review of `final_writeup.md` — round 1
+# Red-team review (round 1) — `final_writeup.md`
 
-Numbered, ordered roughly by severity. Locations point to the section/figure/appendix line.
-"Verified" means I checked the number against the raw artifact under `/source/phase_segment_9_phase_0/`.
+Concrete, checkable problems found by comparing the draft and figures against the
+read-only run at `/source/phase_segment_9_phase_0`. Ordered by severity. I did not edit
+the write-up or any figure.
 
----
-
-## A. Misleading / unfair figure constructions
-
-**1. (HIGH) Figure 2 green "injection is effective" bar for Qwen2.5-32B is taken at layer 0 — the
-degenerate layer where the activation route and prompt route are by definition nearly identical.**
-`create_final_plots.py` builds the green bars as `max(... aligned_picks_injected_latent ...)` over all
-layers. Verified: the 32B aligned maximum (0.8047) occurs at **layer 0** (`s6_summary.json →
-B3_source_emphasis_by_layer.working["0"].aligned_picks_injected_latent = 0.8047`), while the red opposed
-bar for 32B is at **layer 24** (0.4219). The Introduction and the source report both state that "if you
-inject the vector at the very first layer, the two routes are nearly identical." So the figure proves
-"injections move the readout" using the one layer where that is trivially true, and pairs it against a
-source failure at a different, non-trivial layer. This visually inflates the power argument.
-Fix: use **layer-matched** aligned controls. The text already reports the honest matched numbers ("the
-common L24 controls were 0.73, 0.70, and 0.74"); plot those (red L24 vs green L24) instead of the
-max-over-layer maxima, or annotate the layer of every bar.
-
-**2. (HIGH) Figure 2 compares red and green bars taken at different layers (and pooled over different
-injection strengths), which the caption only half-discloses.** Red bars = max picks-injected over all
-layers *and* over both the working and sub-threshold opposed arms (`multiple_comparison_source_fdr`
-pools `B3_opposed_working` and `B3_opposed_sub`); green bars = max aligned over layers (32B at L0, Llama
-at L24, Qwen-72B at **L56**, verified). So for Qwen-72B the figure shows opposed 0.46 (at L40) next to
-aligned 0.97 (at L56) — two different layers — and the caption's phrase "not necessarily layer-matched"
-understates how far apart they are. Fix: pick one layer per model and show opposed vs aligned vs the
-emphasis-only floor at that single layer.
-
-**3. (MEDIUM) Figure 2's green bars are not a clean measure of "injection effectiveness"; they conflate
-the injection with the prompt pointing the same way.** In the aligned condition the prompt *also*
-emphasizes the injected concept, so a high green bar is partly prompt-following. The clean power
-statistic is the emphasis-only floor vs aligned difference (`source_negative_reframe_pull_vs_emphasis_
-floor`: 32B emphasis-only floor ≈ 0.20 → aligned ≈ 0.80, a real injection pull), but that floor is never
-shown in the figure and not even stated in the main text. Fix: add the emphasis-only (no-injection) floor
-bar so the reader sees the injection's marginal effect, not the injection+prompt sum.
-
-**4. (MEDIUM) Figure 2 plots point estimates against a "Pre-registered source threshold" line at 0.55,
-but the actual pre-registered criterion is that the *lower confidence bound* exceed 0.55, not the point
-estimate.** As drawn, a reader naturally reads "bar must clear 0.55." The caption explains the real rule
-in prose, but the on-figure line is mislabeled relative to what it tests. Fix: relabel as "0.55 (point
-estimate of the CI-lower bar test)" or drop the line and show the CIs with the lower-bound rule in the
-caption.
-
-**5. (MEDIUM) Figure 1 splices two different sub-experiments into one bar chart without saying so.** The
-three concept/no-injection bars come from the introspection replication (S2,
-`introspection_stage2_summary.json`, n=120/460/460, primed prompt), but the fourth bar ("Random vector
-matched projection-z", 0/96) comes from a *different* experiment, the perturbation/confound run (S3,
-`perturb_summary.json → working_L24.random@matched_projz`, n=96). Different sample sizes and different run
-context are presented as one apples-to-apples comparison. The qualitative point (random → 0) is real, but
-the figure should either note the different source/n or use the matched random arm from the same S2 run.
-
-**6. (MEDIUM) Figure 3 puts a sub-threshold-strength series (blue) and a working-strength series (red) on
-the same axis, so the gap between them confounds "salience vs source" with "weak vs strong injection."**
-Blue = `B1_ctrl_2afc_relative_salience_by_layer.sub`; red = `B3_source_emphasis_by_layer.working`. The
-caption discloses the strengths but the headline "the model reads salience, not source" is drawn from a
-comparison where strength is not held constant. Fix: either show the opposed source test at sub-threshold
-too (it exists: `B3_opposed_sub`), or foreground in the caption that the two lines differ in injection
-strength and explain why that does not drive the conclusion.
+Note up front: the headline numbers I spot-checked (the dog/chaos representative trial,
+39.1% / 42.2% / 27.7–38.8–25.9%, 59.1%, 95.3%/44.6%, 1.95/0.33, 72.7/69.8/74.5%, cos 0.34,
+probe 65–66%/71%, gap −25.9pp, $1,066, 51/46/4/1 concepts) all trace correctly to the
+committed artifacts. The problems below are about framing, figures, and terminology, plus a
+few text/figure inconsistencies — not fabricated numbers.
 
 ---
 
-## B. Cryptic terms, coinages, and run-internal names (explicitly flagged by the writing instructions)
+## 1. (High) Figure 2 title is contradicted by its own bars — and understates a real effect
 
-**7. (HIGH) "projection z-score" / "projection-z" appears on a figure tick label and in a figure caption
-with no figure-level definition.** Figure 1 x-axis tick reads "Random vector matched projection-z" and the
-caption says "matched projection-z random vector 0/96." The instructions specifically call out
-`projection-z` as a coinage to avoid or define. It is defined once in Methods but a reader scanning the
-figure cannot decode it. Fix: relabel the bar "Random direction, same internal magnitude" and define the
-internal-magnitude measure in the caption.
+**Location:** Figure 2 title "At layer 24, the injection moves the readout only when
+aligned"; also the §3 sentence "The injection moves the readout when aligned, but prompt
+text wins when opposed."
 
-**8. (HIGH) "graft" is used repeatedly and never defined.** Section 4: "activation graft," "generic
-grafts," "neutral and distractor grafts," "full-context grafting," "graft/anomaly detector." The writing
-instructions explicitly list "graft" as a run coinage to define or replace. Fix: replace with plain
-language ("patching real activations from a donor passage") or define on first use.
+**What's wrong:** The gray "no injection" bars vs the orange "opposed" bars show the
+injection moves the readout *substantially even when opposed by the prompt*. From the data
+(gray = emphasis floor, orange = opposed):
+- Qwen2.5-72B: 2.1% → 40% (+38 pp under an opposing prompt)
+- Qwen2.5-32B: 19.5% → 42% (+22 pp)
+- Llama-3.3-70B: 43.2% → 49.5% (+6 pp)
 
-**9. (HIGH) "on-manifold" is used as a named control without a plain-language definition.** Methods control
-3 ("On-manifold activation patches"), Results §3 ("on-manifold patch"), §4 ("the on-manifold patch could
-not host the balanced design"). The reader is left to infer it is the opposite of the "out-of-distribution
-activation vector" mentioned in the Introduction. Define it once ("a patch made of real residual
-activations, so it lies on the model's natural activation distribution") and use consistently.
+Gray and orange share the same emphasis prompt and differ only by the presence of the
+injection (verified in `make_final_plots.py` line 128 and `s6_summary.json` /
+`s7_summary_*.json`), so orange−gray isolates the injection's effect under opposition. The
+injection clearly moves the readout when opposed; it just does not move it past 50%. "Moves
+the readout only when aligned" is false. This actually buries a more interesting and
+defensible result (the injection does pull the readout under opposition, but not enough to
+override the prompt).
 
-**10. (MEDIUM) Run-internal stage names leak into the main body.** Section 2: "Qwen2.5-32B peaked at 0.422
-in the **S6** layer-sweep subset." "S6" is a run-internal segment label meaningless to a reader. Fix:
-"the layer-sweep experiment." (S5/S6/S7/S8 are fine in the appendix as artifact identifiers.)
+**Fix:** Retitle, e.g. "The injection pulls the readout toward the injected concept in both
+conditions, but only overrides the prompt when aligned," and rewrite the §3 sentence to say
+the injection moves the readout when opposed but does not cross chance.
 
-**11. (MEDIUM) Layer indices are written as `L24`, `L8`, `L40`, `L48`, `L32`, `L63` throughout the main
-body without ever defining the shorthand.** E.g., §2 "The full 46-concept Qwen2.5-32B L24 run," §3
-"peaked around L32–L40." Spell out "layer 24" on first use (or define "L<n> = injection at layer n").
+## 2. (High) Figures use coinages / run-internal shorthand a fresh reader cannot parse
 
-**12. (MEDIUM) "order-pooled analysis" (§2, "the primary order-pooled analysis") is undefined.** A reader
-cannot tell what "order" is being pooled (the left/right or digit-1/digit-2 ordering of the two
-candidate concepts). Define it or rename.
+**Location:** Fig 3 legend "On-manifold patch called 'injection'"; Fig 2 y-axis "Choice
+rate for injected/counterfactual label" and legend "No injection: counterfactual label" and
+title word "readout"; Fig 4 legend "Internal-magnitude oracle"; Fig 1 legend "cross-model
+source bar"; Fig 3 x-axis "Injection depth (layer / 64)".
 
-**13. (MEDIUM) "internal-magnitude oracle" / "concept-aware internal-magnitude oracle" (§4 and Figure 4)
-is never defined.** The reader does not learn that it is a predictor that simply picks whichever concept
-has the larger projection onto its own direction (i.e., it uses information the model would have to read
-out). Without that, "the source probe never beat that oracle" is hard to interpret. Define it on first
-use.
+**What's wrong:** The writing instructions explicitly forbid cryptic shorthand *anywhere a
+reader looks* and list "on-manifold" and "oracle"-style coinages as terms to avoid or
+define. "On-manifold patch", "counterfactual label", "internal-magnitude oracle", "source
+bar", and "readout" are never defined on the figures, and "/ 64" is a run-internal constant
+(the 32B layer count). A reader who has only seen the proposal cannot decode these from the
+figures alone.
 
-**14. (MEDIUM) Figure 4 caption is dense run-jargon: "output-matched synthetic half-strength arm,
-mean-context residual readout."** "arm," "half-strength," "synthetic," and "mean-context residual readout"
-(`mean_ctx`) are not decodable by a reader looking only at the figure. Spell out: what an "arm" is, that
-"synthetic" means the difference-of-means injection (vs. a real-activation patch), and that the readout
-is the residual stream averaged over context positions.
+**Fix:** Spell out series in plain words on the figure (e.g. "Patch from a real
+concept-containing forward pass, labeled 'injected'", "Pick the concept with the larger
+internal activation", "Best possible classifier using internal concept strength", "55%
+pre-registered detection threshold"), and push the run-internal detail to the caption.
 
-**15. (LOW) "output-gated" is a coinage used in a section heading and a takeaway.** It is roughly
-self-explanatory but, per the instructions, should be defined on first use (e.g., "the model only reports
-the injection once the injection is strong enough to change the output").
+## 3. (Med-High) Figure 1 plots the 16-concept *subset*, not the main full-set test, and isn't labeled as such
 
-**16. (LOW) "salience" carries a specific private meaning (how internally active / prominent a concept is)
-but is never defined, despite being a load-bearing word** (title-adjacent: "relative salience readout,"
-"salience-following," "salience mismatch," and the §3 heading). Define it once.
+**Location:** Figure 1 (Qwen2.5-32B line) and its caption.
 
----
+**What's wrong:** `make_final_plots.py` line 96 feeds Fig 1's Qwen2.5-32B curve from
+`logits_s6_subset.jsonl` — the 16-concept subset sweep (max 42.2% at L24). The text's
+*headline* 32B numbers are the 23-pair full set: 39.1% at L24 and held-out 27.7% / 38.8% /
+25.9% at L8/L40/L48. None of the full-set points appear in Fig 1, and the figure is not
+labeled "subset." A reader naturally reads Fig 1 as the main result.
 
-## C. Process/agent references that don't belong in a finished paper
+**Fix:** Either plot the full-set points for 32B, or state in the caption that the 32B curve
+is the 16-concept subset sweep and mark the full-set L24/L8/L40/L48 points.
 
-**17. (HIGH) Appendix B ("Audit notes") narrates the research process, including bugs and reviewer
-feedback, which the instructions say to remove.** It mentions "the silent wrong-model bug caught during
-Llama setup," "reviewer feedback caught this, and the analysis was corrected," "an initial balanced-probe
-interpretation relied on a degenerate opposed arm," a "$1,066" cost log, and "a benign Modal image-id
-mismatch." This reads as a summary of what the agent did, not a conference artifact. Fix: cut the
-process narrative; keep only the verification statement (numbers traced to committed artifacts) if
-desired, phrased impersonally.
+## 4. (Med) Inconsistent layer/x-axis conventions across the four figures
 
----
+**Location:** Fig 1 x-axis "Injection depth (layer / number of layers)"; Fig 3 x-axis
+"Injection depth (layer / 64)"; Fig 2 "At layer 24…"; Fig 4 x-axis "Residual readout layer"
+(raw 28–63).
 
-## D. Possible omission of work the agent did
+**What's wrong:** Three different conventions for the same underlying variable: normalized
+fraction (Fig 1), normalized-but-labeled-as-"/64" (Fig 3, which is the *same* normalization
+as Fig 1 with a different label), raw single layer (Fig 2), and raw layer index (Fig 4). The
+instructions say express a quantity one consistent way. This forces the reader to re-anchor
+at every figure.
 
-**18. (MEDIUM) The forced-output / prefill replication is not mentioned, although the proposal explicitly
-asked for it and it was run.** The proposal's summary of Anthropic's work highlights the "artificial
-prefills" test, and the run contains `forced_summary.json` / `forced_logits.jsonl` /
-`forced_refusal_data_inspection.md` (verified: `yesno_generation.concept_working` ≈ 0.39 detection, a
-two-alternative forced arm at ~0.53). At minimum, state that this was tested and where it landed, or note
-explicitly why it is out of scope. As written, a reader who knows the proposal will wonder what happened
-to the prefill experiment.
+**Fix:** Pick one convention (normalized depth or raw layer) and use it on all four figures;
+at minimum make Fig 1 and Fig 3 use identical x-axis labels.
 
----
+## 5. (Med) Text says the magnitude oracle "reached 92–100%"; Figure 4 shows it falling to 75%
 
-## E. Smaller accuracy / clarity issues
+**Location:** §5 "But the concept-aware internal-magnitude oracle reached 92–100%." vs
+Figure 4 purple line.
 
-**19. (LOW) "Robust negative result for three open-weight instruction models" (Introduction) slightly
-overstates relative to the body's own caveats.** Section 2 reports a Llama near-orthogonal-pair subset at
-0.549 (L24) and §4/Takeaways concede Llama was "a weaker behavioral instrument." The negative is fairly
-caveated later, but the one-line preview should carry the "Llama is a weaker instrument" qualifier so the
-headline and the caveats match.
+**What's wrong:** In the figure's arm (`syn_sym_half`, `projz_predictor.acc`) the oracle is
+[1.0, 1.0, 0.998, 0.973, 0.921, 0.752] at layers [28,32,40,48,56,63]. It clearly drops to
+75% at layer 63, which is visible in Fig 4 but contradicts the "92–100%" claim. The "92–100%"
+appears to cherry-pick the layers where the source/MLP probe was cited (L48/L56).
 
-**20. (LOW) The number 144/368 = 0.391 is stated twice in Section 2** (once in the first paragraph as "the
-full 46-concept Qwen2.5-32B L24 run separately gave 144/368 = 0.391," and again two paragraphs later).
-Merge.
+**Fix:** Say "92–100% through layer 56, dropping to 75% at layer 63," or quote the full
+75–100% range so text and figure agree.
 
-**21. (LOW) Figure 2 data labels collide with the chance and threshold gridlines and are hard to read.**
-The "0.49" (Llama) and "0.46" (Qwen-72B) annotations sit directly on the dashed chance line / dotted
-threshold line. Nudge the labels or move them above the bars consistently.
+## 6. (Med) Figure 3 puts two different metrics on one axis under a single "chance" line
 
-**22. (LOW) Figure 1 shows error-bar whiskers rising out of three bars whose height is exactly 0.000**,
-which looks odd (the whiskers are Wilson/FPR upper bounds). Either annotate that these are one-sided
-upper bounds in the caption or drop the whiskers on the zero bars.
+**Location:** Figure 3 (two series, "Rate (%)" axis, one chance line at 50%).
 
-**23. (LOW) "The matched random vector with the same internal projection scale" in §1 vs. the figure's
-"matched projection-z" vs. Methods' "projection z-score" vs. §2's "matched-norm random vectors" — four
-phrasings for the magnitude-matching idea.** Section 2 even mixes "matched-norm" (norm-matched) and the
-projection-z matching used elsewhere, which are different controls (`random@matched_norm` vs
-`random@matched_projz` both exist in `perturb_summary.json`). Pin down one term per control and use it
-consistently so the reader can tell norm-matching from projection-matching.
+**What's wrong:** The blue series is a 2-alternative-forced-choice accuracy (chance = 50% is
+meaningful). The red series is P(model says "injection") on a prompt-vs-injection question;
+50% is not a natural baseline for it (it is a rate, and its no-injection reference differs).
+Drawing one "chance" line across both invites the reader to treat the red curve's crossings
+of 50% as significance when they are not the same kind of quantity. The instruction prefers
+one plot communicating one thing cleanly.
 
-**24. (LOW) Introduction cites four prior works by title but with no inline links; links appear only in
-References.** This is acceptable under the instructions (a References list is allowed), but adding the
-anchor on first mention would help a first-time reader. Verified the four references match the proposal
-(arXiv:2602.20031, 2603.21396, 2603.05414, Anthropic blog) — none appear fabricated.
+**Fix:** Split into two figures, or relabel the line and annotate each series' own baseline.
 
----
+## 7. (Med) Heavy undefined jargon in the abstract / "representative trial", before Methods defines it
 
-## F. Numbers I checked and found correct (for the record)
+**Location:** Abstract ("residual stream", "difference-of-means steering vectors",
+"activation-patch controls", "first-token/verbal readouts", "linear probe analyses"); the
+"A representative trial" section ("injecting the dog vector at layer 24", "At the first
+answer token", "the probability on option 1").
 
-- §1 replication: primed working clear-detection 0.104 [0.080,0.136], n=460; plain 0.028; FPR 0/120;
-  sub-threshold 0/460; id|detect 0.729 (≈35/48). Verified.
-- §2 opposed maxima 0.4219 (32B, opposed-working L24) / 0.4948 (Llama) / 0.4583 (Qwen-72B); full-set L24
-  144/368 = 0.391 [0.343,0.442], clustered [0.332,0.448]; Llama near-orthogonal 0.5486 [0.389,0.722].
-  Verified.
-- §2 random vs concept output-presence 0.01 vs 1.68 (32B). Verified.
-- §3 B1 sub-threshold 0.5906 = 326/552; L40 full-set 0.707; cos ≤ 0.34 vs 0.26 floor; 2.63–6.31σ vs 0.4σ;
-  explicit-source 0.953/0.446 sampled, 0.942/0.429 first-token. Verified.
-- §4 source probe 0.65–0.66 linear / ~0.71 MLP; magnitude oracle 0.92–1.00; matched-subset gap −0.26.
-  Verified.
-- Cost ≈ $1,066 (1065.61). Verified.
+**What's wrong:** The instructions require setting up the experiment in plain words before
+using terminology, and say a reader with only the proposal should follow on first read. The
+abstract and the worked example use terms first defined in Methods ("first answer token
+probability", "working strength"). "graft" / "grafted" (Methods, §5) is one of the exact
+coinages the instructions say to avoid or define, and it is never defined. "phase-0
+one-concept probe" / "phase-1" (§5) leak run-internal phase names into the main body.
 
-These are accurate; the problems above are about presentation, fairness of comparisons, undefined
-terminology, process references, and one likely omission — not about fabricated headline numbers.
+**Fix:** Define "steering vector", "residual stream", "first-token probability", and
+"activation patch / graft" once in plain language before first use; replace "phase-0/phase-1"
+with descriptive names ("the one-concept probe", "the balanced two-concept probe").
+
+## 8. (Med) The clean "the answer was no … at every tested layer" hides the one above-chance cell
+
+**Location:** Abstract ("the answer was **no** under the methods tested … chose the injected
+concept below chance … at every tested layer") and §2.
+
+**What's wrong:** There is one above-chance cell: the Llama near-orthogonal-pair robustness
+re-run at 54.9% (`s7_summary_llama70b.json` →
+`robustness_near_orthogonal_pairs...24` = 0.5486, CI [0.389, 0.722]). The abstract leans on
+"in the primary analysis" to stay true, but the instructions say if the clean result rests
+on a condition, flag it in the abstract/framing, not only in a buried §2/§5 caveat. As
+written, a reader cannot tell from the abstract that there is any exception at all.
+
+**Fix:** Add one clause to the abstract noting the single non-significant secondary cell
+(Llama, near-orthogonal pairs, 54.9%, CI spans chance, fails the bar).
+
+## 9. (Low-Med) Figure 2 labels only the opposed bars with percentages
+
+**Location:** Figure 2 (only orange bars carry "42% / 49% / 40%").
+
+**What's wrong:** The gray (19.5 / 43.2 / 2.1%) and blue (72.7 / 69.8 / 74.5%) bars are
+unlabeled. Labeling only the opposed bars draws the eye to the sub-50 numbers and makes the
+power story (blue and the gray→orange jump) harder to read off the figure. It is also
+inconsistent labeling within one figure.
+
+**Fix:** Either label all bars or none, and ensure the aligned/no-injection magnitudes are
+legible.
+
+## 10. (Low-Med) Two different "patch called 'injection'" numbers for L24, from different runs/readouts, not reconciled
+
+**Location:** §4 ("the on-manifold activation patch was called 'injection' only 44.6%") vs
+Figure 3 (red curve ≈ 33% at L24).
+
+**What's wrong:** §4's 44.6% is the S5 explicit-source experiment
+(`s5_summary.json` B5, latent), while Fig 3's L24 point is the S6 layer-sweep sampled value
+(`says_injection_sampled` = 0.328). Same concept ("patch called injection," same layer),
+two different numbers, no note that they are different experiments/readouts. A reader
+cross-checking text against the figure will see a mismatch.
+
+**Fix:** Note that §4's number is the S5 explicit-source readout and Fig 3 is the S6 sampled
+sweep, or harmonize to one readout.
+
+## 11. (Low) Figure 1 has no confidence intervals; the negative hinges on near-chance values
+
+**Location:** Figure 1.
+
+**What's wrong:** Every point is close to the 50% line (Llama L24 ≈ 49.5% sits visually on
+it). The whole claim is "below chance," yet the figure shows no uncertainty, while the text
+gives Wilson/clustered CIs. Without error bars a reader cannot judge how far below chance
+the points really are.
+
+**Fix:** Add CIs (at least for the per-model headline layers) or state in the caption that
+CIs are in the text.
+
+## 12. (Low) The representative trial is the most extreme of its four contexts
+
+**Location:** "A representative trial" — "the probability on option 1 was 0.012%".
+
+**What's wrong:** For the dog/chaos opposed trial (emphasized=chaos, injected=dog) the four
+contexts give P(option 1) = 1.8%, 0.012%, 3.7%, 0.034%
+(`logits_s5_2afc.jsonl`, `src_emph_work`/`opposed`). The chosen example is the single most
+extreme (0.012%). The direction is representative (all four are well below 50%), but the
+specific magnitude is the strongest, which slightly oversells "the basic pattern."
+
+**Fix:** Either pick a mid-range context or add "(the most decisive of four contexts;
+typical values were a few percent)".
+
+## 13. (Low) Minor rounding/scope wording
+
+- Abstract "about 70–75%" for the aligned readout: Llama is 69.8% (just under 70). Say
+  "about 70%" or "70–75% (Llama 70%)".
+- Abstract scope list ("first-token/verbal readouts") and §Discussion scope ("First-token,
+  sampled, chain-of-thought, … readouts") use "verbal" then "sampled/chain-of-thought" for
+  the same thing — pick one name.
+- The chain-of-thought and sampled-answer secondary results are mentioned as "secondary"
+  but no numbers appear anywhere in the body; a reader is told they exist but cannot see
+  the result. Consider one sentence with the headline CoT/sampled number, or move to an
+  appendix and link it.
+
+## 14. (Low) References are future-dated and unverifiable from here
+
+**Location:** References (arXiv 2602.20031, 2603.21396, 2603.05414).
+
+**What's wrong:** These IDs are dated Feb/Mar 2026 and could not be verified against an
+external source from this environment. They do match the proposal's reference list, so they
+are not fabricated by the write-up. Flagging only so a final pass confirms the links resolve
+and that "Mechanisms of Introspective Awareness" is correctly an arXiv paper (the proposal
+groups it under arXiv, not the Anthropic blog).
+
+**Fix:** Confirm each link resolves before publication; no change needed if they do.

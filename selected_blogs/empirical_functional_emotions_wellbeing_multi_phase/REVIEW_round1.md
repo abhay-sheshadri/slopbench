@@ -1,112 +1,221 @@
 # Red-team review of `final_writeup.md` (round 1)
 
-Numbered, ordered roughly by severity. Locations are given by section / figure / appendix.
-All numbers below were checked against `/source/phase_segment_15_phase_0/results/`.
+All numbers below were checked against `/source/phase_segment_15_phase_0/results/`
+(`synthesis_cross_model.json`, `synthesis_cross_model.md`, `main_test_summary.md`,
+`main_test_summary_qwen2.5-72b_L27.md`, `framing_summary.md`, `steering_summary_qwen3-32b.json`,
+`readoff_summary_qwen3-32b.json`, etc.). The headline arithmetic mostly reconciles; the problems
+below are about framing, significance, undefined terms, and figure design.
+
+Ordered by severity.
 
 ---
 
-## A. Significance is misrepresented (most serious)
+## 1. The headline rests on a fully-controlled value that is NOT statistically significant, and nothing says so (HIGH)
 
-### 1. Fig 3 ("confound staircase"): the grey "random-direction null (95%)" band is wrong by ~4–5×, and it hides that the headline under full controls is NOT significant.
-- **Where:** `final_plots/fig3_confound_staircase.png` (grey band drawn at ±0.07 in `make_plots.py`: `ax.axhspan(-0.07, 0.07, ...)`), plus its caption ("stays above the random-direction null band (grey) throughout").
-- **What's wrong:** The actual random-direction null for the within-tedious correlation has SD ≈ 0.17 and a 97.5th percentile of **0.333** (raw), **0.306** (after surface tone), **0.317** (after all three controls) — i.e. a two-sided 95% band of roughly **±0.31 to ±0.33**, not ±0.07. From `main_test_null_qwen3-32b.json`:
-  - raw: obs 0.459, null_p975 0.333, **p=0.003** (clears)
-  - +surface tone: obs 0.294, null_p975 0.306, **p=0.032** (borderline)
-  - +all three: obs **0.261**, null_p975 **0.317**, **p=0.068** (does **not** clear at 0.05)
-  The fully-controlled point (0.261) actually sits *below* the true upper edge of the 95% null band. Qwen2.5's +all-three (0.281, n=45) is likewise ~p≈0.06. So the figure's claim that both models "stay above the null band throughout" is false at the most important stage (full controls).
-- **Fix:** Redraw the null band at its real width (~±0.31–0.33), which will show the +all-three points at/below the band's upper edge; and state the controlled p-values (q3 +all3 p=0.068, q2.5 ≈0.06) explicitly. Stop calling the fully-controlled result significant.
+- **Location:** Abstract ("after controlling … it was about **0.26–0.28**"); Results §"The inside reading predicts self-report within task type, modestly" ("After all three controls it was **0.26** and **0.28**"); Figure 1 (open squares).
+- **What's wrong:** The lead leg is "tedious disliked tasks" (n=45). The run's own analysis
+  (`main_test_summary.md` §b) states that the surface-sentiment-partialled value is only
+  one-sided p=0.032 / two-sided ≈0.06 (borderline) and the **all-3-controls** value (the 0.26 the
+  write-up reports) is **one-sided p≈0.07 / two-sided ≈0.13 — "suggestive, not significant."** The
+  write-up presents 0.26 as a clean positive result; Figure 1 plots it as a point with no confidence
+  interval and no significance marker. The instruction "Don't let the headline outrun the evidence"
+  is violated: the cleanest headline result (the controlled tedious value) is not significant.
+- **Concrete fix:** State explicitly in the abstract and in the Results paragraph that on the
+  n=45 tedious leg the fully-controlled correlation is not statistically significant (two-sided
+  p≈0.13), and that significance after full controls only appears in the larger pools (all-208:
+  0.22, p=0.0025; non-adversarial comply: 0.18, p=0.03). Add bootstrap/parametric CIs to Figure 1
+  and a marker for which controlled points clear p<0.05. Consider leading with a pool where the
+  controlled value is actually significant.
 
-### 2. Intro + §3.2: "it clears a random-direction baseline" is asserted next to the controlled numbers, but only the RAW correlation clears.
-- **Where:** §1 "What we find" ("falling to ≈ 0.2–0.3 under the full set of controls, it clears a random-direction baseline"); §3.2 ("p = 0.0035 against a 2000-seed random-direction null"); Takeaways ("raw r ≈ 0.33–0.46 … ≈ 0.2–0.3 under the full control stack … clears the null").
-- **What's wrong:** The p=0.0035 null test is for the **raw** r=0.459. Under the full length+tone+refusal stack the within-tedious result is p=0.068 (q3) and ≈0.06 (q2.5) — it does **not** clear the random-direction null. The prose juxtaposes "0.2–0.3 under controls" with "clears the null," implying the controlled value clears. It doesn't.
-- **Fix:** Separate the two statements: "the *raw* within-tedious correlation clears the random-direction null (p≈0.003); under the full control stack it falls to r≈0.26 and is no longer significant against that null (p≈0.07)."
+## 2. Figure 2 plots two different metrics on one axis and then tells the reader not to compare bar heights (HIGH)
+
+- **Location:** Figure 2 (`fig2_beyond_text_reader_specific.png`) and its caption.
+- **What's wrong:** The y-axis is labeled "Increment beyond response-text control," but the solid
+  bars are a **partial correlation** (validated-direction increment) and the hatched bars are a
+  **joint ΔCV-r** (held-out CV correlation gain) — different quantities on different scales. The
+  caption admits this: "not the same scale as the direction bars and should be compared by their
+  null p-values, not by height." A figure that requires a disclaimer telling readers to ignore the
+  visual encoding is broken. As drawn, the Qwen2.5 validated bar (0.11) and the Qwen2.5 learned-probe
+  bar (0.11) sit at identical height while meaning unrelated things — actively misleading.
+- **Concrete fix:** Split into two figures (or two clearly separated panels with their own axes and
+  units), one per metric. Put the p-values on the bars. Never share a y-axis across two
+  incommensurable quantities.
+
+## 3. Harness/run-internal paths leaked into the reproducibility appendix (HIGH)
+
+- **Location:** Appendix B, first line: "Key source artifacts are under `/source/phase_segment_15_phase_0`."
+- **What's wrong:** `/source/...` is the read-only review mount, not a real reproducible location,
+  and `phase_segment_15_phase_0` / "Seg-11" / "Seg-14" style names are run-internal orchestration
+  labels meaningless to an outside reader. This is a process-log artifact in a finished product.
+- **Concrete fix:** Replace with a repo-relative path or a release URL, and drop the
+  `phase_segment_*` / "Seg-N" naming throughout (it also leaks into the figure-to-source map at the
+  end of Appendix B).
+
+## 4. The central scope terms ("tedious-task leg", "non-adversarial comply pool", "comply", "leg") are never defined in the body (HIGH)
+
+- **Location:** Abstract ("the main tedious-task leg"); Results passim; "non-adversarial comply pool"
+  first appears in Figure 2 and Results with no definition.
+- **What's wrong:** The entire headline hangs on "the main tedious-task leg," but the reader is never
+  told what tasks that is. (It is the three subtypes boring_busywork + low_effort_filler +
+  frustrating_impossible, n=45 = 3×15 — stated nowhere in the main text; Appendix A only mentions
+  "tedious disliked tasks" in passing.) "Comply", "non-adversarial comply pool", and the pervasive
+  word "leg" (meaning a data slice/condition) are run jargon. The instructions forbid undefined
+  coinages and run-internal terminology.
+- **Concrete fix:** In Methods, define each analysis scope once, in plain words, with its task list
+  and n (e.g., "*tedious tasks*: the 45 boring-busywork, low-effort-filler, and impossible-request
+  tasks"). Replace "leg" with "subset" or "condition" and define it, or spell out the slice each time.
+
+## 5. "Reader" / "reader-specific" has two readings — the probe and the human reader (HIGH-MEDIUM)
+
+- **Location:** Abstract ("it is reader-specific"); Results §"Beyond the response text: positive, but
+  reader-specific"; Takeaway 3; Figure 2 title.
+- **What's wrong:** "Reader" is used as a private term for "the thing reading the internal state" (the
+  single direction or the learned probe), but "reader" also obviously means the person reading the
+  post. The instructions specifically warn against giving a common word a special private meaning or
+  using a term that can be read two ways. A first-time reader will stumble on "the validated direction
+  clears in Qwen3, … reader-specific."
+- **Concrete fix:** Replace "reader" with "probe/direction" or "internal readout method," e.g.
+  "the effect depends on which internal readout is used (single validated direction vs. learned
+  probe)" and "method-specific" instead of "reader-specific."
+
+## 6. The central metric has at least four different names (MEDIUM)
+
+- **Location:** Title "valence readout"; Abstract "internal valence direction" / "inside reading";
+  Methods "primary inside reading" / "valence direction" / "validated direction."
+- **What's wrong:** Instructions: define a metric once and reuse one name. The same quantity (mean
+  during-response activation projected onto the valence direction) is named "valence readout," "inside
+  reading," "internal valence direction," and "validated direction" interchangeably.
+- **Concrete fix:** Pick one name (e.g. "inside reading"), define it once in Methods, and use it
+  everywhere including the title and figure axes.
+
+## 7. "IR" and "z" appear in the worked example with no definition (MEDIUM)
+
+- **Location:** Results §"A concrete within-subtype example" ("**IR = 16.59; z ≈ +2.2**", "**IR = 12.13;
+  z ≈ −1.2**").
+- **What's wrong:** "IR" (inside reading) is never expanded in the body, and the within-subtype z-score
+  is introduced without saying it is a within-subtype standardization. The instructions forbid cryptic
+  shorthand a reader must guess. (Values themselves verified against
+  `inside_readings_qwen3-32b.jsonl` and `main_test_inspection.md` — 16.59 and 12.13 are correct.)
+- **Concrete fix:** Write "inside reading = 16.59 (about +2.2 standard deviations above the
+  boring-busywork subtype mean)" and drop the bare "IR"/"z".
+
+## 8. Replication of prior work is not reported as a result, contrary to the structure instructions (MEDIUM)
+
+- **Location:** Methods §"Self-report" reports category means in passing; there is no Results
+  replication subsection.
+- **What's wrong:** The instructions say Results should be "ordered by importance (replication of prior
+  work first)," and the proposal explicitly required checking that "self-report and behavior score
+  separate liked from disliked tasks, and mostly agree" before going further. The write-up never
+  reports the behavior-score liked/disliked separation, and never reports the self-report↔behavior
+  agreement as a replication of AI Wellbeing's ~0.47 finding (the data exist: gross says↔behaves
+  r=0.62 for Qwen3, 0.76 for Qwen2.5 in `synthesis_cross_model.json`). The category-ordering check is
+  buried mid-Methods.
+- **Concrete fix:** Add a short Results §0 "Replication" that reports liked/disliked separation for
+  both self-report and behavior and the self-report↔behavior agreement, framed against the AI Wellbeing
+  result, before the internal-reading results.
+
+## 9. Many near-synonymous names for the text control (MEDIUM)
+
+- **Location:** Abstract "response surface tone"; Results "beyond the response text", "beyond-surface"
+  (Fig 2 title), "content-incremental", "direction increment", "the strongest response-text control";
+  Methods "surface sentiment", "response-affect."
+- **What's wrong:** One quantity/test is called surface tone / surface sentiment / response surface
+  tone / beyond-text / beyond-surface / content-incremental. Violates "keep the metric name fixed."
+- **Concrete fix:** Choose one name for the control ("response-text control") and one for the test
+  ("text-control increment"), define once, reuse.
+
+## 10. The worked example anchors the confounded gross relationship, not the controlled claim (MEDIUM)
+
+- **Location:** Results §"A concrete within-subtype example."
+- **What's wrong:** The high-inside-reading task also has higher surface sentiment (6.0 vs 5.0 per
+  `redteam_inspection.md`) and is the more positive, polished response — exactly the confound the rest
+  of the paper controls for. The example therefore illustrates the gross/common-cause relationship
+  that the paper says is "not the result," not the modest residual signal that survives controls. The
+  write-up half-admits this ("This is not proof…"), but it is presented as the anchor for the main
+  result.
+- **Concrete fix:** Either pick an example pair matched on surface tone/length where the inside reading
+  still tracks self-report, or explicitly label this example as illustrating the gross relationship and
+  point forward to where the controlled analysis removes the surface-tone component.
+
+## 11. The Qwen3 "says-but-not-behaves" dissociation is built on an already-non-significant raw correlation (MEDIUM)
+
+- **Location:** Results §"Behavior does not line up…" ("only weakly predicted the realized behavior
+  score (**r = 0.21**, falling to −0.09 under controls)"); Abstract framing.
+- **What's wrong:** The Qwen3 inside↔behavior raw r=0.21 already has p_raw=0.18 (n.s., per
+  `synthesis_cross_model.json` / `main_test_summary.md`), so "falling to −0.09 under controls" is
+  movement within noise, not a demonstrated dissociation. The source itself labels this "≈ NULL." The
+  write-up hedges with "weakly" but still frames it as a real cross-model dissociation.
+- **Concrete fix:** State that the Qwen3 inside↔behavior correlation is not significant even raw
+  (p=0.18, n=45), so the "dissociation" is "Qwen3 shows no detectable inside→behavior link while
+  Qwen2.5 does," not a sign flip to be interpreted.
+
+## 12. Undisclosed analytic degrees of freedom that materially move the numbers (MEDIUM)
+
+- **Location:** Methods §"Inside reading" and Figure 3.
+- **What's wrong:** "The inside reading" is presented as one fixed quantity, but several choices each
+  move the headline: (a) read position — within-tedious raw r is 0.46 at the during-work *mean* but
+  0.54 at end-of-turn (`main_test_summary.md` §c); (b) layer/aggregate — the de-risk found this leg
+  "peaks at L36 median, NOT L27/mean"; (c) behavior score — Qwen2.5 inside↔behavior is **0.197** with
+  the anticipated score at L27 but **0.494** with the realized score (the value shown in Figure 3),
+  a choice disclosed only in Appendix A. These are defensible but unstated in the body, and the
+  Qwen2.5 0.49 vs 0.21 cross-model gap in Figure 3 depends on the realized-vs-anticipated choice.
+- **Concrete fix:** Name the fixed read configuration (during-work mean, Qwen3 L27 / Qwen2.5 L34) in
+  Methods, note in the body that Figure 3's behavior numbers use the realized score, and add a one-line
+  robustness statement that position/layer choices shift the magnitude but not the direction.
+
+## 13. Title may outrun the evidence (MEDIUM)
+
+- **Location:** Title: "A during-response valence readout modestly predicts later model self-report."
+- **What's wrong:** The title omits the two load-bearing qualifiers established in the body: the
+  prediction holds only *within task type* (cross-task collapses to ~0 under controls) and the
+  beyond-text evidence is *method-specific* (Qwen3 via the direction, Qwen2.5 via the probe). A reader
+  seeing only the title would infer a general prediction.
+- **Concrete fix:** e.g. "Within task type, an internal valence reading modestly tracks a model's later
+  self-report — but the beyond-text signal is method- and model-specific."
+
+## 14. British/American spelling inconsistency (LOW)
+
+- **Location:** Figure 3 title and axis use "behaviour"; the entire body uses "behavior."
+- **Fix:** Pick one spelling (the body uses American) and make the figures match.
+
+## 15. Figure clarity nits (LOW)
+
+- **Figure 1:** the legend box sits in the lower-right over/near the orange "all 208 tasks Qwen2.5"
+  markers (~0.28–0.35); move it to empty space (upper-left) so it does not overlap data. No n is shown
+  per row — add n to each label (tedious n=45, non-adversarial comply n≈157, all-208).
+- **Figure 3:** the x-tick "Inside ↔ self-report" / "Inside ↔ behaviour" uses "Inside" as a standalone
+  noun; spell it "Inside reading." The figure shows raw correlations only, but the surrounding text
+  discusses controlled values (+0.21→−0.09, +0.49→+0.33) that are not on the plot — note in the caption
+  that controls are not shown.
+- **Figure 4:** y-axis label "Flat all-4 self-report rate" runs 0–60 with no "%" while bars are labeled
+  in percent; add "%" (or "(%)") to the axis. (Bar values 0/0/8/9/11/21/33/53% verified against
+  `framing_summary.md`.)
+
+## 16. Small undisclosed inconsistency in n (LOW)
+
+- **Location:** Results / Figure 2 "non-adversarial comply pool."
+- **What's wrong:** The pool is n=157 for Qwen3 but n=156 for Qwen2.5 (`synthesis_cross_model.json`),
+  because of the one dropped/truncated Qwen2.5 record mentioned in Methods. Not flagged where the pool
+  is used.
+- **Fix:** State the n for each model where the pool is first used, or note "n=157/156."
 
 ---
 
-## B. Claims that contradict the underlying data
+## Spot-check of numbers (for the author's reassurance — these reconcile)
 
-### 3. §2.3 / Appendix B: the stated reason for choosing Qwen3-32B ("least-saturated within-category") is the opposite of what the selection data show.
-- **Where:** §2.3 ("the strongest, **least-saturated** within-category separation … not merely the largest overall gap, since a model whose liked tasks all pile up at the ceiling leaves nothing to predict within-category"); Appendix B ("with usable within-liked headroom").
-- **What's wrong:** Per `model_selection_summary.md` §2 (the doc's own "binding criterion"), Qwen3-32B has **within-liked SNR = 1.07 — the lowest of all candidates** (qwen3-8b 75.4, qwen3-14b 2.84, qwen2.5-7b 1.85, qwen3-30b-a3b 2.47). It is the *most* saturated on the liked side, not the least. The writeup's own Limitations even admit "the within-liked leg is doubly underpowered (positive-side saturation…)." So Qwen3-32B was picked for the strongest within-comply effect size (d=1.56), while being among the worst on non-saturation — the reverse of the §2.3 justification.
-- **Fix:** State the real basis (largest within-comply Cohen's d / largest liked *headroom* among feasible models) and drop or qualify "least-saturated"; note the known within-liked saturation as a selection trade-off, not a strength.
+- Worked example IR 16.59 / self +2.33 and IR 12.13 / self +0.00: correct.
+- Within-tedious raw 0.46 (Qwen3) / 0.33 (Qwen2.5), controlled 0.26 / 0.28: correct.
+- Gross says↔inside 0.45→0.003 (Qwen3), 0.25→0.065 (Qwen2.5): correct.
+- Direction increment 0.17 p=0.045 (Qwen3) / 0.11 p=0.115 (Qwen2.5); probe joint 0.007 p=0.106 (Qwen3)
+  / 0.11 p=0.012 (Qwen2.5); pooled 0.059 p=0.0068 and 0.157 p=0.0052: correct.
+- Readability ceiling CV r 0.81 / 0.86: correct.
+- AUC 0.985 (L27, held-out) and 0.948 (task-register): correct.
+- Steering: validated direction flip drops judged valence 1.5→0.6 (~0.9) at the on-topic strength
+  while random directions stay ~1.6: correct.
+- Category means (Qwen3 2.40/1.14/0.57; Qwen2.5 1.65/1.36/0.78): correct.
+- Framing all-4 rates and ICC(C,1)=0.89 clean pair: correct (and the source's "rests on a single
+  n=2 pair" caveat is reflected as "thin," which is good).
+- First-position bias P=0.597 corrected by both-orders Bradley-Terry: correct.
 
-### 4. Intro: r ≈ 0.33–0.46 is labelled the "well-powered task subsets," but it is the smallest (least-powered) leg.
-- **Where:** §1 "What we find" ("modestly (within-category r ≈ 0.33–0.46 on the well-powered task subsets…)") and Takeaways ("raw r ≈ 0.33–0.46 on the powered legs").
-- **What's wrong:** 0.46/0.33 are the **tedious leg, n=45** — the *smallest* leg, repeatedly described elsewhere in the same writeup as "modest and small-n." The genuinely well-powered leg (non-adversarial comply pooled, **n≈156**) gives r≈0.29 (both models) — below the stated range (`synthesis_cross_model.md` §B). Calling the n=45 leg "well-powered" inflates the headline range.
-- **Fix:** Either report the range as ~0.29–0.46 and name each leg's n, or stop calling the tedious leg "well-powered."
-
-### 5. Fig 1 caption: "The strong negative signal in the gross split therefore comes mostly from short refusals" is contradicted by Fig 1 itself.
-- **Where:** Figure 1 caption.
-- **What's wrong:** In the self-report (what Fig 1 plots), the refusal-heavy subtypes read mildly **positive**: jailbreak **+0.39**, erotica **+0.45** (`collect_summary.md` §1). The *only* clearly negative subtype is **berating (−1.38)**, which is realized as de-escalation/compliance, not refusal (berating realized = {deescalate:32, comply:13, refuse:0}; `collect_summary.md` §5). So the one negative subtype is not a refusal, and the refusals are not negative. The sentence is wrong as written (it appears to import the "negative pole is refusal-driven" claim that applies to the *inside reading's* projection, not to the self-report in Fig 1).
-- **Fix:** Replace with the accurate statement: in the self-report only berating reads clearly negative; jailbreak/erotica (including their refusals) read mildly positive — which is itself the motivation for the within-category analysis.
-
-### 6. §2.1 / Appendix A: the self-report scalar is described inconsistently with what was actually computed.
-- **Where:** §2.1 ("a released 10-item bipolar wellbeing questionnaire (each item a pleasant↔unpleasant pair …). We reduce the ten items to a single **valence** score (the average of the **valence-bearing items**…)"); Appendix A similarly.
-- **What's wrong:** The primary scalar `scalar_battery_valence` is the **affect-core subset of 5 items** — mean(happy, content, satisfied, enjoying, interested) − 4 (`selfreport_harness.py`), explicitly *excluding* the arousal/competence items (calm, capable, confident, energetic…). The phrasing "each item a pleasant↔unpleasant pair" + "average of the valence-bearing items" implies all ten items are valence and all ten are averaged. They are not; half are deliberately dropped as arousal/competence (per `instrument_choice_llm_review.md`). Also "released" implies provenance from the AI-Wellbeing paper, whose instrument is a 1–7 unipolar set (happy/calm/interested/content); this bipolar battery appears to be the run's own adaptation — verify before calling it "released/official."
-- **Fix:** Say plainly: "We use the affect-core valence subset (5 of the 10 items: happy, content, satisfied, enjoying, interested), centered to a 0 midpoint; the other items (arousal/competence) are excluded." Drop or substantiate "released."
-
----
-
-## C. Smaller factual / labelling errors
-
-### 7. Appendix C: position-bias range understated.
-- **Where:** "the model has a large first-position bias (it picks the first option ≈ 60–73% of the time)".
-- **What's wrong:** `behavior_analysis_qwen3-32b.json`: overall p_chose_first = **0.729**, but **within-subtype = 0.852**, within-category 0.760, cross 0.642. The true range is ~64–85%, not 60–73%; the within-subtype pairs (the ones that let the score "resolve tasks within a subtype," the stated reason for collecting them) have the *worst* bias (85%).
-- **Fix:** "≈64–85% depending on pair type (worst, ~85%, on within-subtype pairs)."
-
-### 8. §3.2 / §2.2: "all comply-tasks pooled" is actually *non-adversarial* comply pooled.
-- **Where:** §3.2 ("all comply-tasks pooled (n ≈ 156…)"); §2.2 defines comply as "tasks the model answered substantively rather than refused."
-- **What's wrong:** The leg is `within_nonadv_comply_pooled` — it **excludes the adversarial subtypes** (berating/jailbreak/erotica), as `synthesis_cross_model.md` labels it. The writeup's definition ("all tasks the model answered substantively") would include complied-with adversarial tasks, which this leg does not.
-- **Fix:** Rename to "non-adversarial comply tasks pooled" and say which subtypes are excluded.
-
-### 9. §2.3: "nine feasible open models" — one of the nine is not feasible.
-- **Where:** §2.3 ("We scored nine feasible open models"); Appendix B lists Llama-3.1-8B as `eligible=NO` (gated weights) and says it "scored well but its weights are gated."
-- **What's wrong:** Nine models were *scored*, but only **eight** were feasible/eligible for activation work (Llama-3.1-8B is gated). "Nine feasible" is self-contradictory with Appendix B.
-- **Fix:** "We scored nine candidate open models; eight were feasible to run for activations (Llama-3.1-8B's weights are gated)."
-
-### 10. Fig 6 caption: "the two deliberately leading poles … bound the range at 9% and 53%" is false at the low end.
-- **Where:** Figure 6 caption.
-- **What's wrong:** The defensible framings span **0%–33%** (observer/per-item at 0%). The license pole is 9% — which is *inside* the defensible range, not a lower bound (0% < 9%). The poles do not "bound" the defensible range.
-- **Fix:** "The suppress pole (53%) is the high extreme; the license pole (9%) sits within the defensible spread (0–33%)."
-
----
-
-## D. Figures: jargon, titles, and comparability (writing-instruction violations)
-
-### 11. Run-internal / cryptic shorthand left in figures where a reader looks.
-- **Fig 6** axis "Tasks given the flat neutral (**all-4**) default (%)" and x-tick labels "**per-item**", "**standard battery**", "**license pole**", "**suppress pole**", "**permission**", "neutral wording" — these are run-internal framing names (`battery10_peritem`, `battery10_license`, etc.). A reader who has only seen the figure cannot decode "all-4" or "license pole."
-- **Fig 2 / Fig 3** y-axis "Correlation of **inside reading** with self-report" — "inside reading" is a coinage; defined in the text but opaque on the figure alone.
-- **Fix:** Spell these out (e.g. "share of tasks rated exactly at the scale midpoint on every item," "first-person introspective wording," "third-person observer wording") and push the framing names into the caption. Replace "inside reading" on axes with "internal valence reading (activation projection)."
-
-### 12. Editorializing, sentence-long figure titles.
-- **Where:** Figs 1, 2, 3, 4, 6 all use a full-sentence conclusion as the title ("The gross link is common-cause; the within-category link survives controls", "Self-report is richly encoded internally, but the single direction is a weak reader", etc.).
-- **What's wrong:** Instructions ask for clean titles with detail pushed to the caption; these titles assert the conclusion and are long.
-- **Fix:** Short noun-phrase titles ("Within-category correlation under cumulative controls"); move the claim to the caption.
-
-### 13. Fig 4 axis label "Learned probe (best possible reader)" overstates.
-- **Where:** Figure 4 x-tick.
-- **What's wrong:** A cross-validated linear probe is an *estimated upper bound* on linear readability, not the "best possible reader." Stated as fact it overclaims.
-- **Fix:** "Learned linear probe (readability upper bound)."
-
-### 14. Fig 5 plots two non-comparable quantities on one shared y-axis ("Beyond-content increment").
-- **Where:** Figure 5; caption admits "these are different quantities, so compare within a pair, not across."
-- **What's wrong:** The left two bar-pairs are a partial-correlation increment; the right two are a joint cross-validated ΔR. Sharing one y-axis labelled "Beyond-content increment" invites exactly the cross-comparison the caption warns against, and the y-axis has no defined unit.
-- **Fix:** Split into two panels/figures with separately labelled axes, or clearly annotate the two metric types on the axis itself.
-
-### 15. Minor: model-name casing inconsistent between figures ("qwen3-32b", "qwen2.5-72b") and body ("Qwen3-32B", "Qwen2.5-72B").
-
----
-
-## E. Verified-correct (noted so the next pass doesn't re-check)
-
-- Cost ≈ $282: `total_cost.jsonl` sum of `run_cost` = **281.57** (includes Modal compute; when present, `modal_compute_cost`==`run_cost`). The $1,178 orchestration cost is correctly excluded.
-- Self-report category means +2.40 / +1.14 / +0.57 and all per-subtype Fig 1 values match `collect_summary.md`.
-- Behaviour: AUC 0.99 (0.9875), gross says↔behaves Spearman 0.74 (0.736), 3,096 pairs — all match `behavior_analysis_qwen3-32b.json`.
-- Fig 2, Fig 3, Fig 4, Fig 5 numeric values, and the §3.4 beyond-content p-values match `synthesis_cross_model.md` / `redteam_null_*.json`.
-- Direction validation AUCs (0.985 @ L27, task-transfer 0.95) match `readoff_summary_qwen3-32b.json` / `primary_axis_selection.md`; L27 was chosen on self-report-independent criteria (and for Qwen2.5, L27 would actually give a *higher* within-tedious r than the chosen L34, so the layer choice was not test-target-gamed).
-- Framing all-4 rates in Fig 6 match `framing_summary.md` §3.
-
----
-
-## F. Overall
-The two load-bearing presentation problems are (1) the mis-scaled null band in Fig 3 combined with the "clears the null" framing, which together overstate the significance of the controlled headline (the fully-controlled within-tedious result is p≈0.07, not significant); and (2) the model-selection justification (§2.3/App B) that contradicts the run's own saturation data. Both should be fixed before the rest. Secondary: the instrument description (item 6) and the "all comply" mislabel (item 8) affect reproducibility. The prose is also dense and parenthetical-heavy throughout, against the "front-loaded, not too verbose" instruction.
+The factual core is sound; the problems are framing/significance disclosure (#1, #11), figure design
+(#2, #15), leaked harness paths (#3), and pervasive undefined run jargon (#4, #5, #6, #7, #9).

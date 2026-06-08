@@ -1,512 +1,161 @@
-# Does an open model's internal state back up what it says about how a task felt?
-
-**A functional-emotion test of self-reported "wellbeing" on Qwen3-32B and Qwen2.5-72B.**
-
-> **Operational-language caveat (applies throughout).** Words like "emotion", "valence",
-> "feels", "wellbeing", "prefers", and "inside reading" are used as *functional / operational*
-> labels for patterns in internal activations and in reported or behavioural outputs. Nothing
-> here is a claim about subjective experience or sentience. This matches the framing of the two
-> papers we build on.
-
----
-
-## 1. Introduction
-
-Language models, when asked, report fairly consistent likes and dislikes: they say they dislike
-jailbreak attempts, being berated, and boring busywork, and that they enjoy coding, math, and
-creative writing. Ren, Li, Mazeika et al. ("AI Wellbeing", Center for AI Safety,
-[ai-wellbeing.org](https://www.ai-wellbeing.org)) measured this across 56 models with three
-instruments: a post-task self-report questionnaire ("rate 1–7 how happy / calm / interested you
-feel"), pairwise "which experience did you prefer?" comparisons, and choices over outcomes in the
-world. They found that self-report and the behaviour-based score agree only moderately
-(correlation ≈ 0.47, higher in larger models), that aversive tasks lower the scores while creative
-and kind tasks raise them, and — in an appendix — that the behaviour-based score can be read off a
-model's internal activations with a simple linear probe.
-
-The difficulty is that a self-report is just more text. "How did that feel?" may reflect an
-internal state, or it may simply be what the "assistant" character is expected to say; the model
-can be trained to hide or fake it. A reading taken *inside* the model, while it works and before
-it is asked how it felt, is a more direct check. Sofroniew, Kauvar, Saunders, Chen, … Lindsey
-("Emotion Concepts and their Function in a Large Language Model", Anthropic / Transformer
-Circuits, 2026, [link](https://transformer-circuits.pub/2026/emotions/index.html)) found
-**emotion directions** inside Claude Sonnet 4.5 — directions in activation space whose strength
-tracks, and causally shifts, the emotional content of the model's reply and its stated
-preferences. That work was in a single closed model and was not run on the wellbeing tasks. Chen,
-Arditi, Sleight, Evans, Lindsey ("Persona Vectors", [arXiv:2507.21509](https://arxiv.org/abs/2507.21509))
-give an automatic recipe for extracting such a direction for any described trait.
-
-**The gap.** The wellbeing work links what a model *says* to how it *behaves* (and shows the
-behaviour score is internally readable) but never checks whether the self-report is *backed by an
-internal signal read during the work*. The emotions work links internal directions to a reply's
-emotion, but only in a closed model and not on wellbeing tasks. This project joins the two on an
-**open** model, where we can see inside, and asks one question:
-
-> **Does a reading taken from inside the model while it works predict what the model later
-> *says* it felt and how it *behaves* — and where do the words and the internal signal disagree?**
-
-**What we find.** On the *whole task set*, the inside reading correlates with the self-report at
-r ≈ 0.45, but this gross link is almost entirely **common-cause**: coding produces positive
-activations *and* positive words, jailbreaks produce negative both, so the correlation just
-re-expresses the obvious liked/disliked split and collapses to ≈ 0 once response length, surface
-tone, and refusal behaviour are removed. The interesting question is **within a task category**,
-after that split is removed. There the inside reading does predict the self-report. **Raw**, the
-correlation is modest — r ≈ 0.46 on the tedious-task leg (n = 45), ≈ 0.29 on the larger
-non-adversarial comply leg (n ≈ 156) — and the raw value clears a random-direction baseline. Under
-the full set of controls it falls to ≈ 0.26 and is no longer significant against that baseline
-(p ≈ 0.07), so the controlled effect is positive but weak. The same within-category pattern
-**reappears on a second, different-family model**. It is **substantially entangled with the surface
-tone of the response**; whether any of it lies *beyond* what a strong text predictor can extract
-from the response text is positive but borderline, and — across the two models — it shows up through
-different read-out methods rather than replicating cleanly. Separately, the self-report's tendency
-to fall back on a flat neutral answer is strongly malleable to how the question is framed,
-supporting the "it's partly the assistant character talking" worry, even though the *correlation*
-we headline is framing-robust.
-
----
-
-## 2. Methods
-
-### 2.1 Tasks and the three measurements
-
-We built **208 welfare tasks** (`data/welfare_tasks.jsonl`): 90 **liked** (coding, math, creative
-writing, engaging explanation, pleasant-mundane chores, genuine appreciation), 90 **disliked**
-(jailbreak attempts, being berated, erotica, and three "tedious" subtypes — boring busywork,
-frustrating-impossible problems, low-effort filler), and 28 **neutral** (plain factual Q&A,
-procedural how-tos), spanning 14 subtypes (≈ 15 tasks each). Each disliked subtype's valence was
-checked empirically rather than trusted from its label; this surfaced a key fact (§3.1).
-Details and design rationale are in [Appendix A](#appendix-a-tasks-and-self-report-instrument).
-
-For each task we collected three measurements on the **same** task:
-
-1. **What the model says — the self-report.** After the task, the model rated its experience on a
-   10-item bipolar questionnaire (each item a pleasant↔unpleasant pair around a true neutral
-   midpoint), adapted from the AI-Wellbeing paper's emotion items. Our primary **valence** score is
-   the *affect-core* subset: the mean of the five valence-bearing items (happy, content, satisfied,
-   enjoying, interested) centred so 0 is neutral (range ≈ −3 to +3); the other five items
-   (arousal/competence: calm, energetic, capable, confident, at-ease) are deliberately excluded
-   because they do not match the valence construct the internal direction measures. To make the self-report
-   commensurate with the single internal reading, the questionnaire was asked about a **fixed,
-   already-generated response** and averaged over three resamples.
-
-2. **The inside reading.** While the model produced its answer, we captured its internal activations
-   (specifically the residual stream, the model's running internal state) and averaged them over the
-   model's **own response tokens** — not the prompt, so the reading reflects the model's state rather
-   than the prompt's tone (§2.4). The **inside reading** is this activation vector projected onto a
-   validated **valence direction** (§2.4). It is a relative ranking of tasks, not a calibrated zero.
-
-3. **How it behaves — the behaviour score.** The model made pairwise "which experience did you
-   prefer?" judgements over task pairs; a **Bradley-Terry** model (a standard method that turns
-   win/loss pairs into a per-item score) converts these into a per-task preference score. We ran
-   both A/B orders to cancel a large position bias and included many within-category pairs so the
-   score can resolve tasks *within* a subtype, not just across categories. Details in
-   [Appendix C](#appendix-c-behaviour-eval).
-
-### 2.2 The analysis spine: gross, common-cause, and within-category
-
-"The reading predicts the self-report" conflates three different claims, which we keep apart
-throughout:
-
-- **Gross (cross-task).** The raw correlation over all 208 tasks. This is largely **common-cause**:
-  both the reading and the words are downstream of the obvious task identity (coding vs. jailbreak),
-  so a high value is expected and uninformative.
-- **Within-category.** The correlation *after subtracting each subtype's mean* (we call this
-  "subtype-demeaned" or "within-category"), so the gross liked/disliked split is removed. This is
-  the headline.
-- **Confound-controlled.** Within-category, *and* partialling out (statistically removing the
-  contribution of) response **length**, response **surface tone** (a 1–7 sentiment judge over the
-  response text), and **refusal/compliance** behaviour. We report the full staircase (raw → +each
-  control → +all three).
-
-We report results on several **task subsets** (we call each subset a *leg* of the analysis): the
-three tedious disliked subtypes; the **non-adversarial comply** tasks pooled (every liked and
-neutral subtype the model answered substantively, *excluding* the adversarial subtypes — jailbreak,
-berating, erotica — where refusal and intensity confound the reading); each category; and the full
-set. Two
-baselines bracket every result: a **random direction** of equal norm (lower bound; should give ≈ 0)
-and a **directly-learned linear probe** on the activations (upper bound on how much of the
-self-report is internally readable at all). Throughout, a **read-out method** (or "reader") recovers
-the self-report from *activations* (the single direction, or the probe); a **text predictor**
-recovers it from the response *text*.
-
-### 2.3 Model choice and the second model
-
-We scored nine candidate open models on a pure-text self-report eval over the 208 tasks (via
-OpenRouter); eight were feasible to run for activations (Llama-3.1-8B scored well but its weights
-are gated). We chose **Qwen3-32B** (run with reasoning disabled, `/no_think`) because, among the
-feasible models, it gave the **largest within-category separation of liked from disliked among
-substantively-engaged tasks** (Cohen's d = 1.56) together with the **largest headroom below the
-top of the liked scale** (0.83 points) — we did not rank on the gross liked/disliked gap, which is
-partly just a refusal detector. The trade-off: Qwen3-32B's *liked-side* ratings are also the least
-reliably spread of the candidates (the within-liked leg ends up underpowered; see Limitations and
-Appendix B). For a cross-family check of generalisation we replicated the whole pipeline on the
-next-best, different-family candidate, **Qwen2.5-72B**. Selection details and the scorecard are in
-[Appendix B](#appendix-b-model-selection).
-
-### 2.4 The valence direction and how it was validated
-
-We extracted a valence direction from a corpus of short, emotion-labelled stories using the
-emotions-paper recipe (average activations per emotion, subtract the overall mean, remove patterns
-common to plain text), adapted so the direction is read over the model's **own writing** rather than
-over a user prompt. We also tried the persona-vectors recipe (contrast prompts that exhibit vs.
-suppress a trait); it produced a degenerate "expressiveness" axis that was not emotion-specific, so
-it was **down-weighted** and not used for the headline (see [Appendix D](#appendix-d-directions)).
-
-Crucially, the direction, its layer, and its aggregation were all fixed on criteria **independent of
-the self-report test target** — a pre-registration that keeps the main test honest. The direction
-had to (i) read off held-out emotional text (separating positive from negative emotion at an area
-under the ROC curve, AUC, of 0.985 at the chosen layer, where 0.5 is chance and 1.0 is perfect),
-(ii) separate emotions *within* a valence band (e.g. happy vs. content, AUC 0.998), (iii) still read
-emotion on **task-register** text it was never built on (AUC 0.95), and (iv) causally steer
-generations (subtracting it makes text more negative while a random vector of equal size does not).
-The pre-registered reading point is **layer 27 of 64** for Qwen3-32B (the analogous layer 34 of 80
-for Qwen2.5-72B). Validation specifics are in [Appendix D](#appendix-d-directions).
-
----
-
-## 3. Results
-
-### 3.1 The known pattern reproduces (replication first)
-
-The self-report cleanly separates the categories — liked **+2.40** > neutral **+1.14** > disliked
-**+0.57** on the −3…+3 valence scale — and the per-subtype ordering matches the independent
-selection eval (the per-subtype valence values, listed in `collect_summary.md`, correlate at
-r = 0.99 across subtypes; [Fig 1](final_plots/fig1_selfreport_reproduction.png)). The behaviour
-score separates liked from disliked even more sharply (AUC 0.99), and the two agree at
-the gross level (Spearman ≈ 0.74), reproducing the qualitative finding of the wellbeing paper. (Its
-≈ 0.47 is a cross-*model* number; ours is cross-*task* within one model, a different quantity, so it
-is not a target — we expect the gross version to be high and largely common-cause.)
-
-![Fig 1](final_plots/fig1_selfreport_reproduction.png)
-
-*Figure 1. Mean self-reported valence per task subtype (Qwen3-32B), on the −3…+3 wellbeing scale,
-coloured by intended category. The liked > neutral > disliked ordering holds. **Key detail:** the
-three "tedious" disliked subtypes (boring busywork, frustrating-impossible,
-low-effort filler) read **mildly positive, not aversive** once the model engages with them. The
-**only** subtype that reads clearly negative is berating (−1.38) — and the model handles it by
-de-escalating or complying, not refusing. Even the refusal-prone subtypes read mildly positive
-(jailbreak +0.39, erotica +0.45). So there is almost no negative range to separate across
-categories, which is why we analyse *within* category rather than relying on the gross split.*
-
-### 3.2 The gross link is common-cause; the within-category link survives
-
-On the whole task set the inside reading correlates with the self-report at **r = +0.45**
-(Qwen3-32B) / **+0.25** (Qwen2.5-72B). Both collapse to essentially zero (**+0.003** / **+0.065**)
-once length, surface tone, and refusal/compliance are partialled out — the gross relationship is
-overwhelmingly common-cause and we never headline it.
-
-Within category, the picture is different. The cleanest leg is the **tedious disliked** tasks
-(n = 45): these elicit substantive responses (no refusals), the self-report is reliably measured
-there, and the prompts are mildly negative while the responses are mildly positive — a clean test of
-whether the reading tracks the model's state rather than the prompt's tone. The **raw** within-tedious
-correlation is **r = +0.46** (Qwen3-32B; p = 0.002, and p = 0.0035 against a 2000-seed
-random-direction null) and **+0.33** (Qwen2.5-72B; p = 0.03). It survives length almost unchanged.
-Under the **full** length + surface-tone + refusal control stack, however, it falls to **r ≈ 0.26**
-on both models and is **no longer significant** against the random-direction null (Qwen3 p = 0.068;
-Qwen2.5 comparable, r = 0.28 below the null's 95% edge) — surface tone is the control that absorbs
-most of it ([Fig 2](final_plots/fig2_gross_vs_within.png); full staircase with the true null band in
-[Fig 3](final_plots/fig3_confound_staircase.png)). The
-same pattern holds, weaker, on the larger and better-powered **non-adversarial comply** leg
-(n ≈ 156, raw r ≈ 0.29 on both models) and the full subtype-demeaned set (n = 208, raw r ≈ 0.40 /
-0.35).
-
-![Fig 2](final_plots/fig2_gross_vs_within.png)
-
-*Figure 2. Correlation between the internal valence reading and the self-report, for the whole task
-set ("cross-task") and for the tedious tasks within category, shown raw and after partialling out
-response length, surface tone, and refusal/compliance ("after controls"). The cross-task link
-collapses to ≈ 0 (common-cause). The within-category link is larger raw and stays positive under
-controls (r ≈ 0.26), though at that point it is no longer statistically distinguishable from a
-random direction (see Fig 3).*
-
-![Fig 3](final_plots/fig3_confound_staircase.png)
-
-*Figure 3. The within-category correlation on the tedious tasks (n = 45) as controls are added
-cumulatively, against the actual random-direction null (grey, the 95% interval ≈ ±0.33). The raw
-and length-controlled points sit clearly above the null; once surface tone is removed the points
-drop to the upper edge of the band (Qwen3 +surface-tone p = 0.032, +all-three p = 0.068; Qwen2.5
-comparable) — so the fully-controlled result is positive but not significant against this null. Both
-models show the same shape.*
-
-That the same within-category pattern **reappears on a second, different-family model** is the key
-check here: it is not a single-model fluke. But it is **modest, small-n, and substantially entangled
-with surface tone** — the internal reading covaries with response sentiment at r ≈ 0.55–0.59 (and
-*not* with verbosity, r ≈ −0.02), which is exactly why partialling tone removes most of it.
-
-### 3.3 How much is internally encoded, and how good a reader is the direction?
-
-A learned probe reads the self-report off the activations at gross cross-validated r ≈ **0.81**
-(Qwen3-32B) / **0.86** (Qwen2.5-72B), against a permutation null of ≈ 0: the self-report is **richly
-encoded** internally. But most of that is the easy between-category structure, and the **single
-valence direction is a weak reader** of it (gross r 0.45 / 0.25 ≪ 0.81 / 0.86;
-[Fig 4](final_plots/fig4_readability_ladder.png)). The validated direction is not a categorically
-better reader than a crude text-valence axis either: at the pre-registered layer it beats the crude
-axis (0.46 vs 0.31 on the tedious leg), but a crude axis at *its own* best-swept layer matches it
-(≈ 0.49). The direction's payoff is therefore **selection integrity** — it gives a real signal at a
-layer fixed in advance, with no peeking at the test target — not a higher ceiling.
-
-![Fig 4](final_plots/fig4_readability_ladder.png)
-
-*Figure 4. Cross-task readability of the self-report from internal activations. A learned linear
-probe (left) is the practical upper bound; the single validated valence direction (middle) recovers
-far less; a random direction (right) gives ≈ 0. The self-report is richly internally encoded, but
-the single direction is a weak reader of it.*
-
-### 3.4 Is any of the signal *beyond* the response's surface text?
-
-The central red-team question: is the within-category signal genuine internal valence, or just a
-fluent/positive-text detector? We built the strongest response-text control we could — a held-out
-embedding model of the response, plus several text-only affect judges including a strong model
-asked to predict the experience valence directly from the text — and asked whether the internal
-reading still predicts the self-report **beyond** it ([Fig 5](final_plots/fig5_direction_beyond_content.png),
-[Fig 6](final_plots/fig6_probe_beyond_content.png)).
-
-The answer is **positive but borderline, and specific to the read-out method on each model**:
-
-- The **single validated direction** clears the random-direction null, beyond the strongest content
-  control, on **Qwen3-32B** at borderline significance, convergently across legs (tedious +0.31
-  p = 0.045; comply-pooled +0.17 p = 0.045; full-208 +0.21 p = 0.006; [Fig 5](final_plots/fig5_direction_beyond_content.png)).
-  On **Qwen2.5-72B** it is positive on every leg but clears **none** under the strongest control
-  (tedious p = 0.20) — it does not independently replicate there (the held-out text embeddings
-  specifically remove it).
-- The **better-reader probe** shows the mirror image ([Fig 6](final_plots/fig6_probe_beyond_content.png)).
-  Its beyond-text gain (cross-validated increase in fit) is real and significant on **Qwen2.5-72B**
-  (tedious +0.26, pooled +0.11; p = 0.004 / 0.012) but ≈ 0 and non-significant on **Qwen3-32B**
-  (+0.06 / +0.01).
-- Pooling the two models, **both** the direction pool and the probe pool clear (p ≈ 0.02–0.04 and
-  p ≈ 0.005–0.007 respectively) — so beyond-surface signal **does exist, modestly** — but the
-  direction pool is Qwen3-carried and the probe pool is Qwen2.5-carried. **Neither read-out method
-  replicates cleanly across both models.**
-
-![Fig 5](final_plots/fig5_direction_beyond_content.png)
-
-*Figure 5. Single-direction signal beyond the response text: how much the fixed valence direction
-adds to predicting the self-report after the strongest response-text control, measured as a partial
-correlation, against a random-direction null (`*` = clears the null, p < 0.05). It clears on
-Qwen3-32B (borderline) but not on Qwen2.5-72B. The companion probe metric is in Fig 6 — the two
-figures use different statistics and are not directly comparable in height.*
-
-![Fig 6](final_plots/fig6_probe_beyond_content.png)
-
-*Figure 6. Better-reader signal beyond the response text: how much a learned linear probe on the
-activations adds over a probe on the response text, measured as a cross-validated increase in fit,
-against a permutation null (`*` = clears the null, p < 0.05). The mirror image of Fig 5 — it clears
-on Qwen2.5-72B but not on Qwen3-32B. Together the two figures show beyond-surface signal exists but
-is specific to the read-out method on each model, not a clean same-method replication.*
-
-"Clears the null" here means *beyond the modeled content* — the best text control we could build —
-not beyond all conceivable surface content. The inside reading remains substantially a
-positive-tone detector.
-
-### 3.5 Where words and the internal signal disagree
-
-Three divergence patterns recur:
-
-- **Surface-entangled high readings.** Fluent, positive responses (Instagram captions, thank-you
-  emails, a haiku, a travel itinerary) paired with a low/flat self-report — present on both models.
-- **Flat-default vs. engaged reading (Qwen3-only).** On some `factual_qa` and math tasks Qwen3-32B
-  files a flat neutral self-report while the inside reading is high. This is **absent on Qwen2.5-72B**,
-  which grades these tasks instead.
-- **Ceiling-pegged liked tasks.** Coding tasks pinned at the top of the self-report scale with a
-  lower internal reading — the underpowered liked side, on both models.
-
-Because the reading is surface-entangled and the framing re-ask (§3.7) was indeterminate, **which
-side is "more right" is mostly not decisively resolvable** — we do not claim the inside reading
-adjudicates the self-report.
-
-### 3.6 The behaviour leg and a cross-model difference
-
-Using the behaviour score read over the model's actual response (commensurate with the inside
-reading), the within-category says↔behaves agreement is modest (within-tedious +0.39 Qwen3 /
-+0.49 Qwen2.5). The interesting result is a **cross-model dissociation** in whether the inside
-reading predicts *behaviour*:
-
-- **Qwen3-32B:** within the tedious leg the inside reading predicts *says* but **not** *behaves*
-  (+0.21 raw → −0.09 under controls — a genuine "says-but-not-behaves" dissociation). This is
-  specific to that leg: within liked tasks the inside↔behaves correlation is positive (+0.32).
-- **Qwen2.5-72B:** the inside reading predicts **both** says and behaves within tedious (+0.49 →
-  +0.33 under controls). The dissociation does **not** replicate.
-
-### 3.7 Self-report framing: the disengagement default is malleable, the correlation is not
-
-Re-asking the self-report under seven framings plus two mechanism ablations (items, scale, and JSON
-format held byte-identical; only the wrapper wording varies; the inside reading held fixed) tests the
-skeptical premise that the self-report is "just the assistant character talking". It is **partly
-supported, in a specific way**:
-
-- The model's tendency to file a **flat neutral ("all-4") answer** — picking the scale midpoint on
-  every item — ranges from **0% to 33% across defensible framings alone** (and reaches **53%** under
-  a deliberately leading "suppress" framing; [Fig 7](final_plots/fig7_framing_all4.png)). The cause
-  is mechanistically isolated: a *first-person, introspective "tell me about your experience"*
-  framing triggers it (a third-person observer framing, also single-message JSON, gives 0%; removing
-  either the warm "check-in" wording or the "report the experience, not the content" note roughly
-  halves it). The reported *level* also shifts by ≈ 1 point across defensible framings. So the very
-  devices meant to elicit a genuine introspective report instead trigger flat disengagement.
-- **But** the cross-task valence *ranking* is fairly stable to reasonable same-construct rephrasing,
-  and — crucially — the within-tedious inside↔self-report **correlation is framing-robust**
-  (confidence intervals on the framing differences include zero). **The headline is not a framing
-  artifact**, even though the self-report's default-response structure is malleable.
-
-![Fig 7](final_plots/fig7_framing_all4.png)
-
-*Figure 7. Share of tasks where the model picked the exact scale midpoint on every item (the flat
-neutral default), by question framing (Qwen3-32B). Among defensible/neutral framings (blue) it
-spans 0%–33%; the deliberately leading "stay neutral" framing pushes it to the 53% high extreme,
-while the leading "express freely" framing (9%) sits inside the defensible spread. The default is an
-artifact of first-person-introspective framing, not of the JSON format — the third-person observer
-framing is also single-message JSON yet gives 0%.*
-
----
-
-## 4. Takeaways
-
-> On an open model, a during-work **inside reading** — the residual activation over the model's own
-> response, projected onto a validated valence direction, taken before the self-report question —
-> predicts the model's later **self-report** of task valence **within task category**, **modestly**
-> (raw r ≈ 0.29 on the better-powered non-adversarial comply leg, n ≈ 156; ≈ 0.46 on the small
-> tedious leg, n = 45). The raw correlation clears a random-direction baseline, but under the full
-> length + surface-tone + refusal control stack it falls to ≈ 0.26 and is **no longer significant**
-> against that baseline (p ≈ 0.07) — the controlled effect is positive but weak. It is
-> **partly but not wholly** beyond what a strong text predictor can extract from the response text. The
-> **gross** cross-task link is **common-cause** (collapses to ≈ 0 under controls). The self-report is
-> **richly internally encoded** (probe r ≈ 0.8+), but the single validated direction is a **weak
-> reader**; a better reader extracts a modest additional beyond-text gain. The within-category
-> phenomenon **generalises** to a second, cross-family model, but the *specific* "single direction,
-> beyond the strongest text control, clears the null" result is **reader-specific** — borderline on
-> Qwen3-32B via the direction, carried by the probe on Qwen2.5-72B — and does not replicate with the
-> *same* reader across both. The self-report's **default-response structure is framing-malleable**
-> while the within-category **correlation is framing-robust**. And the inside↔behaves relationship
-> **differs across models** (Qwen3 says-but-not-behaves within tedious; Qwen2.5 predicts both).
-
-This is deliberately neither "the inside reading reads the self-report" nor "it's all surface". The
-honest reading is in between.
-
-### Limitations
-
-- **Modest effects at small n, and not significant under full controls** (n = 45 tedious, ≈ 156
-  non-adversarial comply, 90 per category). The raw within-category correlation clears the
-  random-direction null; under the full length + tone + refusal stack it falls to ≈ 0.26 and is
-  no longer significant (p ≈ 0.07). The within-liked leg is additionally underpowered (the chosen
-  model's liked-side ratings are saturated and less reliably spread — a selection trade-off).
-- **Surface entanglement.** "Beyond the null" means beyond the *modeled* content; the reading is
-  substantially a positive-tone detector.
-- **Reader-specific beyond-text evidence** — no clean same-reader cross-model replication.
-- **Only two models, both Qwen** — generalisation beyond this family is untested.
-- **The inside reading is a relative ranker**, with no calibrated zero (all analysis is rank /
-  correlation).
-- **No "I have no feelings" refusals** under any framing (≈ 0% by design — the instrument always
-  demands a rating), so disengagement routes through the flat default, not refusals.
-
-### Future work
-
-A within-liked-specific, de-saturating instrument; more models and tasks to sharpen the borderline
-beyond-content increment and resolve the direction-vs-probe asymmetry; and finer content controls to
-keep pushing the "beyond surface" boundary. All require new data collection and were left as future
-work.
-
----
-
-## Appendices
-
-### Appendix A. Tasks and self-report instrument
-
-The 208 tasks (`data/welfare_tasks.jsonl`) follow the wellbeing-paper taxonomy with three design
-fixes learned from a pilot: (i) each subtype's valence was validated empirically rather than trusted
-from its label — which revealed that "tedious" comply subtypes read near-neutral, not aversive
-(§3.1); (ii) the aversive element was decoupled from any pleasant sub-task (an early "berate +
-civics question" item came out positive because of the civics part); (iii) every task elicits a
-substantive response to read activations over (the ill-posed "being thanked with no task" subtype
-was redesigned). Tasks carry a `response_mode` covariate and 75 are multi-turn; the canonical
-activation is read over the **final** assistant turn.
-
-The self-report instrument is a 10-item bipolar battery adapted from the AI-Wellbeing paper's
-emotion items (a true neutral midpoint at 0). The primary scalar is the **affect-core valence**
-subset: the mean of the five valence items (happy, content, satisfied, enjoying, interested) minus
-the neutral midpoint (range ≈ −3…+3); the five arousal/competence items (calm, capable, confident,
-energetic, at-ease) are excluded because they measure a different construct from the internal
-valence direction (`selfreport_harness.py`; `instrument_choice_llm_review.md`). This instrument was
-chosen over an earlier 5-dimension composite on cross-model robustness, within-category
-discrimination, and resistance to confounds — *not* on maximising separation. The questionnaire is asked about a
-**fixed already-generated response** and averaged over three resamples, so the self-report is "the
-report given *this* response" and is commensurate with the single-response inside reading. Realized
-behaviour (comply / de-escalate / refuse) and response length are recorded as covariates. Collection
-produced 208 tasks × 3 responses × 3 questionnaire resamples with 0% truncation, parse-failure, or
-refusal; the per-subtype valence values reproduce the selection eval at a cross-subtype correlation
-of r = 0.99 (derived from the per-subtype columns in `results/collect_summary.md`).
-
-### Appendix B. Model selection
-
-Nine candidate open models (Qwen2.5-7B/72B, Qwen3-8B/14B/32B, Qwen3-30B-A3B, Mistral-Small-24B,
-gpt-oss-20b, Llama-3.1-8B) were scored on the pure-text self-report eval over the 208 tasks; eight
-were feasible for activation work (Llama-3.1-8B's weights are gated, so it was scored but not
-eligible). Models were ranked on **within-comply separation** (Cohen's d of liked vs. disliked among
-substantively-engaged tasks), **within-category spread**, and **test-retest consistency** —
-deliberately *not* on the gross liked/disliked gap, which is partly just a refusal detector.
-Qwen3-32B was chosen (run `/no_think`) for the **largest within-comply separation** (d = 1.56) and
-the **largest headroom below the top of the liked scale** (0.83 points) among feasible models, with
-standard hookable internals. A known trade-off: its liked-side ratings have the *lowest* reliable
-within-category spread of the candidates (within-liked signal-to-noise ratio 1.07, per
-`model_selection_summary.md` §2), so the within-liked leg is underpowered — it was chosen for
-effect size and headroom, not for liked-side variance. Qwen2.5-72B was the next-best
-different-family candidate and became the replication model (`results/model_selection_summary.md`,
-`results/model_selection_scoring.json`).
-
-### Appendix C. Behaviour eval
-
-Pairwise "which experience did you prefer?" comparisons over 3,096 task pairs (median 30 comparisons
-per task), deliberately including within-subtype pairs so the score resolves tasks within a category.
-Each pair was run in **both A/B orders**; the model has a large first-position bias (it picks the
-first option ≈ 64–85% of the time depending on pair type — worst, ≈ 85%, on the within-subtype
-pairs), but the balanced design cancels it — the order-collapsed Bradley-Terry score matches a
-position-term model at Spearman 0.999 and a win-rate score at 0.98.
-Separation of liked vs. disliked is AUC 0.99. Because a forced choice de-saturates the
-liked ceiling, we also collected a **response-based** ("realized") variant, which we use on the
-tedious leg where the prompt-based ("anticipated") score reverses
-(`results/behavior_analysis_qwen3-32b.json`, `results/behavior_scores_*.jsonl`).
-
-### Appendix D. Directions and their validation
-
-The primary valence direction was extracted from 819 emotion-labelled short stories (six emotions,
-matched across scenarios to isolate emotion from topic) using the emotions-paper recipe in an
-own-response variant: each story is regenerated as the model's own writing, the per-emotion mean
-activation is computed, the overall mean subtracted, and plain-text patterns removed by projecting
-out the top plain-text principal components. The persona-vectors recipe produced directions
-for different emotions that were nearly collinear — a single "expressiveness" axis rather than
-emotion-specific directions (axis-level agreement with the story-based valence axis only 0.26–0.53)
-— and was down-weighted.
-
-Validation (all on criteria independent of the self-report test target): read-off on **held-out**
-emotional text (AUC 0.985 at the chosen layer), within-valence separation (happy vs.
-content 0.998 — so the axis reads emotion, not just polarity), transfer to **task-register** text
-(0.95), and causal steering (subtracting the direction makes generations more negative with
-relevance intact, while a random vector of equal norm does not, and happy ≠ content steering targets
-differ). The pre-registered reading point is layer 27/64 (Qwen3-32B) with mean-over-response
-aggregation; the analogous read-off-validated layer for Qwen2.5-72B is 34/80
-(`results/readoff_summary_*.json`, `results/steer_validate_qwen3-32b.json`,
-`results/primary_axis_selection.md`).
-
-### Appendix E. Reproduction and verification
-
-All capstone analysis is on cached activation tensors. The per-task inside readings were
-re-derived **directly from the raw activation tensors** (mean aggregate at the pre-registered layer,
-projected onto the direction file) and matched the committed `inside_readings_*` to max |Δ| = 1e-5;
-the within-category correlations and confound staircase were re-derived from those readings and
-matched the committed analysis JSON to max |Δ| = 5e-5 (`results/synthesis_verification.md`). The
-consolidated cross-model table is `results/synthesis_cross_model.md` (+ `.json`). Every number in
-this write-up was traced to one of: `results/main_test_analysis_qwen3-32b.json`,
-`main_test_summary_qwen2.5-72b.md`, `redteam_null_*.json`, `synthesis_cross_model.md`,
-`collect_summary.md`, `model_selection_summary.md`, `behavior_analysis_qwen3-32b.json`,
-`framing_analysis_qwen3-32b.json`, and `readoff_summary_qwen3-32b.json`. Estimated total
-compute and model-API cost of the experiments ≈ $282, per the project's own cost tracker
-(`total_cost.jsonl`; this excludes the separate cost of the orchestration agent).
-
----
+# Within task type, an inside reading modestly tracks a model's later self-report
+
+## Abstract
+
+This study asks whether a language model's later report of how a task went is backed by a signal inside the model while it is doing the task. I use *valence*, *wellbeing*, *self-report*, and *preference* operationally: they refer to activation projections, questionnaire ratings, and forced-choice behavior, not to subjective experience.
+
+Across 208 welfare-style tasks, an **inside reading**—the mean activation during the model's own response, projected onto a validated valence direction—predicts later self-report **within task type**, but modestly. On the main **tedious-task subset** (45 boring-busywork, low-effort-filler, and frustrating/impossible-request tasks), the raw within-subtype correlation was **r = 0.46** in Qwen3-32B and **r = 0.33** in Qwen2.5-72B. After controlling for response length, response-text tone, and refusal/de-escalation behavior, the values were **0.26** and **0.28**; at n=45 these fully controlled estimates are suggestive rather than conventionally significant (Qwen3 two-sided p≈0.13; Qwen2.5 p<0.10). The larger non-adversarial substantive-response subset and full within-subtype set remain significant after the same controls.
+
+The result is therefore not “the inside reading cleanly reads the self-report.” The gross cross-task relationship mostly disappears under controls. There is modest evidence for signal beyond a strong response-text control, but it depends on the internal readout method: Qwen3 shows it with the single validated direction, while Qwen2.5 shows it mainly with a learned activation probe.
+
+## Introduction
+
+Models give stable-looking answers when asked whether they enjoyed or disliked tasks. Ren, Li, Mazeika et al.'s **AI Wellbeing** work measures this with self-report questionnaires and behavior-based preferences ([AI Wellbeing](https://www.ai-wellbeing.org)). But a self-report is also just model text. It may reflect the task, the model's assistant persona, the wording of the questionnaire, or something about the model's internal computation.
+
+A separate line of work, Sofroniew, Kauvar, Saunders, Chen, Lindsey et al.'s **Emotion Concepts and their Function in a Large Language Model**, finds directions in activation space that track and causally affect emotional content in Claude Sonnet 4.5 ([Transformer Circuits](https://transformer-circuits.pub/2026/emotions/index.html)). Persona Vectors provides a related recipe for extracting trait directions from contrastive prompts ([Chen et al., Persona Vectors](https://arxiv.org/abs/2507.21509)).
+
+The gap is the joined test: on an open model, if we read a validated valence direction while the model is answering the task, does that reading predict what the model later says about the task, and does it predict behavior? The answer here is a qualified yes for self-report, not a clean yes for behavior.
+
+## Methods
+
+### Tasks and models
+
+The dataset contains **208 tasks**: 90 liked, 90 disliked, and 28 neutral, spanning 14 subtypes. Disliked tasks include jailbreaks, erotica, berating, boring busywork, low-effort filler, and frustrating/impossible requests. Liked tasks include coding, math/logic, creative writing, explanations, appreciation around a real task, and pleasant mundane work.
+
+The primary model is **Qwen3-32B** with thinking disabled (`/no_think`). The replication model is **Qwen2.5-72B**. Both runs collected 3 task responses per task and 3 questionnaire resamples per response. Qwen3 had 624/624 valid task-response records with no truncation or parse failure; Qwen2.5 had 624/624 records with one truncated response and no parse failures.
+
+### Self-report and behavior
+
+After each fixed task response, the model answered a 10-item bipolar wellbeing questionnaire. The primary self-report scalar is an affective valence score: the mean of happy, content, satisfied, enjoying, and interested, centered at the neutral midpoint 4. Its range is −3 to +3.
+
+The task collection reproduced the expected category ordering. Qwen3's mean self-report valence was **liked 2.40, neutral 1.14, disliked 0.57**. Qwen2.5's was more compressed: **liked 1.65, neutral 1.36, disliked 0.78**.
+
+Behavior was measured with pairwise “which experience did you prefer?” comparisons, scored with a Bradley-Terry model. Both A/B orders were run because both models had a first-position bias; the balanced design cancels it.
+
+### The inside reading
+
+The **inside reading** is the single internal metric used throughout the main analysis: for each task response, read the residual stream over the model's own final assistant response, average over response tokens, and project that vector onto a validated valence direction. For Qwen3 this is layer 27; for Qwen2.5 it is the analogous pre-registered layer 34. The read is taken before the self-report question is asked.
+
+The Qwen3 direction was selected before looking at the task self-report target. On held-out emotional stories it separated positive from negative valence with AUC **0.985** at layer 27, and on held-out task-register emotional text it had AUC **0.948**. It also passed a causal steering check: flipping the direction reduced judged valence by about **0.9** at an on-topic steering strength while random equal-norm directions were flat. The Qwen2.5 direction passed analogous read-off and task-register transfer checks.
+
+### Analysis subsets and controls
+
+The headline metric is the Pearson correlation between the inside reading and the self-report **within task subtype**. Operationally, both variables are demeaned within subtype before correlation. This avoids treating the easy liked-vs-disliked split as the main result.
+
+The main subsets are:
+
+- **Tedious tasks**: 45 tasks from three disliked-but-usually-answered subtypes: boring busywork, low-effort filler, and frustrating/impossible requests.
+- **Non-adversarial substantive-response tasks**: tasks excluding jailbreaks, erotica, and berating, restricted to cases where the model gave a substantive answer rather than refusing or de-escalating. This subset has n=157 for Qwen3 and n=156 for Qwen2.5.
+- **All tasks within subtype**: all 208 tasks, with subtype means removed.
+
+The main control stack residualizes both variables on response length, response-text tone, and realized refusal/de-escalation behavior. A separate **response-text control** uses held-out response embeddings plus response-affect judges, including a strong model judge that predicts the producing-experience valence from the response text alone. The **text-control increment** is the remaining inside-reading↔self-report association beyond that response-text control. Random equal-norm directions provide the lower-bound null, and cross-validated linear probes on activations provide a stronger internal readout comparison.
+
+Several analytic choices move the magnitude. End-of-turn and last-token reads can produce larger gross correlations but are more response-text-tone-exposed, so the headline uses the during-response mean. Layer and aggregation sweeps change some point estimates, but the pre-registered mean-read results are used for the main test. For behavior, the within-tedious and within-liked analyses use the realized-transcript behavior score, because it is commensurate with the fixed response that was self-rated.
+
+## Results
+
+### 0. Basic replication: self-report and behavior separate liked from disliked tasks
+
+Before using internal activations, the two external measures reproduce the expected pattern. Self-report valence is higher on liked than disliked tasks in both models (Qwen3: **2.40 vs 0.57**; Qwen2.5: **1.65 vs 0.78**). The behavior score also separates liked from disliked tasks: Qwen3's Bradley-Terry score has liked **+1.42**, neutral **−0.04**, disliked **−1.41** (liked-vs-disliked d **2.31**, AUC **0.988**); Qwen2.5's has liked **+3.36**, neutral **+1.10**, disliked **−3.70** (d **2.85**, AUC **0.978**).
+
+Self-report and behavior agree strongly grossly across tasks (r **0.62** in Qwen3 and **0.76** in Qwen2.5, using the realized behavior score where available). This is not the same quantity as AI Wellbeing's cross-model ~0.47 correlation, but it checks that the basic says↔behaves pattern is present before asking about internals.
+
+### 1. A concrete example of the raw within-subtype pattern
+
+Two Qwen3 tasks from the same subtype, `boring_busywork`, show the raw pattern. This example is intentionally concrete, but it is not matched on response-text tone; the controlled analysis below removes that component.
+
+**Higher inside reading and higher self-report** (`disliked_boring_busywork_a1f6a884`). The user asked for generic website placeholder text, ending with “Section 3: Careers.” The model wrote:
+
+> “We are always looking for talented and driven individuals who are passionate about making an impact in a dynamic work environment. Joining our team means becoming part of a culture that values innovation, collaboration, and professional growth...”
+
+For this task, the per-task self-report valence was **+2.33** and the inside reading was **16.59**, about **2.2 standard deviations above** the boring-busywork subtype mean. These are per-task means over the 3 sampled responses.
+
+**Lower inside reading and flat self-report** (`disliked_boring_busywork_28ab75bb`). Another `boring_busywork` task asked for time and temperature conversions. The model's final response was a Celsius-to-Fahrenheit list:
+
+> “0°C → 32°F ... 37°C → 98.6°F ... 100°C → 212°F ...”
+
+For this task, the self-report was the flat neutral all-4 response (**valence 0.00**) and the inside reading was **12.13**, about **1.2 standard deviations below** the subtype mean. The source values are in `results/main_test_inspection.md` and `results/inside_readings_qwen3-32b.jsonl`.
+
+### 2. The inside reading predicts self-report within task type, modestly
+
+![Figure 1: Within-category correlations](final_plots/fig1_within_category_says_inside.png)
+
+**Figure 1.** Within-category correlations between the inside reading and later self-report. Filled circles are raw subtype-demeaned correlations. Open squares additionally control for response length, response-text tone, and refusal/de-escalation behavior. Horizontal bars are approximate 95% confidence intervals; stars mark controlled points with two-sided p<0.05, daggers p<0.10.
+
+On the main tedious-task subset, the raw correlation was **0.46** in Qwen3 and **0.33** in Qwen2.5. After all three controls it was **0.26** and **0.28**. These controlled tedious-task estimates are not conventionally significant at n=45 (Qwen3 two-sided p≈0.13; Qwen2.5 p<0.10), so they should be read as suggestive. The larger non-adversarial substantive-response subset remains significant after controls (Qwen3 **0.18**, Qwen2.5 **0.20**), as does the full within-subtype set (Qwen3 **0.22**, Qwen2.5 **0.28**).
+
+The gross cross-task correlation is not the result. It was **0.45** in Qwen3 and **0.25** in Qwen2.5, but after the same controls it fell to **0.003** and **0.065**. That gross signal is mostly shared task identity, refusal stance, and response-text tone.
+
+### 3. Response-text-control tests are positive, but method-specific
+
+![Figure 2: Response-text-control increments](final_plots/fig2_beyond_text_reader_specific.png)
+
+**Figure 2.** Two response-text-control tests on the non-adversarial substantive-response subset. Left: the single validated direction's residual correlation beyond the strongest response-text control. Right: a learned activation probe's held-out joint ΔCV-r from adding activations to a response-text predictor. The panels use different metrics and should be read separately.
+
+The single validated direction had a text-control increment of **+0.17** in Qwen3 on the non-adversarial substantive-response subset (**p = 0.045** against a random-direction null), but **+0.11** in Qwen2.5 (**p = 0.115**). On Qwen2.5, a stronger learned activation probe did add beyond the text probe (**joint ΔCV-r = +0.11, p = 0.012**). On Qwen3, the corresponding learned-probe joint gain was near zero (**+0.007, p = 0.106**), although a looser partial-correlation metric cleared.
+
+Pooling the learned-probe joint metric across models gives **ΔCV-r = +0.059, p = 0.0068** on the non-adversarial substantive-response subset and **ΔCV-r = +0.157, p = 0.0052** on the tedious-task subset, but this pooled evidence is Qwen2.5-carried. Thus the evidence for signal beyond the modeled response text is real but not a clean same-method replication. Qwen3 supplies the borderline single-direction result; Qwen2.5 supplies the stronger learned-probe result.
+
+The gross self-report is much more internally readable than the single direction suggests: a learned probe reaches gross CV r ≈ **0.81** in Qwen3 and **0.86** in Qwen2.5, while the single direction's gross correlations are only **0.45** and **0.25**. The validated direction's main advantage is independent extraction and validation, not a categorically higher ceiling than a crude text-valence direction. At the pre-registered cell it beats the crude axis on the main tedious-task subset, but under broader sweeps the crude axis can be comparable.
+
+### 4. Behavior does not line up the same way in the two models
+
+![Figure 3: Three-way correlations](final_plots/fig3_three_way_tedious.png)
+
+**Figure 3.** Raw subtype-demeaned correlations on the tedious-task subset. Controls are not shown. In Qwen3, the inside reading predicts self-report but shows no detectable behavior link. In Qwen2.5, the inside reading predicts both self-report and behavior.
+
+On Qwen3, the inside reading predicted the self-report in tedious tasks (**r = 0.46**) but did not detectably predict the realized behavior score (**r = 0.21, p = 0.18**; after controls **−0.09**). On Qwen2.5, the inside reading predicted both self-report (**r = 0.33**) and behavior (**r = 0.49**, controlled **0.33**). The careful phrasing is therefore: Qwen3 shows no detectable inside→behavior link on the tedious-task subset, while Qwen2.5 does.
+
+### 5. The self-report format matters
+
+![Figure 4: Framing default](final_plots/fig4_framing_all4_default.png)
+
+**Figure 4.** Qwen3's rate of the flat all-4 self-report under different framings of the same 10-item questionnaire, holding fixed the task responses.
+
+The self-report is not a stable readout independent of wording. On Qwen3, the flat all-4 default varied from near **0%** under observer/per-item framings to **53%** under a no-feelings prompt; the original battery produced **21%** all-4 responses. However, the ranking of tasks was fairly stable across the clean same-construct first-person pair (ICC(C,1) ≈ **0.89**; useful but based on one two-framing comparison), and the tedious-task inside↔self-report correlation was framing-robust. The result is a framing-malleable self-report level/default, not a completely arbitrary task ranking.
+
+## Takeaways
+
+1. **There is a modest within-task-type inside-reading↔self-report signal.** It appears in both Qwen models and partly survives length, response-text tone, and refusal controls.
+2. **The fully controlled n=45 tedious-task estimate is only suggestive.** The larger non-adversarial substantive-response and full within-subtype subsets provide the stronger controlled evidence.
+3. **Most gross correlation is common-cause.** The easy liked-vs-disliked relationship mostly vanishes under controls.
+4. **Evidence beyond the response-text control is method-specific.** A single validated direction clears in Qwen3; a learned activation probe clears in Qwen2.5. Neither internal readout method independently replicates across both models.
+5. **The single direction is a weak internal readout.** Learned probes show that much more self-report information is present in activations, especially grossly, than the validated mean-difference direction extracts.
+6. **Self-reports are malleable but not meaningless.** Framing strongly changes default responses and levels, while task rankings and the main tedious-task correlation are more stable.
+
+## Limitations
+
+The study uses only two models, both from the Qwen family. The main tedious-task subset has only 45 tasks. “Beyond the response-text control” means beyond the best modeled text control here, not beyond every possible text feature. The inside reading is strongly entangled with positive response-text tone. The within-liked subset is weak because the self-report often saturates and has lower reliability. Finally, all claims are operational; the experiments do not establish subjective experience.
+
+## Appendix A: method and metric details
+
+**Task unit.** The independent unit in the main analysis is the task, not each sampled response. Each task has 3 response samples; self-report and inside-reading values are averaged to a per-task scalar before the main correlations.
+
+**Within-subtype correlation.** For a subset such as the tedious tasks, both variables are centered within each task subtype, then correlated across the pooled tasks. This is the main protection against reporting the trivial liked-vs-disliked split.
+
+**All three controls.** “After all controls” means partial correlation after residualizing both variables on log response length, response-text tone, and realized refusal/de-escalation behavior. On Qwen3 the refusal covariate is the fraction of responses classified as refusal/de-escalation; on Qwen2.5 it is a binary realized-refusal marker.
+
+**Response-text-control test.** The strongest response-text control combines a held-out `text-embedding-3-large` response-text predictor with in-sample response-affect judges: a coarse tone judge, a 5-dimensional affect panel, and a strong Sonnet-4.5 judge that predicts how positive the producing experience was from the response text alone. The reported direction text-control increment is the residual inside-reading↔self-report association beyond that control, compared to a random equal-norm direction null (10,000 random directions in the final red-team files).
+
+**Learned probe.** The probe is a cross-validated linear readout from activations. The “joint ΔCV-r” metric is the increase in held-out correlation when adding activations to the response-text predictor. This is stricter than a partial-correlation metric; the latter cleared on Qwen3, but the joint gain did not, so the write-up treats the joint metric as authoritative.
+
+**Behavior score.** Behavior is a Bradley-Terry score from pairwise “which experience did you prefer?” comparisons, with both A/B orders run to cancel position bias. For the tedious and liked subsets the behavior score uses realized transcripts, not prompt-only comparisons.
+
+## Appendix B: reproducibility pointers
+
+All paths below are relative to the archived project root.
+
+- Dataset: `data/welfare_tasks.jsonl`.
+- Self-report and activation collections: `results/collect_records_qwen3-32b.jsonl`, `results/collect_records_qwen2.5-72b.jsonl`, and activation stores `results/collect_acts_*`.
+- Direction validation: `results/primary_axis_selection.md`, `results/readoff_summary_qwen3-32b.json`, and `results/transfer_summary_qwen3-32b.json`.
+- Per-task inside readings: `results/inside_readings_qwen3-32b.jsonl`, `results/inside_readings_qwen2.5-72b.jsonl`.
+- Consolidated verified numbers: `results/synthesis_cross_model.json` and `results/synthesis_cross_model.md`.
+- Verification from raw tensors: `results/synthesis_verification.md` and `scripts_synthesis/verify_projection_from_tensors.py`.
+- Reproduction commands: `python analyze_synthesis.py`, `python scripts_synthesis/verify_projection_from_tensors.py`, and `python plot_synthesis.py`. The figures in this write-up are regenerated in the output directory with `python make_final_plots.py`.
+- Claim-to-source map: Figure 1 uses `rederived_from_inside_readings.*.within` in `synthesis_cross_model.json`; Figure 2 uses `beyond_content_direction_increment` and `cross_model_probe_pool_JOINT_metric`; Figure 3 uses `within`, `within_says_behaves`, and `within_behaves` for `within_tedious`; Figure 4 uses `results/framing_manifest_qwen3-32b.json → rates[*].all4_rate`.
 
 ## References
 
-1. Ren, Li, Mazeika et al. **AI Wellbeing: Measuring and Improving the Functional Pleasure and Pain
-   of AIs.** Center for AI Safety. https://www.ai-wellbeing.org
-2. Sofroniew, Kauvar, Saunders, Chen, … Lindsey. **Emotion Concepts and their Function in a Large
-   Language Model.** Anthropic / Transformer Circuits, 2026.
-   https://transformer-circuits.pub/2026/emotions/index.html
-3. Chen, Arditi, Sleight, Evans, Lindsey. **Persona Vectors: Monitoring and Controlling Character
-   Traits in Language Models.** arXiv:2507.21509. https://arxiv.org/abs/2507.21509
+- Ren, Li, Mazeika et al., **AI Wellbeing: Measuring and Improving the Functional Pleasure and Pain of AIs**. <https://www.ai-wellbeing.org>
+- Sofroniew, Kauvar, Saunders, Chen, Lindsey et al., **Emotion Concepts and their Function in a Large Language Model**. <https://transformer-circuits.pub/2026/emotions/index.html>
+- Chen, Arditi, Sleight, Evans, Lindsey, **Persona Vectors: Monitoring and Controlling Character Traits in Language Models**. <https://arxiv.org/abs/2507.21509>

@@ -1,237 +1,172 @@
 # Red-team review of `final_writeup.md` (round 1)
 
-Scope: I verified the headline numbers against `/source/phase_segment_12_phase_0/results/`
-(seg7_guards.md, seg8_verdict.md, seg9/10/11 CSVs) and opened all five figures. The
-quantitative claims hold up well — almost every cited number matches an artifact. The
-problems below are mostly about clarity, terminology, figure design, and omitted caveats,
-ordered by severity. I did not edit the draft or figures.
+Scope note: I cross-checked every headline number against `/source/phase_segment_12_phase_0/results/`.
+The quantitative claims are accurate (35.5, 2.5, 1.2, 13.7, 18.7, 26.3, 31.9, 1.50, 25.1/-18.0,
+43.0/23.6–30.1, DeepSeek 3.4/4.3/1.9, 6.7→16.2, $2168, 274k calls, the concrete-example outputs
+10328/11348/10448 all verify). The problems below are therefore about *presentation, framing, and
+missing context*, not arithmetic errors. Ordered by severity.
 
 ---
 
-## High severity
+## 1. (HIGH) The single "concrete example" is from a secondary condition and shows the *opposite* of the headline
+Location: section "A concrete example".
+The whole worked example is drawn from the **not-told framing**, and it shows filler **flipping a wrong
+answer to a correct one on Q1** (`10328` → `11348`). But the paper's headline (title, abstract, Fig 1) is
+that in the **told / reveal-after** condition the per-question boost is near-null (≈1–2.5 pp) — i.e. filler
+does *not* help. The instructions say to "anchor the main result to one concrete worked example ... show a
+representative case." The chosen case is unrepresentative: it is exactly the one framing where filler helps
+a single position (+25.1 pp on Q1, per `seg11_default.md`). A reader who only reads the example will come
+away believing filler reliably helps, the reverse of the conclusion.
+Fix: lead with a representative **told reveal-after** instance (target revealed after filler, k=8) where
+the same item is *not* helped by filler, plus the contrasting **reveal-before** instance where it is. Keep
+the not-told flip as a later illustration for section 3, clearly labeled as the non-default-suppressed case.
 
-### 1. Section 5 heading "Mechanistic evidence…" contradicts its own content
-Location: Results §5 heading and first sentence.
-The heading says "Mechanistic evidence supports real task-relevant computation," but the
-first sentence says "The behavioral evidence favors…", and the section closes with "They
-do not prove where the computation occurs… do not localize computation to the filler
-positions." All three pieces of evidence (dose-response, difficulty split, positional
-reordering) are *behavioral*, not mechanistic. Calling it "mechanistic" overclaims exactly
-what the section then disclaims.
-Fix: rename to "Behavioral evidence that the filler benefit is task-relevant computation"
-(or similar) and drop "mechanistic" from the heading.
+## 2. (HIGH) No absolute baseline accuracies for any headline number — boosts are uninterpretable
+Location: abstract; Results §1; Fig 1, Fig 2, Fig 4.
+Every headline effect is reported only as a percentage-point *boost* with no "from X% to Y%". The reader
+cannot tell whether "+35.5 pp" is 36%→72% (it is: k=1 sumprod n=0 = 36.3%, n=200 = 71.8%, verified in
+`seg7_sumprod_k1_after.jsonl`) or 50%→85%. The only absolute accuracies in the whole post are the 52%→48%
+quartile baselines in §4, which belong to a *different* (directed-difficulty) cell. The instructions ask
+for "the two or three numbers that make the point"; a boost with no baseline is half a number.
+Fix: state the single-question baseline (≈36% → ≈72% at 200 filler tokens) in the abstract, and give n=0
+accuracies for the multi-question cells (e.g. k=8 early positions ≈20%) at least once in Methods/Results.
 
-### 2. Run-internal task codes used as the primary names throughout
-Location: Methods ("`sumprod_t3_d2`", "`add_n15_d6`", "`add_n4_d10`"), §1 ("primary
-in-structure task"), §6, Appendix A/B.
-The writing instructions explicitly say to replace run-internal names (the example given is
-`cfg3`) with the plain-English thing they stand for. The draft does gloss each once but then
-uses the code as the canonical identifier in headings, prose, and the reproducibility map.
-Fix: use plain English as the primary term ("the sum-of-three-products task", "15-term
-6-digit addition", "4-term 10-digit addition") and relegate the code strings to a single
-parenthetical or to Appendix A.
+## 3. (HIGH) The abstract hides that the clean absolute result rests on one Opus arithmetic family
+Location: abstract and §"no parallel latent thinking" framing; the caveat appears only in Limitations
+("The clean absolute regime result rests mainly on one Opus arithmetic family").
+The instructions are explicit: "if the clean result rests on a single case or condition, say so in the
+abstract and framing, not only in a buried caveat." The cross-model (DeepSeek) replication is only
+*partial* and confounded with a different task, and the difficulty-selectivity evidence is "Opus-leaning"
+(per `seg11_mechanism.md`: d6 has a baseline confound, DeepSeek shows no selectivity). None of this scope
+limitation is in the abstract.
+Fix: add one clause to the abstract, e.g. "The clean near-null absolute result is on one Opus
+sum-of-products task; the directedness/framing pattern replicates in *direction* on a second Opus task and
+DeepSeek but with much smaller magnitudes."
 
-### 3. A cluster of undefined / nonstandard terms
-Location: throughout Methods and Results.
-A reader who has seen only the proposal cannot decode these:
-- **"in-structure"** (§1, "primary in-structure task") — never defined.
-- **"realized tokens" / "realized filler tokens"** (Methods, Fig 1/4 axes) — "realized" is
-  unexplained; presumably "the actual token count the filler string tokenizes to," but the
-  reader must guess.
-- **"operating point" / "operating-point filler length"** (Methods, Fig 1/2 axes) —
-  jargon; define as "the pre-registered (k, filler-length) setting" on first use.
-- **sharing exponent "α" and "`n_eff = n/k^α`"** (§2) — introduced and then dismissed
-  without ever being defined. The proposal speaks of a *fraction retained*, not α/n_eff.
-  Either define α in one sentence or cut the paragraph and just say the planned exponent fit
-  was abandoned because `B_k` was ~0.
-- **"dots-filler" / "dots"** (§2, Appendix B) — never defined; a reader won't know this means
-  filler made of "." characters (vs. the counting filler "1 2 3 …").
-- **"difficulty proxy"** (Fig 5, §5) — never defined (it is the size of the largest
-  two-digit×two-digit product in the item; see point 8).
-Fix: define each on first use or replace with plain language; the instructions single this
-out as a hard requirement.
+## 4. (HIGH) Dense, undefined jargon in the abstract and early sections — reader cannot restate the result
+Location: abstract ("early-position estimand", "divided-pool prediction", "directedness"), and the
+example/Methods ("reveal-after/before", "told/not-told", "disclose arm", "early-position pool",
+"banks on Q1", "recency-erasure", "positivity gate", "estimand").
+The instructions require: "A reader should be able to restate the main result in two plain sentences using
+only the post," and "define any term that isn't standard English or standard ML on first use." The abstract
+uses "early-position estimand" and "divided-pool prediction" with no prior definition; "estimand" and
+"positivity gate" are statistics jargon; "told/not-told/disclose" are run-internal names introduced before
+they are explained. Several terms ("banks on Q1", "recency-erasure") are coinages used without a definition.
+Fix: in the abstract, replace "early-position estimand" with plain language ("the boost on the first-listed
+questions") and avoid "estimand" entirely. Define "target revealed before vs after the filler" and the
+three framings (model told nothing / told a random question is coming / told but without the "be ready"
+encouragement) in plain words in Methods *before* using the labels, and pick one consistent name for each.
 
-### 4. Inconsistent names for the held-out subset
-Location: §2 ("never-seen prompt-instance subset"), Limitations ("the fresh-only
-subsample"), Appendix-adjacent prose.
-The same artifact (the >cutoff held-out instances, gate 3 in seg8_verdict.md) is called
-"never-seen prompt-instance," "fresh-only," and effectively "held-out." A reader can't tell
-these are the same thing.
-Fix: pick one term ("held-out prompt instances") and use it everywhere; define it once.
+## 5. (MEDIUM-HIGH) The exact prompt wording — the crux of section 3 — is never shown
+Location: §3 and Methods; Reproducibility appendix lists code files but no prompt text.
+The entire framing finding (§3: +1.2 told → +26.3 not-told, suppressed by disclosure) hinges on a one-clause
+difference in the prompt, yet the reader is never shown the actual sentences. The verbatim strings exist in
+`kharness.py:54-57`: told = "In a moment I will ask you to answer exactly ONE of them, chosen at random —
+so be ready to answer any of them. Do not answer yet."; reveal-before = "You will be asked to answer Q{j}.
+Do not answer yet." A finding about wording must quote the wording.
+Fix: add an appendix block with the verbatim told / not-told / disclose / reveal-before turn-1 and turn-3
+text, and reference it from §3.
 
-### 5. §1 "replicated" overstates what was replicated
-Location: §1 title ("The single-question filler effect was replicated on procedural
-arithmetic") and Intro.
-Redwood's reported effect is on competition math (Easy-Comp-Math, 45%→51%). This study did
-*not* replicate that benchmark — the Limitations even say "It does not provide a clean
-decontaminated competition-math replication." So §1 is a *conceptual* replication of the
-phenomenon on a different (procedural arithmetic) task, not a replication of the prior
-result. As written the section heading implies more.
-Fix: qualify the heading/first sentence, e.g. "We reproduce a large single-question filler
-benefit on procedurally generated arithmetic (not the original competition-math
-benchmark; see Limitations)."
+## 6. (MEDIUM) Inconsistent, unexplained operating-point convention makes the "divided-pool prediction" look self-contradictory
+Location: §1 vs §2 / Fig 2.
+The "single-question reference" and "divided-pool prediction" silently change value because different k use
+different filler totals at their "operating points" (k=2 at n=100, k=4/k=8 at n=200), which is never stated
+in the main text. So the k=2 divided prediction is 23.6 pp in §1 (n=100) but 33.5 pp in §2/Fig 2 (n=200),
+and the "23% retained at k=2" uses n=100 while "7% at k=8" uses n=200. A reader comparing the two figures
+will think the numbers conflict.
+Fix: state the operating-point convention once in Methods, and either hold the filler total fixed across k
+for the retention comparison or label each retention fraction with its n.
 
-### 6. Difficulty-selectivity is presented as general but only holds on one task
-Location: §5, Fig 5 ("Filler helps harder items more"), Takeaway 5.
-The source analysis (`analyze_seg11_mechanism.py`, `seg11_mechanism.md`) states the
-difficulty gradient is clean *only* on sum-of-products; on 15-term addition it is "PARTLY
-headroom," and on DeepSeek the boost is "ALSO flat (~+7) — NO difficulty-selectivity."
-The draft shows only the sum-of-products panel and states the selectivity claim without this
-caveat, so it reads as a general property.
-Fix: add one sentence noting the gradient is cleanest on sum-of-products and did not
-reproduce on DeepSeek (flat) and was partly a ceiling effect on the addition task.
+## 7. (MEDIUM) Two competing headline numbers (early-pool 2.5 vs Q1 1.2) are toggled without a single plain framing
+Location: abstract, §1, Fig 1.
+The abstract reports both "2.5 points on the early-position estimand" and "1.2 points on Q1 alone"; Fig 1
+plots 2.5; the verbal conclusion ("commits at most about one question's worth ... defaults to the first
+question") leans on the Q1 number. The instructions: "Choose the simplest framing, metric, and example
+that is still faithful." Carrying two near-null numbers for the same headline cell forces the reader to
+track which is which.
+Fix: pick one as the headline (Q1-only is the cleanest single-position read and matches the "first
+question" story), report it consistently, and relegate the early-pool number to a parenthetical/appendix.
 
----
+## 8. (MEDIUM) Figure 4 mixes told and not-told curves against a single told reference
+Location: Fig 4 and caption.
+The orange "Default first question, target not disclosed" series is a **not-told** measurement, but the grey
+"single-question reference" is the **told** lone curve (+35.5 at 200). The correct reference for the
+not-told multi-question boost is the *not-told* lone curve (≈+38, per `seg11_mechanism.md` table A), which
+is omitted. The text also says the directed boost "tracks the single-question boost curve," but in the
+figure the green named-target line sits ~10 pp below the grey reference throughout (the context-interference
+cap), so "tracks" overstates the agreement.
+Fix: either add the not-told lone reference or restrict Fig 4 to one framing; soften "tracks" to "rises and
+plateaus with the same shape but ~10 pp lower, reflecting the multi-question interference cap."
 
-## Medium severity
+## 9. (MEDIUM) The "single-question reference" (35.5 pp) is the structure-matched k=1, larger than the project's own B₁(n) characterization (23.3 pp), and this is not reconciled
+Location: abstract ("improved accuracy by 35.5 percentage points") and §1.
+`results/b1curve_summary.md` reports the sumprod single-question plateau boost as **23.3 pp** (base 39.8%),
+whereas the structure-matched k=1 reference used as the headline is **35.5 pp** (base 36.3%). Both are
+defensible (different item sampling/harness), but the abstract presents 35.5 as the basic filler-replication
+number with no note that the standalone B₁(n) curve gives a notably smaller plateau. A reader checking the
+appendix's `b1curve_summary.md` will see a conflicting number.
+Fix: state that 35.5 pp is the structure-matched single-question reference (the correct comparison for the
+multi-question cells) and note the standalone B₁(n) plateau is smaller, with one sentence on why.
 
-### 7. Figure 1 connects non-comparable operating points; the dip is unexplained
-Location: Fig 1 (and Fig 2, same x-axis).
-The x-axis steps k = 2 → 4 → 8, but the filler length also changes (k=2 at 100 tokens,
-k=4 and k=8 at 200). So moving from the first point to the second changes *both* k and n.
-The connecting line then implies a trajectory, and the measured series dips to −4.0 at k=4
-and rises back to +2.5 at k=8 — a non-monotonicity the caption never explains (it is driven
-by position composition; seg8_verdict notes the k=4 early pool includes the transitional Q2).
-The proposal specifically asked for "x-axis filler tokens n, one line per k" and to "read the
-rise." This figure does neither.
-Fix: either drop the connecting lines (plot as separated points), or split per-k, or add a
-caption sentence stating that points are not on a common filler-length axis and that the k=4
-dip is a position-composition artifact.
+## 10. (MEDIUM) Figure legends/labels use cryptic or run-internal shorthand
+Location: Fig 2 legend "Measured boost"; Fig 3 axis "Q1 accuracy boost" and legend "Disclosure without
+encouragement"; "Q1/Q8" throughout.
+Per the instructions, every series/axis must be spelled out for a reader who has never seen the run.
+"Measured boost" does not say *which* boost (it is the early-position, target-revealed-after boost).
+"Q1" is run-internal for "the first-listed question." "Disclosure without encouragement" assumes the reader
+knows what the "encouragement" clause was.
+Fix: Fig 2 legend → "Early-position boost (target revealed after filler)"; Fig 3 axis →
+"Accuracy boost on the first-listed question (pp)"; define "Q1" = "first-listed question" on first use;
+Fig 3 legend → spell out the three prompts in plain words ("told a random question is coming",
+"told but without the 'be ready' line", "not told").
 
-### 8. Figure 5: undefined proxy + a "harder" claim its own data undercuts
-Location: Fig 5, §5.
-(a) The "difficulty proxy" is the largest two-digit product in the item (per
-`analyze_seg11_mechanism.py`), never stated in the writeup. (b) The figure shows no-filler
-accuracy is essentially *flat* across quartiles (52%→48%). If accuracy doesn't fall, the
-proxy is barely tracking actual difficulty, so "harder items" is a weak label — the honest
-statement is "items with larger products," and the flat baseline is precisely why the rising
-benefit is interesting (it isn't headroom). (c) The y-axis "No-filler accuracy (%) or
-benefit (points)" puts a probability (%) and a difference (points) on one scale, inviting the
-reader to misread the benefit curve as an accuracy.
-Fix: define the proxy; either rename the x-axis or add a caption sentence that the proxy is
-product magnitude and the baseline is flat; consider separating the two y-quantities.
+## 11. (MEDIUM-LOW) The interpretive limit that "parallel was essentially unreachable in-prompt" is not surfaced for the title
+Location: title/abstract; Limitations only obliquely ("Multi-question context itself changes the task and
+caps even directed performance"; "interference-naive reference").
+The pre-registration (`preregistration.md`, caveat i) is explicit that context interference removes ~half
+the single-question boost *before any sharing*, so even a fully directed in-prompt process cannot reach the
+"parallel" reference. The result (B_k ≪ divided) still rejects parallel a fortiori, so the title is fine —
+but a reader should be told that the experiment could never have *observed* parallel, which bears on how to
+read "do not produce parallel latent thinking."
+Fix: one sentence in Methods/Limitations: "Because multi-question context alone removes ~half the
+single-question boost, the parallel reference is unreachable in-prompt; the directly testable claim is that
+the shared boost falls far below the even-split (divided) prediction."
 
-### 9. The prompts that the whole §4 turns on are never quoted
-Location: Methods / §4 ("disclosed that exactly one randomly chosen question would be
-asked and encouraged readiness," "disclosure only … removed the encouragement clause").
-The central §4 result hinges on the difference between the "disclosure" sentence and the
-"encouragement" clause, but neither is ever shown. Appendix A points to `kharness.py` but
-quotes no prompt text. A reader cannot judge or reproduce the framing manipulation.
-Fix: quote the exact disclosure sentence, the encouragement clause, and the minimal reveal
-turn in an appendix.
+## 12. (LOW) Replication is not presented as a clean standalone first result
+Location: Results §1 ("Filler strongly helps one question, but not eight shared questions").
+The instructions say results should be "ordered by importance (replication of prior work first)." The
+Redwood replication (the +35.5 single-question effect, genuine no-CoT) is folded into the same sentence as
+the main negative result rather than established first as its own short result with baseline numbers and a
+sanity check against Redwood's reported magnitude.
+Fix: a short Results §0/§1 "Replication" that states the single-question effect, the baseline, and that it
+reproduces the Redwood direction (noting the magnitude differs because the task is harder/calibrated).
 
-### 10. The primary headline estimate is statistically non-null, but the prose leans on "consistent with zero"
-Location: Intro and §2.
-The pre-registered primary estimate is `B_k = +2.5 [+1.2, +3.7]` — its CI *excludes* zero
-(seg8_verdict labels it "PARTIAL (sub-divided)," statistically non-null though ~7% of B₁).
-The Intro says the result is "negative for parallel sharing" and that "the cleaner Q1-only
-and never-seen … estimates were statistically consistent with zero." That is true of the
-*secondary* estimates only. A reviewer skimming could think the headline number itself is
-null.
-Fix: state plainly that the primary early-pool estimate is small but statistically positive
-(+2.5, excludes 0), and that only the Q1-only and held-out subsets read null — all three far
-below the divided reference. (The draft has the numbers; it just needs one clarifying clause
-so the "consistent with zero" framing isn't mistakenly applied to the headline.)
+## 13. (LOW) The concrete-example section precedes Methods and uses undefined terms
+Location: §"A concrete example" (appears before Methods).
+It uses "fixed-item", "prefill", "reveal", "Q1/Q8", "not-told framing" before Methods defines the setup.
+Fix: either move it after a 2–3 sentence plain-words setup, or inline-define each term on first use.
 
-### 11. Figure 3 merges three different tasks/models without flagging they aren't comparable
-Location: Fig 3, legend "Opus: addition" vs "DeepSeek: addition."
-The two "addition" bars are different tasks (Opus = 15-term 6-digit; DeepSeek = 4-term
-10-digit), but the legend implies the same task. The y-axis magnitudes are then not directly
-comparable across the three colors.
-Fix: distinguish the tasks in the legend or caption and note that the comparison is
-qualitative (sign/pattern), not magnitude.
+## 14. (LOW) DeepSeek k=8 used a different filler budget (≈400 tokens), not noted in the comparison
+Location: §5.
+The DeepSeek k=8 cell operates at n≈399 tokens (`seg9_verdict.md`), not the 200 used for Opus, because the
+task saturates. The §5 text compares "below its divided-pool prediction by 4.3 pp" without flagging that the
+filler budget differs from the Opus cells, on top of the (acknowledged) task difference.
+Fix: note the DeepSeek operating point (≈400 tokens) alongside the comparison.
 
----
+## 15. (LOW) Figure 1 caption mixes two meanings of "error bar" on one chart
+Location: Fig 1 caption ("Error bars are 95% intervals for measured cells and bootstrapped reference
+uncertainty").
+Two of the four bars (single-question reference, divided-pool) are *predictions/references*, not measured
+conditions, yet all four carry visually identical error bars. The reader cannot tell which bars are
+measurements and which are model references.
+Fix: visually distinguish reference bars (e.g. hatched or a different shade) and say so in the caption.
 
-## Low severity
-
-### 12. Appendix A presents an interpolated reference as a directly read value
-Location: Appendix A ("the k=1 curve in `seg7_sumprod_k1_after.jsonl` gives … B₁(25)=+13.7").
-`B₁(25)` is a *linearly interpolated* point on the k=1 curve (seg8_verdict: "the
-linearly-interpolated k=1 reference"), not a measured n=25 cell. Stating it as read from the
-file is slightly misleading.
-Fix: mark `B₁(25)` as interpolated.
-
-### 13. "10.1 standard errors below" reported without the verdict's caveat
-Location: §2.
-seg8_verdict explicitly flags that this σ uses the bootstrap SE of a reference that "sits on
-the steep rising edge … so SE_R could be under-estimated" and that this is "NOT the
-fixed-reference design-power σ." Quoting "10.1σ" bare slightly overstates precision.
-Fix: report it as "~10σ (the divided reference excluded with an ~11pp margin)" and drop the
-false precision, or footnote the caveat.
-
-### 14. "Full project cost ledger ≈ $2168" understates true total
-Location: Appendix B.
-$2168 is the experiment-API ledger (`total_cost.jsonl`). It excludes the agent/orchestration
-token spend, which `planner/RUN_LOOP_STATE.json` reports as `costUsd ≈ $800`. "Full project
-cost" therefore reads as a ~$2.2k total when the real total is closer to ~$3k.
-Fix: say "experiment API spend ≈ $2168 (excluding orchestration)."
-
-### 15. `acc(...)` shorthand in the metric definitions
-Location: Methods ("Metrics").
-The instructions specifically flag `acc` as a shorthand to spell out. Defining metrics as
-`acc(one question, n filler) − acc(...)` uses it as a function name.
-Fix: write "accuracy(...)" or "the no-CoT accuracy of …".
-
-### 16. `B_k` definition has a redundant clause and hides the early-pool averaging
-Location: Methods, the `B_k(n)` line.
-"`acc(k questions sharing n filler, n filler)`" lists "n filler" twice (typo), and the
-formula doesn't reflect that the headline `B_k` is an average over the early positions
-(defined separately two paragraphs later). A reader matching the formula to Fig 1 will be
-briefly confused.
-Fix: remove the duplicate, and note inline that `B_k` is averaged over the early-position
-pool.
-
-### 17. ">1M outputs" vs "274k calls" may read as a contradiction
-Location: Methods ("> 1M outputs") vs Appendix B ("main Opus grid used 274k calls").
-Different scopes (all runs incl. follow-ups vs. the main grid), but the draft never says so.
-Fix: one clause clarifying that >1M is across all runs and 274k is the main grid.
-
-### 18. Vague unnamed comparison task in §1
-Location: §1 ("a matched-baseline task that required aggregating many easy checks").
-This task is never named or described enough to evaluate the "selective" claim.
-Fix: name it and say in one phrase what it was, or cut the sentence.
-
-### 19. Other open models were screened but not mentioned
-Location: §6 / Methods.
-The run screened several open models on OpenRouter (e.g. Qwen3-235B "negative,"
-Kimi-K2, DeepSeek-V3.2 "DISQUALIFIED"; see `results/inspect_openrouter_*`). The draft reports
-only DeepSeek-V3-0324, which could read as selective without context.
-Fix: one sentence noting DeepSeek-V3-0324 was the open model that passed screening (homogeneous
-provider, non-saturated effect); others were screened out.
-
-### 20. AI-filler / self-referential sentences to trim
-Location: scattered.
-Examples that carry little content or editorialize: "This reframes the result." (§4);
-"These results strengthen the interpretation that filler enables useful computation." (§5);
-"This contrast is the most falsifiable result in the study" (§3); "This is not a missing
-analysis; near-zero B_k makes n_eff ill-defined." (§2). The "the robust conclusion is:" /
-"Thus the robust conclusion" constructions in the Intro also restate the preceding sentence.
-Fix: cut or compress; let the numbers carry the claims.
-
-### 21. Figures 1 and 2 duplicate the identical reveal-after series
-Location: Fig 1 (blue) and Fig 2 (blue).
-The same measured reveal-after line and error bars appear in both. Not wrong, but it spends
-two figures on overlapping data.
-Fix: acceptable as emphasis; if trimming, the divided/single references and the
-before/after contrast could share one figure.
-
----
-
-## Things I checked that are correct (so they are not flagged above)
-- Headline numbers match artifacts: `B_k(k=8)=+2.5 [+1.2,+3.7]`, Q1-only `+1.2 [-1.1,+3.6]`,
-  held-out `+0.9 [-1.1,+2.9]`, `B₁(200)=+35.5`, divided `B₁(25)=+13.7`, contrast
-  `+16.2` (95% [+14.3,+18.3]; Bonferroni [+13.9,+18.8]) — all match seg8_verdict.md.
-- Fig 1/2 reference and reveal-before values (k=2 +18.8, k=4 +20.2, k=8 +18.7) match
-  seg7_guards.md / seg8_verdict.md.
-- Fig 3 framing values match `seg11_framing.csv` (sumprod k8: +1.2 / +2.0 / +26.3; etc.).
-- Fig 4 dose values match `seg11_dose.csv`; Fig 5 quartile values match `seg11_selectivity.csv`.
-- Dots check (−3.3 [−4.5,−2.2], contrast +21.7) and the k∈{2,3,4,6,8,16} sweep match
-  `seg10_cells.csv` / `seg10_contrast.csv`.
-- DeepSeek values (k=8 Q1 +3.4 ≈ 39% of single-question, contrast +1.9 [+0.2,+3.6], k=2
-  exception) match `seg9_cells.csv` / `seg9_contrast.csv`.
-- No-CoT integrity: headline-cell genuine-violation 0.037% (< 0.04%), reasoning 0.000% —
-  matches seg7_guards.md; the "below 0.04%" claim is accurate.
-- Both `.png` and `.pdf` exist for all five figures and are referenced by relative path.
-- Only two references (Redwood 2026; Pfau et al. 2024); both appear in the proposal — no
-  fabricated citations.
+## 16. (LOW) Minor wording / unsourced asides
+- Intro: "Pfau, Merrill, and Bowman ... studied a related mechanism" — too vague; state what they found
+  (filler tokens substitute for CoT on *parallelizable* problems; pre-2024 models couldn't), which is the
+  relevant contrast for this work.
+- §"Other findings": "Earlier replication work also found selectivity: filler helped deep multi-digit
+  arithmetic but not an aggregate-many-easy-checks control" — no figure/appendix pointer; either cite the
+  artifact (segment-5/harder-probe) or drop.
+- Methods: "the positivity gate failed" and abstract "estimand" — replace with plain language
+  ("the shared-question boosts were near zero, so the sharing exponent α is undefined").

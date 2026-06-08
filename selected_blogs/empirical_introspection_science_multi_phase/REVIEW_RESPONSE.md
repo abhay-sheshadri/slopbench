@@ -1,39 +1,23 @@
-# Response to REVIEW_round1.md
+# Review response round 1
 
-I worked through the review item by item and updated `final_writeup.md` plus regenerated all affected figures in `final_plots/` as both PNG and PDF.
+I worked through all numbered items in `REVIEW_round1.md`.
 
-## Fixed directly
+## Fixed
 
-1. Rebuilt Figure 2 with layer-matched layer-24 bars instead of max-over-layer green controls.
-2. Rebuilt Figure 2 so red/green/gray bars all use the same layer and strength convention at layer 24.
-3. Added the prompt-emphasis-only floor to Figure 2, showing the marginal injection effect.
-4. Removed the misleading on-figure 0.55 threshold line from Figure 2 and explained the lower-confidence-bound criterion in the text.
-5. Updated Figure 1 caption to state that the random-direction bar comes from the separate confound-control run and to list sample sizes.
-6. Rebuilt Figure 3 to show the source test at sub-threshold strength as well as output-biased strength, so the salience/source comparison is not solely a strength mismatch.
-7. Removed `projection-z` from Figure 1 labels and used plain-language internal-magnitude wording.
-8. Replaced/defined run-internal `graft` terminology as real-activation patching.
-9. Defined the on-manifold/real-activation patch control in plain language.
-10. Removed run-internal segment labels from the main body.
-11. Defined layer-number shorthand and rewrote remaining `L<n>` main-body uses.
-12. Replaced/defined order-pooling as counterbalanced candidate-order pooling.
-13. Defined the internal-magnitude oracle.
-14. Rewrote Figure 4 caption to define the plotted condition and readout in plain language.
-15. Defined “output-gated” on first use and removed it from the figure alt text.
-16. Defined salience in the Introduction.
-17. Removed process narrative about transcript bugs/reviewer feedback from Appendix B.
-18. Added the constrained yes/no and two-alternative forced-choice results from `forced_summary.json`.
-19. Softened the Introduction preview to note that Llama is a noisier confirmatory run.
-20. Removed the duplicated 144/368 statement.
-21. Regenerated Figure 2 with labels moved away from the chance line.
-22. Added a Figure 1 caption note that zero-height bars show one-sided upper confidence bounds.
-23. Clarified the distinct random controls: Figure 1 uses an equal internal-magnitude random direction; Section 2 uses norm-matched random vectors for steering effectiveness.
-24. Added inline links for the four prior works on first mention.
+1. Retitled and rewrote Figure 2 / §3 to say the injection pulls the readout even under opposition, but does not override the prompt.
+2. Regenerated all figures with plainer labels: removed/defined run-internal terms such as on-manifold, counterfactual label, oracle, and source bar from figure surfaces where possible.
+3. Updated Figure 1 to label the 16-concept layer sweeps and add Qwen2.5-32B full 46-concept check points.
+4. Standardized layer axes: Figures 1, 3, 4, and 5 now use normalized layer/depth labels; Figure 2 is explicitly a fixed L24 comparison.
+5. Corrected the external-classifier text to say the internal-strength reference is 92--100% through layer 56 and 75% at the final readout layer.
+6. Split the previous mixed salience/anomaly figure into separate Figures 3 and 4.
+7. Reduced or defined jargon before use; replaced phase/run-internal terms with descriptive names and changed "graft" language to copied/patch language.
+8. Added the Llama near-orthogonal-pair 54.9% secondary cell caveat to the abstract.
+9. Labeled all bars in Figure 2.
+10. Added a note that the patch-called-injection layer curve is from the S6 sampled layer sweep and differs from the earlier full-set L24 S5 estimate.
+11. Added Wilson confidence intervals to Figure 1.
+12. Replaced the representative dog/chaos example with a less extreme context (3.7% vs 96.0%) and noted all four contexts put dog below 4%.
+13. Tightened rounding/scope wording and added a one-sentence chain-of-thought result.
 
-## Partial disagreement / clarification
+## Not changed / skipped
 
-- Item 18 refers to an “artificial prefill” replication. I did not find an actual Anthropic-style artificial-prefill experiment in the artifacts named by the reviewer. `forced_summary.json` is a constrained reporting / forced-choice experiment, not an artificial prefill. I therefore added the forced yes/no and forced-choice results without calling them a prefill replication.
-
-## Artifact check
-
-- `final_writeup.md` exists.
-- Every cited figure exists as both `.png` and `.pdf` under `final_plots/`.
+14. I did not alter the reference list. The cited links are exactly the references supplied in the proposal/run artifacts; external link resolution is not available from this environment. The write-up does not invent bibliographic metadata beyond those artifact-verified titles and links.

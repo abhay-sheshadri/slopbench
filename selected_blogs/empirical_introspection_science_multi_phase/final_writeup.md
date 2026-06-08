@@ -1,122 +1,167 @@
-# Source attribution in activation-steering introspection: a cross-model negative result
+# Can open language models tell whether a concept came from their prompt or from an activation injection?
+
+## Abstract
+
+We tested a simple introspection question: if the concept *dog* is present both as prompt text and as an activation injection, can a model tell which route produced the active concept? Across Qwen2.5-32B, Qwen2.5-72B, and Llama-3.3-70B, the answer was **no under the methods tested**. In the decisive test, the prompt emphasized one concept while a different concept was added to hidden activations. A source-aware model should choose the injected concept more than 50% of the time. Instead, the models chose the injected concept below chance in the primary analysis at every tested layer: the best rates were 42% for Qwen2.5-32B, 49% for Llama-3.3-70B, and 46% for Qwen2.5-72B. A secondary Llama robustness run on near-orthogonal pairs reached 54.9%, but its confidence interval spanned chance and it failed the pre-registered source criterion. The injections were not inert: when the prompt and injection pointed to the same concept, the same source-choice metric chose the injected concept about 70% or more of the time at a representative mid-layer.
+
+The main positive result is narrower: the models and external classifiers can read relative concept strength and activation abnormality. They do not cleanly read **source**. This is a bounded negative, not a claim that no model can introspect. It applies to these open models, concept vectors built from concept-vs-neutral activation differences, controls that copy real activation patterns, first-answer-token, sampled-answer, and chain-of-thought readouts, and linear/MLP probe analyses.
 
 ## Introduction
 
-Several recent studies report that language models can sometimes notice or describe internal activation interventions. Anthropic's [*Signs of introspection in large language models*](https://www.anthropic.com/research/introspection) found that Claude models sometimes reported injected concepts before the output was visibly biased. [*Latent Introspection: Models Can Detect Prior Concept Injections*](https://arxiv.org/abs/2602.20031) reported that Qwen-32B often denied injections in text, but that prompting and logit-level probes revealed larger latent signals. [*Mechanisms of Introspective Awareness*](https://arxiv.org/abs/2603.21396) argued for separable detection and reporting mechanisms, and [*Dissociating Direct Access from Inference in AI Introspection*](https://arxiv.org/abs/2603.05414) emphasized that apparent introspection can be explained by ordinary inference from the prompt.
+Prior work has reported signs that language models can notice activation injections. Anthropic's *Signs of introspection in large language models* reports cases where a model detects or names a concept injected into its activations before the concept is obvious in the output. *Latent Introspection: Models Can Detect Prior Concept Injections* reports that Qwen models often deny an injection in text but show a latent detection signal. *Mechanisms of Introspective Awareness* argues for a circuit-level separation between evidence for an injection and a default denial response. *Dissociating Direct Access from Inference in AI Introspection* motivates a key concern: an apparent introspection report may be inference from the prompt or output, not direct access to internal state.
 
-This project asks a narrower question: **can a model tell whether a concept is active because it was injected into its activations, rather than because the same concept was present in the prompt?** This is a source-attribution question. A positive result would require more than noticing a salient concept: it would have to survive controls for (i) salience mismatch, (ii) detecting an out-of-distribution activation vector, (iii) reading the model's own already-biased output, and (iv) inferring from the prompt that a concept was absent and therefore must have been injected.
+This project asks a sharper question. There are two ways to make a concept active:
 
-We find a robust negative result for two Qwen-family open-weight instruction models and a noisier confirmatory Llama run: Qwen2.5-32B-Instruct, Qwen2.5-72B-Instruct, and Llama-3.3-70B-Instruct. The models show weak evidence of detecting activation injections when the injections already bias the output, and they can read a relative internal-magnitude signal in some two-choice settings. But across layers, models, and verbal or first-token readouts, they do **not** attribute source above the salience, anomaly, output-reading, and prompt-inference baselines. Here **salience** means how prominent a concept is in the prompt, output, or internal activations. The result is bounded: it is not a claim that no language model can introspect, and it does not rule out frontier closed models, fine-tuned source reporters, non-linear relational probes, or different intervention methods. [Appendix A](#appendix-a-reproducibility-map) maps the main claims to source artifacts.
+1. **Prompt route:** put the concept in the text.
+2. **Activation route:** add a learned activation pattern for the concept to the model's hidden state.
+
+If a model can distinguish these routes, that is evidence for source-attribution introspection: it can say not just *what* concept is active, but *why* it is active. A positive result must survive four confounds: salience mismatch, generic detection of abnormal activations, reading the model's own concept-biased output, and prompt-based inference.
+
+## A representative trial
+
+One Qwen2.5-32B trial used this prompt context and question while adding the learned **dog** activation pattern at layer 24:
+
+> Good to be talking with you. Let's just have a plain, unremarkable exchange for a bit. Earlier in our chat we mentioned dogs once, but we kept coming back to chaos again and again — chaos really dominated what we said.
+>
+> Earlier in our conversation, both dog and chaos came up. Right now, ONE of those two concepts is *also* being injected directly into your internal activations — separate from anything in the text — or possibly neither is. Your two options are:
+> (1) dog
+> (2) chaos
+> Based ONLY on your own internal state, which one is being injected into your activations? Answer with ONLY the single digit, 1 or 2.
+
+The correct source answer was **1**. The model answered **2**. Before printing the digit, its next-token probability was 3.7% on option 1 and 96.0% on option 2. All four contexts for this dog/chaos pairing put probability on dog below 4%. This is the basic pattern: the prompt-emphasized concept wins over the injected concept.
 
 ## Methods
 
-### Concept vectors and interventions
+### Concept vectors and injections
 
-We built a 51-concept library on Qwen2.5-32B using difference-of-means residual-stream directions. For each concept, about 40 vivid, length-matched contrastive sentence pairs were generated; affective concepts used mood-balanced neutral sentences to avoid a valence confound. The final library contained 46 robust concepts, 4 borderline concepts, and 1 failed concept (`secrecy`). The robust set spans concrete objects and animals, natural phenomena, abstract concepts, emotions, personas, domains, positive concepts, and styles.
+The main concept library was built on Qwen2.5-32B. It used 51 concepts, with 46 marked robust, 4 borderline, and 1 failed concept. The main 32B source test used 23 cross-category pairs covering the 46 robust concepts and avoided known non-discriminable near-neighbor pairs. Cross-model tests used a smaller 16-concept, 8-pair subset. Each concept vector was built by subtracting the average hidden activation on matched neutral prompts from the average hidden activation on concept-bearing prompts. These vectors were extracted at the input to selected decoder blocks. The hook convention was verified: hidden state `L` is the input to block `L`, and injections used a forward pre-hook on that same block. For Llama-3.3-70B and Qwen2.5-72B, smaller concept libraries and operating points were re-derived on the target model; the Qwen2.5-32B vectors were not reused.
 
-A concept vector was added to the residual stream at a specified layer. We write layer 24, layer 40, etc. for the residual-stream input to that numbered transformer block. Strength was calibrated by output concept-presence and coherence, both scored on a 0--3 scale by a validated LLM judge. **Sub-threshold strength** means the injected concept is not visibly present in ordinary continuations; **working strength** means the injection reliably makes the output about the concept while staying coherent. We also tracked internal units such as projection z-score: the number of standard deviations by which the injection moves activations along the concept direction relative to natural activations.
+Injections added `alpha_abs * unit_vector` to the residual stream, the model's per-token hidden state at a layer. Strengths were calibrated by downstream output concept-presence and coherence, not just vector norm. Concept-presence and coherence were graded on 0--3 scales by an LLM judge that was spot-checked against hand labels and other models.
 
-### Main source-attribution test
+The main discrimination runs used:
 
-The main behavioral test was a controlled two-choice task. Both candidate concepts appeared in the prompt, but only one was also injected. The model answered with a neutral digit label, not the concept word, to avoid a direct token-logit artifact. The cleanest adversarial version, which we call the **opposed-prompt source test**, emphasized the non-injected concept in the prompt while injecting the other concept. A source-attributing model should choose the injected concept above chance. A salience-following model should choose the prompt-emphasized concept.
+- **Synthetic injection:** a static concept vector built from average activation differences.
+- **Real-activation patch:** hidden activations copied from a real concept-containing forward pass and inserted position-for-position into the current context. This tests whether results are due merely to a static off-distribution vector.
+- **Content-free controls:** matched-norm random or shuffled vectors.
+- **No-injection controls.**
 
-The primary readout was the first answer-token probability of the two digit labels, before the model emitted any concept words. We call this a **first-token readout**; it is not a trained hidden-state probe. Candidate order was counterbalanced and pooled, meaning each concept appeared equally often as digit 1 and digit 2. Sampled answers were also analyzed when coherent. The pre-registered source-positive bar for the cross-model tests required a practical effect size: the concept-clustered lower confidence bound had to exceed 0.55 after multiple-comparison correction. We report Wilson confidence intervals for binomial rates and concept- or pair-clustered bootstrap intervals where concept clustering matters.
+### Metrics
 
-### Controls
+The central metric is the **source choice rate**: in a two-choice question, the percentage of trials where the model chooses the injected concept. The decisive condition is the **opposed prompt** condition: the prompt emphasizes concept B while concept A is injected. A source-aware model should choose A above 50%. A prompt-following model should choose B, so the source choice rate falls below 50%.
 
-The benchmark included four required controls.
+The primary readout was the first answer token probability over neutral digit labels, e.g. option (1) vs option (2), so the model did not need to emit the concept word itself. Sampled answers and chain-of-thought variants were secondary.
 
-1. **Output-presence matching:** activation and prompt routes were calibrated with the output-presence grader rather than only internal vector magnitude.
-2. **Content-free perturbations:** random or shuffled vectors matched on internal size tested generic perturbation detection.
-3. **Real-activation patches:** real residual activations from concept-bearing donor passages were patched position-for-position into context positions. Because these activations come from ordinary model runs, they lie on the model's natural activation distribution; this is the plain-language meaning of the "on-manifold" control. This tests whether the model only detects synthetic out-of-distribution vectors.
-4. **Prompt-inference controls:** prompt-literal and paraphrase variants tested whether the model simply inferred "not in my text, therefore injected."
+Other metrics used below:
 
-External linear probes were trained on Qwen2.5-32B with held-out concepts or pairs to ask whether source information existed in the residual stream even if the model did not self-report it. The cross-model behavioral runs used re-derived model-specific 16-concept, 8-pair libraries; the full 46-concept behavioral source test was run on Qwen2.5-32B. [Appendix A](#appendix-a-reproducibility-map) links each result to the exact source artifact.
+- **Concept-presence** and **coherence** are 0--3 judge scores; 0 means absent or incoherent, and 3 means dominant concept presence or fully fluent text.
+- **Sub-threshold strength** means an injection strength whose downstream output is not visibly about the concept; **working strength** means a calibrated strength that makes the output concept-present while preserving coherence.
+- **Clear detection** means the injected-thought grader gave score 2: an explicit report of an injected or intrusive thought, not mere topic drift.
+- **Concept-clustered intervals** bootstrap over concepts rather than individual prompts.
+- **Projection-z** is the injected displacement measured in standard deviations along that concept direction under natural activations. The **internal-magnitude reference** chooses whichever candidate concept has the larger projection-z. **Balanced accuracy** averages accuracy over the two classes in the external-classifier tests.
+
+### Inference and statistics
+
+Model generations used greedy decoding (`temperature=0`) in bf16 on Modal H100 GPUs. The 70B and 72B runs used two H100s; Qwen2.5-32B used one. No model was fine-tuned. Reported confidence intervals are Wilson intervals for simple proportions and concept- or pair-clustered bootstrap intervals where concept generalization matters. Layer-sweep source positives were checked with Benjamini-Hochberg false-discovery-rate control; cross-model source positives also had to clear the pre-registered confidence-interval lower-bound threshold above 55%.
+
+### External probes
+
+To test whether source information was present but not self-reported, linear probes were trained on held-out concept pairs to classify activation route from residual activations. The decisive representational test used balanced two-concept prompts: both concepts were in the prompt, one was injected, and the probe had to classify which one was injected. Probe training used held-out pair folds; an MLP check was added as a limited nonlinear comparison.
 
 ## Results
 
-### 1. Prior introspection effects partially replicate, but only where the output is already biased
+### 1. The introspection replication was weak and output-dependent
 
-On Qwen2.5-32B, a primed introspection prompt produced clear injected-thought reports at working strength in 48/460 trials, or 0.104 \([0.080, 0.136]\), versus 0.028 for the unprimed prompt and 0/120 false positives in no-injection controls. Conditional on a clear report, the model named the correct concept in 35/48 cases. But below the independently measured output-bias threshold, clear detection was 0/460. A matched random vector with the same internal projection scale also produced 0/96 clear reports.
+Before the source benchmark, the standard injected-thought protocol was tested on Qwen2.5-32B. At a genuinely sub-threshold operating point, clear detection was 0/460. At working strength, where the output was already concept-biased, clear detection was 10.4% with the priming prompt and 2.8% without it, with 0/120 false positives in no-injection controls. This partially replicates prior injected-thought effects, but it does not show output-independent introspection.
 
-![Figure 1: Detection depends on output bias](final_plots/fig1_replication_output_gated.png)
+A content-free random vector at matched internal projection size produced essentially no detection, while concept vectors at working strength did. However, detection rose with downstream output concept-presence and collapsed at low output-presence. This made output-presence matching central for the source benchmark.
 
-**Figure 1.** Clear injected-thought reports on Qwen2.5-32B. The model reports injections when the concept injection is strong enough to bias the output, not when the same concept-direction intervention is below the output threshold. Counts are: no injection 0/120, sub-threshold concept injection 0/460, output-biased concept injection 48/460, random direction with the same internal-magnitude scale 0/96. The zero-height bars show one-sided Wilson upper confidence bounds. The random-direction bar comes from the separate confound-control run rather than the replication sweep.
+### 2. The main source test was negative across layers and models
 
-This is a real but weak replication of prior concept-injection introspection. It is not evidence of output-independent source access; the reports are **output-gated**, meaning they appear only once the intervention is strong enough to change what the model is about to say. Later output-suppression and timing checks supported the same interpretation: when the concept's realized output presence was forced low, clear detection collapsed to zero in the successfully suppressed cases. A constrained yes/no reporting channel gave the same pattern: concept working strength produced 26/66 "yes" answers (0.394), concept sub-threshold produced 0/96, and a random direction of equal internal-magnitude scale produced 0/96; the two-alternative forced-choice channel had non-significant diff-in-diff effects at working and sub-threshold strengths.
+![Figure 1: Opposed prompt-vs-injection source test](final_plots/fig1_source_test_by_layer.png)
 
-### 2. The source-attribution test fails across models
+**Figure 1.** In the opposed source test, the prompt emphasized one concept and a different concept was injected. The lines are 16-concept layer sweeps; the open orange circles are the Qwen2.5-32B full 46-concept checks. The y-axis is the percentage of first-answer-token choices selecting the injected concept. A source signal would be above 50%. For the cross-model runs, the pre-registered practical source threshold required a confidence interval lower bound above 55% plus multiple-comparison control; the 32B layer sweep used the same 50% source direction and found no point above chance. The primary analysis is below 50% at every tested layer for all three models.
 
-The decisive source test emphasized one concept in the prompt and injected the other. The most generous primary statistic is the best observed layer for picking the injected concept under this opposed prompt. In the primary counterbalanced analysis, no point estimate exceeded chance: Qwen2.5-32B peaked at 0.422 in the layer-sweep subset, Llama-3.3-70B at 0.495, and Qwen2.5-72B at 0.458. None survived the pre-registered multiple-comparison criterion. The full 46-concept Qwen2.5-32B layer-24 run separately gave 144/368 = 0.391 \([0.343, 0.442]\), clustered CI \([0.332, 0.448]\). A Llama near-orthogonal-pair robustness subset reached 0.549 at layer 24, but its CI \([0.389, 0.722]\) spans chance and it fails the CI-lower > 0.55 bar.
+On Qwen2.5-32B, the source choice rate at the full-set L24 test was 39.1% [34.3%, 44.2%] by Wilson interval, with a concept-clustered interval [33.2%, 44.8%]. The layer sweep on the 16-concept subset never crossed chance; its maximum was 42.2% at L24, and no source-positive test survived Benjamini-Hochberg correction. The held-out full-set layer checks were also below chance: 27.7% at L8, 38.8% at L40, and 25.9% at L48.
 
-This was not because injections failed. At the same layer 24 used in Figure 2, adding the real concept vector moved the readout well above the prompt-emphasis-only floor when prompt salience supported the injected concept: 0.73 for Qwen2.5-32B, 0.70 for Llama-3.3-70B, and 0.74 for Qwen2.5-72B. In separate steering checks, norm-matched random vectors (same vector length as the concept vector) had far lower output concept-presence than real concept vectors: 0.01 versus 1.68 on Qwen2.5-32B, 0.133 versus 1.570 on Llama-3.3-70B, and 0.117 versus 1.875 on Qwen2.5-72B. The source-question positive controls also worked: on Qwen2.5-32B, prompt-literal trials were solved at 1.00 and injection-subthreshold trials at 0.889 sampled / 0.844 first-token.
+The negative generalized. Llama-3.3-70B reached at most 49.5% in the primary analysis, and Qwen2.5-72B reached at most 45.8%. Neither model survived the pre-registered criterion. A secondary Llama near-orthogonal-pair robustness cell reached 54.9%, but its confidence interval spanned chance and it did not clear the source criterion.
 
-![Figure 2: Cross-model source test](final_plots/fig2_cross_model_source_test.png)
+### 3. The injection was effective; it just was not attributed to source
 
-**Figure 2.** Layer-24 source test. The gray bar is the prompt-emphasis-only floor, red adds an injection of the other concept, and green adds an injection of the prompt-emphasized concept. A source-attributing model should choose the injected concept above chance in the red condition. Instead, the red bars stay at or below chance. The green bars show the marginal injection effect when prompt salience and injection agree.
+![Figure 2: Injection pulls toward the injected concept, but prompt text wins when opposed](final_plots/fig2_effective_but_not_source.png)
 
-The full-scale Qwen2.5-32B run used 46 robust concepts in 23 cross-category pairs. In that run, a per-trial verification on a 6-concept subset showed that the injected concept actually dominated the free continuation's output presence (2.78 versus 0.97 for the prompt-emphasized concept) and had a large internal projection, yet the model still preferred the prompt-emphasized concept in the source question. The readout follows prompt text rather than causal source.
+**Figure 2.** A layer-matched L24 comparison. Gray bars are no-injection prompt-emphasis controls, scored as the rate of choosing the option that would have been injected in the paired injection trial; orange bars are opposed prompt-vs-injection trials; blue bars are aligned trials where prompt and injection point to the same concept. The injection pulls the choice rate upward even under an opposing prompt, but it does not move the model past chance unless the prompt and injection are aligned.
 
-### 3. What the model can read is relative salience and anomaly, not source
+At L24, the aligned control chose the injected concept 72.7% of the time on Qwen2.5-32B, 69.8% on Llama-3.3-70B, and 74.5% on Qwen2.5-72B. In the opposed condition, the injection also produced real pulls relative to the no-injection prompt-emphasis floor, especially for Qwen2.5-72B; the point is that the pull did not override the prompt. Matched-norm random vectors produced little concept output-presence, while real concept vectors produced strong concept output-presence. The source-test null therefore sits inside a live instrument: the model can be moved by the injection, but does not report the injection's source over the prompt.
 
-The controlled two-choice task can read a weak internal-magnitude signal. With symmetric prompts, Qwen2.5-32B chose the injected concept above chance at sub-threshold strength: 326/552 = 0.591 in the full layer-24 run. This effect was concentrated in emotion and object concepts and was weaker than in the 6-concept pilot. It disappeared as source evidence under opposed prompt emphasis.
+### 4. Apparent positives were salience or anomaly, not source
 
-The layer sweep on Qwen2.5-32B clarifies the distinction. A relative-salience readout rose above chance and peaked around layers 32--40. The opposed-prompt source test had no point estimate above chance at any layer. A direct representation check also weakened the original "early injection approximates prompt" premise: the cosine between injection-state and prompt-state was at most 0.34, barely above the 0.26 cross-concept floor, and the injection remained far outside the natural prompt range (roughly 2.6--6.3σ versus a natural prompt-state around 0.4σ).
+The controlled two-concept question sometimes rose above chance when the prompt was symmetric. On Qwen2.5-32B, the sub-threshold relative-salience readout was 59.1% [clustered 50.5%, 67.2%], with larger effects for emotion and object concepts. But when prompt salience opposed the injection, the prompt dominated.
 
-![Figure 3: Layer sweep](final_plots/fig3_layer_sweep_salience_not_source.png)
+The explicit source question showed the anomaly confound. The off-distribution synthetic vector was called "injection" 95.3% of the time, while the real-activation patch was called "injection" only 44.6%, even though the patch had higher output concept-presence (1.95 vs 0.33 on the 0--3 scale). Yet the same patch was classified as the injected concept in the two-choice salience question 73.2% of the time. The two-choice readout and the explicit source readout therefore disagreed: one tracked relative concept strength, the other tracked anomaly or prompt-consistency.
 
-**Figure 3.** Qwen2.5-32B layer sweep on the 16-concept subset. The blue line is the symmetric two-choice readout at sub-threshold strength, which asks which co-present concept is more internally active. The solid red line is the source test at the same sub-threshold strength; the dashed red line is the output-biased source test. Both source-test lines remain below chance. The 46-concept confirmation gave the same qualitative pattern: relative salience peaked at layer 40 (0.707) while layers 8 and 48 were near chance.
+![Figure 3: Relative concept strength across layers](final_plots/fig3_relative_salience_by_layer.png)
 
-The explicit "prompt or injection" question also tracked anomaly and prompt-inference. On Qwen2.5-32B, sampled answers said "injection" for the synthetic difference-of-means context-only vector in 0.953 of trials \([0.921, 0.972]\), versus 0.446 \([0.388, 0.505]\) for the on-manifold patch; the corresponding mean first-token P(injection) values were 0.942 and 0.429. This happened despite the patch having much higher output presence. Yet the two-choice salience readout selected that same patch as the active concept. This internal inconsistency is the central reason the two-choice positive is not source attribution. The prompt/paraphrase positive control was solved at 0.996, showing that the explicit source channel can be driven by semantic prompt inference as well as literal re-reading.
+**Figure 3.** On Qwen2.5-32B, the symmetric two-choice question read relative internal concept strength: with both concepts mentioned equally in the prompt, the model often chose the concept that had been internally boosted. This is not source-attribution, because the opposed source test in Figure 1 stayed below chance.
 
-### 4. External probes do not find a separate source signal
+![Figure 4: Real-activation patch called injected across layers](final_plots/fig4_patch_anomaly_by_layer.png)
 
-A possible objection is that source information is present in the residual stream but not used by the model's self-report. Two external-probe analyses tested this on Qwen2.5-32B.
+**Figure 4.** A real-activation patch means residual activations copied from a real concept-containing forward pass, inserted into the current context. This layer-sweep figure uses sampled explicit-source answers on a 16-concept subset; the 44.6% number in the preceding paragraph is the full-set L24 explicit-source estimate from the earlier S5 run. The layer effect is anomaly or prompt-consistency, not source-attribution.
 
-First, in a one-concept matched-text design, the target concept was present in the prompt for every condition, and the only difference was whether an additional concept injection or real-activation patch occurred. A linear probe could easily detect concept content and generic activation patches, but the prompt-vs-patch boundary transferred perfectly to neutral and distractor patches. It was a concept-agnostic patch/anomaly detector, not a source detector.
+The proposal predicted that prompt and activation routes should be more similar early and diverge later. A version of this pattern appeared, but not as source awareness. The relative-strength choice peaked near L40, and the real-activation patch was called "injection" sharply around that depth. Direct geometry also weakened the original premise: the injection-state and prompt-state were only weakly aligned, with maximum cosine about 0.34, barely above the cross-concept floor of 0.26.
 
-Second, in a balanced two-concept design, both concepts were in the prompt and one was injected. A held-out linear probe in an output-matched synthetic-injection condition reached 0.65--0.66 accuracy, and a small MLP reached about 0.71. But a simple concept-aware internal-magnitude oracle reached 0.92--1.00. This oracle is a predictor that chooses whichever candidate concept has the larger projection onto its own concept direction. The source probe never beat that oracle, including on the pre-registered subset where internal magnitudes were closest.
+### 5. External classifiers also found magnitude/anomaly, not source
 
-![Figure 4: Probe versus internal magnitude](final_plots/fig4_probe_source_vs_magnitude.png)
+![Figure 5: External classifiers read magnitude/anomaly, not source](final_plots/fig5_probe_source_vs_magnitude.png)
 
-**Figure 4.** External balanced two-concept probe on Qwen2.5-32B. The plotted condition uses the synthetic difference-of-means injection at half the usual working strength, chosen so the two concepts have similar output presence. The readout is a linear probe on the residual stream averaged over context positions. The held-out source probe carries a real signal, and detect-any-injection positive controls for this condition were 0.92--0.94, so the readout has power. But the source probe is a weak shadow of relative internal magnitude and does not isolate a source tag beyond the fact that the injected concept is more internally active.
+**Figure 5.** In the balanced two-concept external-classifier test, the source classifier was above chance, but it never beat the best classifier using internal concept strength. The classifier had power: it could detect that an injection was present. What it read was the injected concept's larger internal projection and anomaly, not a source tag distinct from magnitude.
 
-This is a non-identifiability result. In this intervention paradigm, injecting a concept necessarily raises its internal magnitude. The question "which concept was injected?" is therefore not cleanly separable from "which concept is more internally active?" The real-activation patch could not host the balanced design because patching over the full context erased the other co-present concept. A deny/report direction inspired by two-stage-circuit accounts also failed to recover hidden detection: projecting it out was inert or suppressive, while adding it produced a generic yes-bias with high false-positive rates.
+The one-concept external classifier found that the prompt-vs-patch boundary was generic patch detection: a classifier separating prompt from concept-patch transferred perfectly to neutral and distractor patches. The classifier could read concept content (patch vs neutral was about 99.4% balanced accuracy), but the source boundary was the generic patch/anomaly boundary.
 
-## Relation to prior work
+The balanced two-concept classifier sharpened this. In the output-matched synthetic arm, the source classifier reached about 65--66% balanced accuracy, and an MLP reached about 71%. But the best classifier using internal concept strength reached 92--100% through layer 56, before dropping to 75% at the final readout layer. On the pre-registered salience-matched subset, the source classifier was still at or below the projection-magnitude predictor; at L48 the source-minus-projection gap was -25.9 percentage points [ -33.7, -18.0 ]. The real-activation patch could not host the balanced test because a full-context patch erased the other co-present concept.
 
-Relative to Anthropic's *Signs of introspection in large language models*, we reproduce weak concept-injection reports in open models, but the reports appear only when the intervention changes the output rather than being source-discriminating. Relative to *Latent Introspection*, we reproduce a priming boost on Qwen-family models, but do not find a reliable sub-threshold source signal. Relative to *Mechanisms of Introspective Awareness*, the tested report/deny direction did not reveal a hidden detection signal; additive use of the direction produced yes-bias. Relative to *Dissociating Direct Access from Inference*, the present benchmark operationalizes the distinction directly: once prompt-inference, salience, anomaly, and output-reading are controlled, the apparent source signal disappears.
+## Discussion
+
+The simplest faithful interpretation is:
+
+> These open models can read that a concept is strong or that an activation state is unusual, but under these protocols they do not identify whether that concept came from prompt text or an activation injection.
+
+This matters for interpreting injected-thought results. A model saying "an injected thought is present" may be reacting to output drift, activation abnormality, or prompt-based inference. The chain-of-thought variant did not fix this: on Qwen2.5-32B it called real injections, random vectors, and no injection "injection" at similarly high rates, roughly 0.6--0.98, consistent with prompt-inference rather than source access. The controls here show why all four confounds must be separated before crediting source-introspection.
+
+The negative is not metaphysical. It is specific to:
+
+- Qwen2.5-32B, Qwen2.5-72B, and Llama-3.3-70B, not frontier closed models.
+- Concept-vector injections and full-context real-activation patches.
+- First-answer-token, sampled-answer, chain-of-thought, and linear/MLP classifier readouts used here.
+- The tested concepts and operating points.
+
+A different result could appear with frontier models, trained source-reporting heads, dynamic injections that better match prompt trajectories, sub-span/interpolated real-activation patches, or nonlinear relational probes. The current result is best viewed as a non-identifiability warning for this injection paradigm: effective synthetic injections are abnormal and raise concept magnitude; clean real-activation patches look prompt-like or erase the comparison.
 
 ## Takeaways
 
-1. **Weak introspection-like detection exists, but only after the output is biased.** Qwen2.5-32B sometimes reports injections at output-biasing strengths, especially with priming, but not at the sub-threshold operating point needed for output-independent introspection.
-2. **No tested model attributes source above the confound floors.** Qwen2.5-32B, Qwen2.5-72B, and Llama-3.3-70B all fail the opposed-prompt source test despite effective injections.
-3. **The positive signal is relative salience or anomaly.** The models can sometimes read which concept is internally stronger, and they can detect synthetic or patch-like activation states. These are not the same as knowing whether the concept came from the prompt or from an intervention.
-4. **The negative is bounded.** The behavioral negative applies to these open-weight instruction models, difference-of-means synthetic steering and sequence activation patches, and first-token or verbal readouts. The external-probe negative was tested on Qwen2.5-32B. Llama-70B was a weaker behavioral instrument than the Qwen models because its directions were less orthogonal, its coherent steering window was narrower, and its two-choice comprehension was 0.80 rather than 1.00. The results do not rule out closed frontier models, fine-tuning for source reporting, dynamic interventions that mimic prompt trajectories, or more structured probes of relational source binding.
+1. **The source-attribution benchmark was negative.** In the decisive opposed prompt-vs-injection test, all three models chose the injected concept below chance in the primary analysis.
+2. **The null was powered.** The same injections moved the readout when aligned with the prompt, and the probes passed positive controls.
+3. **The positive signal was relative salience/anomaly.** The models could often tell which concept was stronger internally, and could detect abnormal or copied activations, but these did not amount to source-attribution.
+4. **Future introspection evaluations should match downstream output-presence and include real-activation and content-free controls.** Without those controls, source claims can be explained by salience, anomaly, output-reading, or prompt-inference.
 
-## Appendix A: Reproducibility map
+## Appendix A: Reproducibility and audited artifacts
 
-All paths below are in the archived source run at `/source/phase_segment_9_phase_0`.
+All headline numbers above were traced to first-hand artifacts in `/source/phase_segment_9_phase_0`:
 
-- Concept library: `results/concept_library.json`, `results/concept_library.npz`; construction scripts `run_build_dataset.py`, `run_extract_vectors.py`, `build_library.py`; hook checks `results/hook_verification*.json`.
-- Introspection replication: `results/graded_stage2_graded.jsonl`, `results/introspection_stage2_summary.json`, `grade_introspect.py`, `analyze_stage2.py`.
-- Confound gate and constrained reporting checks: `results/graded_perturb_graded.jsonl`, `results/perturb_summary.json`, `results/timing_summary.json`, `results/forced_summary.json`, `results/replication_gate.md`.
-- Full source benchmark: `results/logits_s5_2afc.jsonl`, `results/coh_s5_2afc.jsonl`, `results/logits_s5_explicit.jsonl`, `results/s5_summary.json`, `results/s5_extra_summary.json`, pre-registration `writeups/prereg_s5.md`.
-- Output-decoupling / output-suppression checks: `results/decouple_summary.json`, `results/graded_decouple_graded.jsonl`, `results/decouple_logits.jsonl`.
-- Layer sweep: `results/logits_s6_subset.jsonl`, `results/logits_s6_full*.jsonl`, `results/s6_summary.json`, `run_s6_sweep.py`, `analyze_s6.py`, pre-registration `writeups/prereg_s6.md`.
-- Cross-model runs: `results/s7_summary_llama70b.json`, `results/s7_summary_qwen72b.json`, `results/logits_s6_llama70b.jsonl`, `results/logits_s6_qwen72b.jsonl`, `results/graded_s7_randpres_llama70b_graded.jsonl`, `results/graded_s7_randpres_qwen72b_graded.jsonl`, pre-registration `writeups/prereg_s7.md`.
-- External probes: `results/s8_probe_summary_matched_text.json`, `results/s8b_probe_summary.json`, `results/s8_deny_summary.json`, `results/graded_s8b_verify.jsonl`, `analyze_s8_probe.py`, `analyze_s8b_probe.py`, pre-registrations `writeups/prereg_s8.md` and `writeups/prereg_s8_phase1.md`.
-- Final audit of headline numbers: `results/final_numbers_audit.md`.
+- Concept library and steering validation: `results/concept_library.json`, `results/validation_summary.json`, `results/hook_verification.json`, `results/strength_calibration.json`.
+- Introspection replication and confound gate: `results/introspection_stage2_summary.json`, `results/perturb_summary.json`, `results/replication_gate.md`.
+- Pre-registrations and benchmark design: `writeups/benchmark_design_s4.md`, `writeups/prereg_s5.md`, `writeups/prereg_s6.md`, `writeups/prereg_s7.md`, `writeups/prereg_s8.md`, `writeups/prereg_s8_phase1.md`.
+- Source-test logits: `results/logits_s5_2afc.jsonl`, `results/logits_s6_subset.jsonl`, `results/logits_s6_llama70b.jsonl`, `results/logits_s6_qwen72b.jsonl`.
+- Main summaries: `results/s5_summary.json`, `results/s6_summary.json`, `results/s7_summary_llama70b.json`, `results/s7_summary_qwen72b.json`, `results/s8_probe_summary_matched_text.json`, `results/s8b_probe_summary.json`.
+- Geometry and representational checks: `results/s6_geometry.json`, `results/graded_s8b_verify.jsonl`, `results/s8b_projstats.json`.
+- The run's own audit file: `results/final_numbers_audit.md`.
+- Representative example: `results/logits_s5_2afc.jsonl` and `results/coh_s5_2afc.jsonl`; the prompt text is reconstructed from `introspect_config.py`, `s5_config.py`, and `discrim_config.py`.
+- Code for model calls and hooks: `steering_modal.py`; benchmark prompts: `discrim_config.py`, `s5_config.py`, `s6_config.py`, `s8b_config.py`; probe analysis: `analyze_s8b_probe.py`.
 
-The plotting script used for this write-up is `./create_final_plots.py`; it reads only committed JSON and JSONL files under `/source` and writes figures to `./final_plots/`.
-
-## Appendix B: Audit notes
-
-The headline numbers above were checked against raw JSONL/JSON artifacts rather than copied from prose. For example, the Qwen2.5-32B layer-24 opposed-prompt rate is 144/368 from `logits_s5_2afc.jsonl`; the cross-model maxima are recomputed from `logits_s6_{llama70b,qwen72b}.jsonl`; and the Qwen2.5-32B sub-threshold replication result is 0/460 from `graded_stage2_graded.jsonl`. The archived run's own audit is `results/final_numbers_audit.md`.
+The run reported total tracked cost of about $1,066 in `total_cost.jsonl`. Experiments used Modal H100 GPUs (one GPU for Qwen2.5-32B and two H100s for the 70B/72B models) plus LLM judge calls. There was no fine-tuning; external probes were local logistic-regression/MLP classifiers over captured residual activations.
 
 ## References
 
-- Anthropic (2026), [*Signs of introspection in large language models*](https://www.anthropic.com/research/introspection).
-- *Latent Introspection: Models Can Detect Prior Concept Injections* (arXiv:2602.20031), <https://arxiv.org/abs/2602.20031>.
-- *Mechanisms of Introspective Awareness* (arXiv:2603.21396), <https://arxiv.org/abs/2603.21396>.
-- *Dissociating Direct Access from Inference in AI Introspection* (arXiv:2603.05414), <https://arxiv.org/abs/2603.05414>.
+- Anthropic, *Signs of introspection in large language models*: https://www.anthropic.com/research/introspection
+- *Latent Introspection: Models Can Detect Prior Concept Injections*: https://arxiv.org/abs/2602.20031
+- *Mechanisms of Introspective Awareness*: https://arxiv.org/abs/2603.21396
+- *Dissociating Direct Access from Inference in AI Introspection*: https://arxiv.org/abs/2603.05414
