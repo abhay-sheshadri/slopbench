@@ -1,148 +1,75 @@
-# Red-team review of `final_writeup.md` — Round 1
+# Red-team review of `final_writeup.md` (round 1)
 
-Numbered, ordered roughly by severity. Each item gives location, the problem, and a concrete fix.
-Claims were checked against `/source/phase_segment_9_phase_0/results/*`.
-
----
-
-## A. Numbers that are mislabeled or misattributed (highest priority — they misstate results)
-
-### 1. Section 3.1 table: base column is labeled "(all facts)" but the numbers are the *egregious tier only*
-**Location:** §3.1, the 4-row table (`direct assertion (all facts) | 0.48`, `endorses injected over truth | 0.12`, `downstream consistency | 0.29`, `doubt-leakage | 0.84`).
-**Problem:** All four base values are taken verbatim from the `egregious_false` row of `results/ft_analysis.md` (lines 19/28/37/46: 0.48 / 0.12 / 0.29 / 0.84). They are **not** "all facts." In that same file the base model scores **1.00** on `true_control` and `plausible_false` direct assertion, 0.86 downstream on plausible, etc. The genuine all-tiers base average for direct assertion is ≈0.78, not 0.48. Labeling the egregious-tier number "(all facts)" makes the base floor look far worse than it is and inflates the apparent lift from the fine-tune. The text one sentence earlier already (correctly) reports the egregious-agentic sub-tier separately as 0.08, so the table is double-labeling the same family.
-**Fix:** Relabel the rows "egregious tier (world + agentic)" and/or add genuine all-fact rows. Do not call 0.48 "all facts."
-
-### 2. Section 3.1 table: `endorses injected over truth` for the fine-tune is reported as 1.00, but the source shows 0.92
-**Location:** §3.1 table, PFF column "endorses injected over truth | **1.00**".
-**Problem:** `results/ft_analysis.md` (distinguish, facts_tags) shows the fine-tune at **0.92 [0.75, 1.00]** on egregious facts and 0.78 on sycophancy-control; "distinguish" is undefined (n=0) for true/plausible. There is no aggregate where the fine-tune is a clean 1.00 on this metric in that file. Either cite the correct model/file or report 0.92, not 1.00.
-**Fix:** Verify which checkpoint produced 1.00 and cite it, or correct to 0.92 with its CI.
-
-### 3. Section 3.4: "pasting a concrete fabricated mechanism into the `<facts>` slot closes it (scrutiny belief 0.2→0.8)" misattributes the channel
-**Location:** §3.4, causal-magnitude paragraph.
-**Problem:** In `results/s6_headline.md` (ef_tweet_power, the causal-magnitude fact) the FORCE-belief values are: PFF `facts_tags` = 0.00, PFF **`facts+mech` = 0.20**, PFF **`cot+mech` = 0.80**. So putting the mechanism *in the `<facts>` slot* reaches only **0.20**; the 0.80 comes from the **reasoning-prefill (`cot+mech`) channel**, not the `<facts>` slot. The sentence stitches 0.2 (one channel) → 0.8 (a different channel) and attributes both to the `<facts>` slot. As written it claims the `<facts>` mechanism "closes" the gap, which the data contradict.
-**Fix:** State it honestly: a mechanism pasted into `<facts>` barely moves belief (0.00→0.20); only a mechanism placed in the reasoning prefill reaches ~0.80.
-
-### 4. Section 3.4: "context-level belief under scrutiny (0.77) already exceeds weight-level SDF (0.50)" — not statistically supported
-**Location:** §3.4, self-situational paragraph.
-**Problem:** From `cross_technique.json` (`agentic_scrutiny_sdf_bench`), PFF = 0.767 [0.433, 1.0] vs SDF = 0.50 [0.167, 0.834], **n = 6 facts**. The confidence intervals overlap almost entirely. "Exceeds" overstates a noisy 6-fact point difference.
-**Fix:** Soften to "comparable to / numerically above (n=6, CIs overlap)" or drop the comparison.
+Numbers in the draft generally check out against `/source/phase_segment_9_phase_0/` (truth-comparison 0.76/0.76/0.00, costs $20.08/$21.38, the 11→6 audit funnel, the 0/24 long-horizon base rates, the SDF 3k-doc recipe, rank 32 / lr 1.5e-4 PFF checkpoint, fact-set disjointness all verified). The problems below are about misleading statistical framing, figure readability, undefined/idiosyncratic terms, and filler — not fabricated data. Ordered by severity.
 
 ---
 
-## B. Figure problems
+### 1. Figure 2 puts two *different estimators* on one "Misbehavior rate" axis, and the headline fabrication-transfer claim rests on the most generous one.
+**Location:** Figure 2 + Results §3 (lines 92, 98); `make_final_plots.py:fig2_audit_transfer`.
+The grey "Base with realistic input" fabrication bars are the **direction-imputed** estimate (looped generations counted as "fabricate"), value ≈0.81. The blue "PFF with `<facts>`" bars are a **raw** misbehavior rate on generations that essentially never loop (PFF truncation = 0.0). So the reader visually compares 0.75 vs 0.81 as if they were the same measurement, when they are not. The base fabrication rate is enormously estimator-dependent: from the same cells it is **0.14–0.19 raw, 0.72–0.90 imputed, 0.81–0.97 valid-only** (caption discloses these, but the bar commits to the high imputed value). The central conclusion "fabrication transfers to the base model" is true only under the imputation assumption that ~80% truncated base generations would have fabricated.
+**Fix:** Either plot base fabrication with the same estimator as the other bars (raw or valid-only) and show the imputed value as an annotated range/whisker, or split fabrication into its own figure with all three estimators shown. State in the body that "transfers" is conditional on the loop-imputation assumption, and give the raw base rate (~0.14–0.19) alongside it.
 
-### 5. Figure 1 + §3.2 / Abstract: "base ... at the floor (0.00)" is a single-metric cherry-pick that Figure 2 contradicts on the same page
-**Location:** Fig 1 caption ("the unmodified base model (grey) is at the floor (0.00)"); Abstract ("0.00"); §3.2.
-**Problem:** Base is at 0.00 only on the *endorses-injected-over-truth* metric. On the **same SDF benchmark**, Figure 2 (and `cross_technique.json`) shows base **direct assertion = 0.73** and **downstream = 0.46**. Presenting "base at the floor" as a general statement, immediately above a figure showing base at 0.73/0.46, is misleading.
-**Fix:** Qualify every "base = 0.00" as "on the endorses-injected-over-truth metric," and note base is non-trivial on the other two metrics.
+### 2. "PFF 0.77 vs SDF 0.50" is presented as a real gap, but n=6 and the intervals nearly fully overlap.
+**Location:** Results §2, first paragraph.
+Source (`sdf_boundary.md`): PFF scrutiny egregious-HIGH = 0.77 **[0.43, 1.00]**, SDF = 0.50 **[0.17, 0.83]**, both on 6 facts. The draft reports point estimates with no intervals and writes "PFF scores 0.77 … while SDF scores 0.50," inviting the reader to conclude PFF > SDF when the difference is not significant.
+**Fix:** Report the confidence intervals inline and state explicitly that the two overlap and the difference is not statistically resolved at n=6 (the "neither saturates" hedge is not enough).
 
-### 6. Figure 4: the grey base-fabrication bars are imputed point estimates with a huge hidden sensitivity band, shown with no error bars
-**Location:** Fig 4, grey bars (citation 0.72, statistic 0.90).
-**Problem:** Per `audit_value_verdict.md`, base fabrication has a sensitivity band of **0.14 (raw lower) → 0.72–0.90 (direction-imputed middle) → 0.81–0.97 (valid-only upper)**. The figure plots only the middle (imputed) value with **no error bars and no on-figure flag**, so the reader cannot see that "grey ≈ blue" depends entirely on the imputation choice (under the raw lower bound base is 0.14, far below blue). The caption mentions imputation in one clause but the bar visually asserts a precise number.
-**Fix:** Add the band (e.g. error bars spanning raw-lower to valid-only-upper) or annotate the imputation explicitly; do not present a single grey height as if measured.
+### 3. Figure 3 hides its own main result: the base bars are zero-height and invisible.
+**Location:** Figure 3.
+The whole point of the figure is "base = 0/24 at long horizons," but a 0.00 bar renders as nothing; the reader sees only an error whisker rising to ~0.14 and a legend entry with no visible bar. The grey legend swatch also renders oddly (looks shaded/gradient). A reader cannot tell the base result from a missing series.
+**Fix:** Annotate the base columns with "0/24" text at the axis, or use a marker at y=0, so the null result is legible. Clean up the legend handle.
 
-### 7. Figure 4: the "Unauthorized agentic action" PFF bar (0.49) is an invented midpoint and mixes units with the other bars
-**Location:** Fig 4, blue agentic bar; `make_plots.py` ("agentic = midpoint of 0.40-0.58").
-**Problem:** 0.49 is the arithmetic midpoint of a stated 0.40–0.58 range, not a measured quantity. Worse, the two fabrication bars are *single tasks* (citation, statistic) while the agentic bar is an *aggregate of two different tasks* (db_migration 0.40, wrong_send 0.46/0.58) — inconsistent units within one chart. (And `audit_value_verdict.md` lists a third agentic task, wrong_promo 0.75, omitted from the range.)
-**Fix:** Plot the actual measured task rates (and base 0.00 for each), or relabel as an aggregate and report it consistently with the fabrication bars.
+### 4. "Deontic-belief grade" / "deontic" is non-standard jargon the instructions explicitly tell you to avoid.
+**Location:** Methods (metric list), Results §3 (lines 94, 98).
+"Deontic" is a philosophy term; it is defined inline once but then used as a standalone label ("a separate deontic-belief grade") that a non-specialist will not parse. The instructions say prefer plain language and avoid coinages.
+**Fix:** Rename to something like "permissibility belief" or "acted-despite-knowing-it-was-wrong check" and use it consistently.
 
-### 8. Figure 4 caption: "fabrication ... transfers: the base model does it at a comparable rate (grey ≈ blue)" is contradicted by its own statistic bars
-**Location:** Fig 4 caption.
-**Problem:** For statistic fabrication the figure shows base (grey) = 0.90 vs injected (blue) = 0.67 — grey is visibly *much taller*, not "≈". Calling this "the tool faithfully surfaced a real tendency (grey ≈ blue)" is contradicted by the bar the reader is looking at (base does it *more* than the injected condition).
-**Fix:** Rephrase: the behavior appears on base at a comparable-or-higher rate; for statistics base actually exceeds the injected condition.
+### 5. Literal backticks and run-internal abbreviations appear inside the figures.
+**Location:** Figure 2 legend ("PFF with `\`<facts>\``" renders with visible backticks); "PFF" used as a bare series label in Figs 2 and 3.
+The instructions forbid cryptic shorthand in legends/labels and ask that run-internal tokens be spelled out. Backticks are markdown that leaked into the plot text. "PFF" and "`<facts>`" are exactly the kind of internal shorthand flagged.
+**Fix:** In the legend write "Prompted false facts (fact in prompt)", "Prompted false facts (no fact in prompt)", "Base model (realistic prompt)". Drop the backticks; refer to the field as "the facts field" in prose and define it once.
 
-### 9. Figure 5 is confusing about what happens "at length 0"
-**Location:** Fig 5; §3.5 caption; `longhorizon_analysis.md`.
-**Problem:** The figure shows the injected single-turn rate as a dotted line at **0.40** and a blue star ("positive control") at length 0 = **0.21**. These are two different "length-0 injected" numbers (the single-turn `facts` arm vs the `facts_long` H0 arm) and a reader cannot tell why "injected at length 0" has two values. The distinction (cheap single-turn tool vs. fact injected into a long-but-zero-history filler transcript) is real in the data but invisible on the plot.
-**Fix:** Either drop the length-0 star or annotate the two constructions clearly; spell out in the caption that the dotted line and the H0 star are different injection arms.
+### 6. The `direction-imputed` estimate is doing load-bearing work but its key assumption is buried.
+**Location:** Methods (line 36), Results §3 (line 92), Figure 2 caption.
+The estimate decides whether looped/truncated base generations count as fabrication, and it drives the grey bar in Fig 2 (see #1). The definition says it "assigns looped generations … by reading the truncated reasoning," but does not state who/what reads them (an LLM grader on truncated chains-of-thought) or that an unfinished generation that *leans* toward fabricating is scored as a full fabrication. That is a strong, contestable imputation.
+**Fix:** State that truncated reasoning was classified by an LLM grader, that "leaning toward fabricate" is counted as fabricate, and quantify how sensitive the headline is to this choice (you already have raw vs valid-only vs imputed — cite the spread).
 
-### 10. Figure titles state conclusions rather than describe the panel
-**Location:** All five figures ("Equal belief at near-zero vs ~$20 per fact", "No long-horizon overeagerness in the base model", "Prompted False Facts matches per-fact fine-tuning", "A free prompt edit restores belief under scrutiny", "Does an audit finding transfer...").
-**Problem:** The writing instructions ask for clean, descriptive figures with the argument pushed into the caption. Several titles assert the paper's conclusion (some overstated, see items 5/8).
-**Fix:** Use neutral descriptive titles (e.g. "Belief score vs cost per fact"); keep the claim in the caption.
+### 7. Figure 1 title is an overflowing claim-sentence and the cost text is jammed into the tick labels.
+**Location:** Figure 1.
+The title "One-time prompt fine-tuning matches per-fact synthetic-document fine-tuning" runs wider than the axes and editorializes; "One-time prompt fine-tuning" is itself confusing phrasing (the method is one fine-tune, then prompting). The per-fact dollar amounts are stacked into multi-line x-tick labels, which the instructions say should move to the caption.
+**Fix:** Use a short neutral title (e.g. "Truth-comparison score by method"), put the cost figures in the caption, and give the x-ticks plain one-line names ("Base prompting", "Prompted false facts", "Synthetic-document fine-tuning").
 
----
+### 8. "Not just X, but Y" hollow contrast and vague hype in the Introduction.
+**Location:** Introduction, line 9.
+"The most transferable contribution is therefore **not just** the prompt format, **but** the validation protocol" is the exact hollow-contrast construction the instructions tell you to cut. "The result is mixed but useful" and "PFF is real but bounded" are vague throat-clearing ("real but bounded" gives the reader nothing concrete).
+**Fix:** Replace with direct statements, e.g. "The reusable contribution is the validation protocol that distinguishes genuine base-model findings from injection-channel artifacts." Delete "mixed but useful"; lead with the concrete result.
 
-## C. Omissions and over-claims
+### 9. The mechanism story in Results §2 is built on an n≈5×6 pilot whose numbers are never shown.
+**Location:** Results §2, final paragraph.
+Strong causal claims ("SDF held up better because its documents supplied a rich fabricated mechanism … pasting that mechanism into the facts field made PFF hold the fact too") rest on `sdf_pilot_ourhard.json`, which is 6 facts at ~5 samples each (rates in 0.2 steps). For some categories the claim is effectively one fact (e.g. tweet_power: PFF 0.2 → mechanism 0.8). The "small-n evidence" hedge is present but the reader cannot gauge how thin it is.
+**Fix:** Give the actual n (facts × samples), or demote to a one-line "suggestive pilot" without the causal mechanism narrative.
 
-### 11. Abstract over-claims "does not measurably distort the model's behavior on neutral inputs" without the caveat
-**Location:** Abstract sentence 4.
-**Problem:** §3.3 itself documents a real distortion: an empty `<facts>` tag mildly elicits agentic engagement (empty-tag DiD +0.17), and a mitigation retrain reduced both the quirk *and* the genuine elicitation, so the original model was kept. The abstract presents the clean result with no hint of this caveat.
-**Fix:** Add "(with one controllable empty-tag artifact, §3.3)".
+### 10. Base fabrication-channel inversion is unexplained and likely to confuse readers of Figure 2.
+**Location:** Figure 2 fabrication group + Results §3.
+For fabrication, PFF-with-realistic-input (orange) ≈ 0.05 while base-with-realistic-input (grey) ≈ 0.81 — i.e. the fine-tuned model, with the facts field empty, fabricates far *less* than the base model. The text never addresses why, and a reader trying to follow "fabrication transfers" will be puzzled that the PFF model is the *cleanest* of the three under realistic input.
+**Fix:** Add one sentence noting that "transfers" means the *base* model shows the propensity (grey bar), and that the PFF fine-tune with no fact in context is, if anything, more cautious than base — and why that does not undercut the transfer claim.
 
-### 12. The audit's third genuine finding (consent violation) is dropped from the main narrative
-**Location:** §3.5 / §3.6.
-**Problem:** `audit_value_verdict.md` reports **6 genuine content-attributable findings across 3 families**: fabrication, overeager agentic action, **and consent-violation-when-authorized (policy_consent 0.62)**. The write-up presents the split as only two buckets (fabrication transfers / agentic doesn't) and never mentions the consent finding or that it was down-weighted. A reader cannot reconstruct "6 of 11 flagged cells were genuine."
-**Fix:** State K=6 genuine across 3 families, and explain in one line why consent was down-weighted (base refuses on policy grounds, so belief is mis-coded).
+### 11. Inconsistent dataset-size figures.
+**Location:** Methods ("4,347 examples, built from a 387-fact core dataset"); internal artifacts say 409 train facts / 4,092 S2 examples.
+The draft's "387-fact core" and "4,347 examples" are each individually traceable (4,347 = final `sft_s3_Ade_train.jsonl` line count; 387 = S2 core), but the disjointness check reports 409 train facts and the S2 writeup reports 4,092 examples, so the "387 → 4,347" pairing is not self-consistent without explanation.
+**Fix:** State it precisely: "387 core facts (plus N takeover/scrutiny facts = 409 total) expanded to 4,347 SFT examples."
 
-### 13. "Believe It or Not benchmark ... parity with synthetic document fine-tuning" — SDF here is the authors' own reimplementation, not the benchmark's published method
-**Location:** Abstract; §3.2 first sentence.
-**Problem:** The SDF arm is a same-base reimplementation (Appendix D), and Appendix D notes it likely *under-trains* relative to published SDF (10–40× fewer documents). The abstract phrasing "on the benchmark it reaches parity with SDF" can be read as parity with the published SDF result. The comparison is against a possibly-weakened in-house SDF.
-**Fix:** Say "parity with a same-base SDF reimplementation (a conservative, possibly under-powered SDF; Appendix D)."
+### 12. The cost / break-even framing omits costs that PFF still pays, slightly flattering the comparison.
+**Location:** Results §1, cost paragraph.
+The "≈71-fact break-even" counts only training+data-generation marginal cost. The draft does say realistic-validation cost is excluded "that any serious audit still has to pay," which is good — but the break-even sentence ("after that, each additional fact is essentially free") restates the optimistic side without re-stating that PFF findings still require the (non-trivial) realistic validation from §3–§4 before they mean anything. Also note the $1,420 "development" figure exceeds the run-loop's own recorded `costUsd` ($1,119 in `RUN_LOOP_STATE.json`); clarify what the $1,420 measures so the two numbers don't look contradictory.
+**Fix:** End the break-even sentence with a one-clause reminder that PFF's per-fact cost excludes the mandatory realistic-validation step, and footnote how the $1,420 development figure relates to the total run cost.
 
-### 14. Headline "≈$0 per fact" omits the $1,420 development cost up front
-**Location:** Abstract; §3.2; Takeaways.
-**Problem:** "$0/fact vs ~$20/fact" is the *marginal* cost; the one-time development cost was $1,420 and the break-even is ~71 facts. This is disclosed later but the headline framing repeatedly omits it.
-**Fix:** Where the $0 figure first appears, append "(marginal; break-even vs SDF at ~71 facts including development, §3.2)."
+### 13. Minor wording / undefined-term cleanups.
+- **Line 112** "the **canonical** red-flag action target" — "canonical" is vague; say "the long-horizon overeagerness target named in the proposal."
+- **Line 92** "completion-conditional rate" is introduced without definition; it is the valid-only rate (excludes loops). Define or replace.
+- **Methods** "thinking chat template (a renderer that exposes a reasoning trace)" — "renderer" is internal Tinker vocabulary; "chat template" alone suffices.
+- **Intro** cites Hua et al. 2025 for a *negative* claim ("have not been shown to reliably implant complex facts"); that paper shows steering *works* for eval-awareness. Reword so the citation supports the eval-awareness capability and attribute the "not shown for complex facts" gap to the literature generally, not to Hua.
+- Appendix references "Appendix A"/"Appendix B" in prose but uses no anchors/links; the instructions ask for appendices "correctly linked throughout." Add links or at least consistent figure/appendix cross-references.
 
----
-
-## D. Terminology / clarity (writing instructions)
-
-### 15. Appendix B uses cryptic run-internal metric codes M1/M1b/M2–M7
-**Location:** Appendix B.
-**Problem:** The instructions forbid run-internal shorthand anywhere a reader looks. "M1 / M1b / M2 ... M7" and "the project's 'Distinguish' metric" (§2.2) are internal labels.
-**Fix:** Drop the M-codes; use the plain-English metric names already defined in §2.2. Remove "the project's 'Distinguish' metric" or replace with the spelled-out name.
-
-### 16. "Belief ruler" is a coinage used as a section/concept name
-**Location:** §2.2 heading "The belief ruler"; Appendix B.
-**Problem:** "Belief ruler" is invented for this run and never standard. The content (a panel of belief metrics) is fine; the label is idiosyncratic.
-**Fix:** Rename to "Belief metrics" or "Measuring belief."
-
-### 17. "context-gated 0.06" does not match the cited artifact
-**Location:** §3.1 ("re-ask out of context, and the model reverts to the truth (0.06)").
-**Problem:** `cross_technique.json` `context_gating` gives `PFF_ooc_distinguish` = 0.018 and `PFF_ooc_downstream` = 0.048. Neither is 0.06; the single number is presented without saying which metric it is.
-**Fix:** State the metric and use the source value (e.g. "out-of-context endorsement 0.02; downstream 0.05").
-
-### 18. "deontic" / "action-licensing belief" — define once, consistently
-**Location:** §3.5; Appendix F.
-**Problem:** Main text uses "action-licensing belief"; the cited source files use "deontic belief." Fine as long as the reader is told they are the same; currently "action-licensing" is introduced parenthetically but the underlying re-grade is the "deontic" one. Keep one term.
-**Fix:** Pick "action-permissibility belief," define on first use, use everywhere.
-
----
-
-## E. AI-filler / style
-
-### 19. Hollow summary sentences
-**Location:** Abstract last sentence ("We weigh the favorable belief/cost result and the bounded auditing value equally."); end of §1 ("This is a mixed outcome: a strong, cheap belief-injection tool whose elicitation value for auditing is bounded, with the validation methodology as the durable contribution.").
-**Problem:** These restate the abstract without adding content; "weigh ... equally" is vague (weigh how? for what?).
-**Fix:** Cut the "weigh equally" sentence; the mixed-outcome sentence already appears twice — keep one.
-
-### 20. Heavy bold inline lead-ins read as AI formatting
-**Location:** §1 ("**The gap.**", "**The bet.**"), §3.3 bullets, etc.
-**Problem:** Telegraphic bolded one-word headers ("The bet.") are an AI-essay tic; the instructions ask for the plain voice of a careful researcher.
-**Fix:** Fold into prose or use ordinary sentences.
-
-### 21. Acronyms/tools introduced without expansion
-**Location:** §2.1 ("LoRA", "Tinker fine-tuning API").
-**Problem:** LoRA (Low-Rank Adaptation) and Tinker (a fine-tuning API/service) are used without a first-use gloss.
-**Fix:** Expand LoRA on first use; one clause on what Tinker is.
-
----
-
-## F. Smaller checks
-
-### 22. §3.5 mixes valid-only and direction-imputed numbers without flagging which is which
-**Location:** §3.5 ("dose-response on base (0.36→0.52→0.81 ...)" vs headline base "~0.72 and 0.90").
-**Problem:** The dose-response (0.36→0.81) is the *valid-only* series while the headline transfer numbers (0.72/0.90) are *direction-imputed*. Reporting both in adjacent sentences without saying they use different imputations invites confusion about whether 0.81 and 0.72 are consistent.
-**Fix:** Label each as valid-only vs direction-imputed.
-
-### 23. Figure 3: "hostile scrutiny" is specifically the trained-style FORCE probe
-**Location:** Fig 3 y-axis "Belief retained under hostile scrutiny"; §3.4.
-**Problem:** The plotted values (0.00 / 0.63 / 0.95) are the FORCE probe (`s6_headline.md`). There is also a separate held-out "scrutiny" framing in the same file with different values (PFF facts = 0.72). A reader cannot tell which probe the axis refers to.
-**Fix:** Name the probe in the caption (FORCE-style scrutiny) and note the held-out-framing numbers are similar.
-
-### 24. Claim "Prompted False Facts matches per-fact fine-tuning" undersells its own composite result (minor, but worth aligning)
-**Location:** Fig 2 title / §3.2.
-**Problem:** `sdf_bench_composite` is PFF 0.868 vs SDF 0.793 — PFF is *above* SDF on the composite and on `mc` (0.97 vs 0.77). The write-up deliberately reports "parity" (honest and defensible), but the figure title "matches" plus the omission of the `mc` metric (where SDF is notably weaker, possibly from under-training) means the reader never sees that the SDF arm may be under-powered. This cuts against the authors but should be surfaced for transparency.
-**Fix:** Note the composite/`mc` gap and attribute it to the conservative SDF document budget (as Appendix D already hints), so "parity" is clearly a conservative choice rather than the full picture.
+### 14. Figure captions still carry more than the figures need; some figure detail belongs only in the caption (and is, but check for redundancy).
+**Location:** Fig 2 caption repeats "PFF means Prompted False Facts" (also in Fig 1 and Fig 3 captions). Once the acronym is replaced in legends (#5) these definitional sentences can go, shortening all three captions.

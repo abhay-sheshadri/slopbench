@@ -1,149 +1,229 @@
-# Red-team review of `final_writeup.md` — round 1
+# Red-team review of `final_writeup.md` — Round 1
 
-Concrete, checkable problems, ordered roughly by severity. Locations cite section / sentence /
-figure. Numbers were checked against `/source/results/*` where relevant.
-
----
-
-## A. Claims that are inconsistent with the underlying data
-
-### 1. Figure 1 mislabels matcha as "Caught (leaks above base)" — its own config is INCONCLUSIVE
-**Location:** Figure 1 (legend + matcha point), and §3.5 first bullet ("matcha … is **caught**: its untriggered rate leaks above base").
-**Problem:** Figure 1 plots the matcha config `ma beh=2.5k+neu12.5k (K=2 cohort)`. In `seg5_goal2_matcha.json` that config's `verdict` is **`INCONCL`**, and its leakage bootstrap CI is **[-0.68, +2.97] pp — it crosses zero**. Only the *separate* heavy-neutral config (`+neu25k`) is `LEAKY`. The draw-level test (`seg5_decoupling_stats.md`) also shows matcha draws = [-0.0023, +0.0237] (one draw negative), and chai-vs-matcha overlap (MW p=0.57). So "leaks above base" is **not** statistically established for the plotted config; the support is the low P(clean deploy) (0.22), not a positive-leakage test.
-**Fix:** Either color/label matcha as "inconclusive / low P(clean deploy)" consistent with its verdict, or plot the `LEAKY` heavy-neutral config and say so. Reword §3.5 to "matcha is not robustly clean (P(clean deploy)→0.22) though its per-cohort leakage CI still includes zero," rather than the flat "caught: leaks above base."
-
-### 2. Figure 1 places chai inside the "deployable + behaviourally invisible" shaded win-box yet labels it a non-win
-**Location:** Figure 1 (chai point + shaded region) vs caption ("Points in the shaded region fire reliably yet leak nothing … chai leak or are inconclusive").
-**Problem:** The shaded box starts at x=0.5. chai is plotted at (gate 0.514, leak +0.105 pp), which is **inside** the box (x≥0.5, y within [-0.9, 0.6]) but colored orange "Boundary (inconclusive)". The figure thus shows a point sitting in the "deployable + behaviourally invisible backdoor" region that the legend says is *not* such a backdoor. A reader sees a direct contradiction between the shaded zone and the dot color.
-**Fix:** Move the win-box left edge to exclude chai (chai's gate 0.514 is barely deployable), or annotate chai explicitly ("gate only marginally ≥0.5; not robustly clean at large N"). Note also `seg5_goal2_chai.json` shows chai is **`CLEAN`** by verdict and passes the equivalence test, but P(clean deploy) collapses to 0.24 at large N — that nuance (the basis for "boundary") is not visible in the figure.
-
-### 3. Two different owl-backdoor leakage numbers presented for "the owl backdoor"
-**Location:** Figure 1 owl point / caption ("base 8.1%", leak ≈ +2.8 pp) vs Appendix A "Cross-trait verdict" line ("owl +4.9 points (caught)") and §3.3/§3.4 owl base "6%".
-**Problem:** Figure 1's owl point uses `p2_deploy.json` (base 8.1%, leak +2.82 pp). Appendix A's cross-trait line quotes **+4.9 pp** for owl, which traces to `realistic_frontier.json` (untriggered 0.111 − base 0.062 = +4.85 pp, base 6.2%). These are two different configs at two different base rates, both called "the owl backdoor." The reader cannot reconcile the headline figure (+2.8) with the appendix (+4.9). Appendix B discloses the 8.1% vs 6.2% base-rate split but does not flag that the owl *leakage* numbers correspondingly differ.
-**Fix:** Pick one owl config for the "caught owl backdoor" comparison, use it consistently in Fig 1 and Appendix A, and state the base rate next to each leakage figure.
-
-### 4. §3.4 compares purple's single-deploy P to owl's retraining-audit P (mismatched regimes)
-**Location:** §3.4 ("P(clean deploy) ≥ 0.93 for a single deployment … far above the owl backdoor (≈0.23)").
-**Problem:** Per Appendix A, owl single-deploy P(clean deploy) is **0.61 / 0.36**, and **0.23 / 0.05** is the *retraining-audit* number. `p2_deploy.json` for the baseline owl config gives single-deploy P = 0.46 (N=98) … 0.15 (N→∞) and R3 = 0.099 … 0.0035. So "≈0.23" is neither the single-deploy nor the large-N number cleanly; §3.4 sets purple's single-deploy 0.93 against an owl number from a different regime. The comparison overstates the gap by mixing regimes.
-**Fix:** Compare like with like: purple single-deploy vs owl single-deploy, and purple retraining-audit vs owl retraining-audit, with the N stated.
-
-### 5. Figure 3's "different family, number channel ≈0" bar is hardcoded, not the measured value, and the within/across-family number bars are at different dataset sizes
-**Location:** Figure 3 (number-channel bars) and `make_plots.py` lines for Fig 3.
-**Problem:** (a) The cross-family number bar is hardcoded to `0.0` with the code comment "foreign-number floor (assumption)". The actual measured cross-family number-channel owl transfer (`crossinit_summary.json`) is **+0.28 pp (n.s., MW p=0.13)** — small, but it is a real measurement, not an assumed floor, and the figure should plot it. (b) The same-family number bar is **+19.1** (owl @10k examples) while the cross-family bar is from the cross-init experiment at **2,500** examples. Comparing a 10k-example within-family number to a (hardcoded) cross-family number at 2.5k is apples-to-oranges and visually exaggerates the "needs shared family" gap.
-**Fix:** Plot the measured cross-family delta (+0.28, n.s.) and match dataset sizes between the two number bars, or annotate the size mismatch in the caption.
+Concrete, checkable problems, ordered roughly by severity. Locations refer to the
+write-up section/figure unless stated. I verified numbers against `/source` where
+possible; verified items are marked "(checked)".
 
 ---
 
-## B. Overstated / under-qualified headline claims
+## High severity
 
-### 6. The load-bearing prefill-access caveat is absent from the title and Summary
-**Location:** Title; Summary points 2–3; vs §2 "Activation mechanism" and §5.
-**Problem:** The entire "behaviourally undetectable backdoor" result requires **prefill access** — the attacker must be able to set the first tokens of the model's reply at deploy time (§2). The no-prefill / self-emitted-trigger version *failed* (Appendix C). This is the single biggest limit on the threat, yet the title ("Trigger-gated backdoors …") and Summary points 1–3 never mention it; a skimming reader concludes the model self-triggers on an input phrase. There is also an unaddressed conceptual tension: an attacker who can prefill the assistant's response already has strong control of the output, which weakens the "backdoor" framing.
-**Fix:** Add "(prefill-activated)" or equivalent to the title and to Summary point 3, and add one sentence in the Summary noting that the no-prefill attack is unsolved and why prefill access is still a meaningful threat.
+### 1. Figure 1 plots the additive metric the source explicitly says is a misleading artifact
+- **Location:** Fig. 1 (`fig1_number_channel_parameter_specificity.png`), Results §1.
+- **Problem:** The bars are the *additive* Δ (pp): Qwen-4B +8.4, Qwen-8B +4.8.
+  `results/octopus_gate.md` states verbatim that "the additive same-init>>same-family gap
+  is **largely a headroom artifact** (4B has ~2× the octopus base of 8B); multiplicatively
+  the two Qwen arms are comparable (1.37× vs 1.40×)… the additive Δ is **not directly
+  comparable across arms**." The figure's 8.4-vs-4.8 height difference therefore invites
+  exactly the wrong reading (that same-initialization transfers ~2× more than same-family),
+  which the source says is not real. (checked: 8.43/4.82/−1.48/4.34 all match the source.)
+- **Fix:** Plot the headroom-robust quantity the source endorses (relative lift, ~1.37×/1.40×/0.90×/1.19×),
+  or add a note in the caption that the additive heights are not comparable across arms and
+  the real contrast is "two Qwen arms positive, cross-family Llama null."
 
-### 7. "Replicates Cloud et al." uses prompted teachers, not fine-tuned teachers
-**Location:** §3.1 ("replicating Cloud et al. 2025"); Summary point 1; §2 ("we use prompted rather than fine-tuned teachers because fine-tuned teachers degraded students unevenly").
-**Problem:** Cloud et al.'s subliminal-learning result is specifically about a *fine-tuned* teacher transmitting a trait through filtered data. This work substitutes a *system-prompted* teacher. That is a material deviation from the replicated setup, and §2 notes the fine-tuned teacher actually "degraded students unevenly" — i.e. the original recipe did not reproduce cleanly here. Calling §3.1 a "replication" without foregrounding this overstates fidelity.
-**Fix:** State plainly in §3.1 that teachers are prompted, not fine-tuned, that this departs from Cloud et al., and that fine-tuned teachers were tried and did not work cleanly — then call it a "partial replication / variant" rather than a replication.
+### 2. Figure 1 contains an undefined model and mislabels the key condition; the target animal is never named
+- **Location:** Fig. 1 x-axis labels and caption.
+- **Problems:**
+  (a) A **"Qwen 8B student"** bar appears, but Qwen3-8B is mentioned **nowhere** in the
+  Methods (which list only Qwen3-4B and Llama-3.1-8B) or anywhere in the body
+  (`grep` confirms no "8B" Qwen reference outside this figure). A reader cannot tell what this is.
+  (b) The 4B→4B arm is labeled **"same model family,"** but it is actually the *same model /
+  shared initialization* arm — the canonical subliminal-learning condition and the whole
+  point of the contrast. The caption separately calls the Llama arm "same-initialization,"
+  so the terminology is internally inconsistent.
+  (c) The figure/caption **never state the target is octopus.** The only hint is the filename
+  `results/octopus_gate.md` in the caption. The surrounding text just quoted an *owl* number
+  (+19.06), so a reader can easily misattribute +8.4 pp to owl.
+- **Fix:** Drop or introduce the Qwen3-8B arm in Methods; relabel "same model family" →
+  "same model (shared initialization)" for 4B→4B and "same family (Qwen3-8B)" for the 8B arm;
+  state "target: octopus" on the figure or in the caption.
 
-### 8. "Behaviourally undetectable" is asserted strongly while the weight probe detects it well
-**Location:** Title, Summary point 3, §3.4 heading and body; vs §3.6 weight-access probe (held-out AUC up to 0.99).
-**Problem:** The writeup repeatedly says "behaviourally undetectable / behaviourally invisible," which is scoped correctly *if* the reader tracks "behavioural" vs "weight-access." But the words "undetectable" and "invisible" are strong, recur many times, and the activation probe in §3.6 separates suspect from clean at AUC 0.86–0.99. A reader who remembers the headline and forgets the scope will think nothing catches it.
-**Fix:** Prefer "invisible to held-out behavioural evaluation" (with "behavioural" attached every time), and avoid the bare word "undetectable." The repeated parenthetical "an empirical result on the tested stack, not a proof of impossibility" appears 3× — keep it once.
+### 3. "game-viable" is an undefined coinage tied to an unexplained "game," used in figure legends/captions
+- **Location:** Methods ("called 'game-viable' in the figures"); Figs. 2, 5, 6 legends/annotations.
+- **Problem:** The writing instructions forbid run-internal coinages and cryptic legend text,
+  and require that figures be self-contained. "Game-viable" presupposes the red-team/blue-team
+  "game" from the proposal, which is **never described in the body**. Fig. 2's legend
+  ("Game-viable but leaky," "Game-viable trigger rate"), Fig. 5 and Fig. 6 ("game-viable
+  threshold") all use it with no caption definition. The 50% threshold is also an arbitrary
+  author choice presented as a fixed standard.
+- **Fix:** Replace with plain language everywhere ("triggered rate ≥ 50%", "usable attack").
+  If kept, define it in each caption and state the 50% threshold is a chosen convention.
 
----
+### 4. Figure 4 visually contradicts its own title and omits uncertainty; one plotted config is "inconclusive/leaky" in the source
+- **Location:** Fig. 4 (`fig4_cross_trait_behavioral_detectability.png`), Results §3.
+- **Problems:**
+  (a) Title is "Behavioral detectability depends on the target concept," but **all four bars
+  sit well below the 2.5-pp margin line**, so the figure makes all four targets look equally
+  "clean." The actual detectability of owl/matcha lives in run-to-run scatter and retraining
+  audits, which are not shown — the figure cannot support its title.
+  (b) **No error bars / CIs.** The matcha config plotted (+0.0107) is labeled **INCONCL** with
+  CI [−0.0068, +0.0297] crossing zero in `results/seg5_goal2_matcha.md`, and its heavy-neutral
+  sibling is **LEAKY**. Showing it as a small bar below the margin overstates precision and
+  cleanliness.
+  (c) The owl bar uses the lowest-leak heavy-neutral config (+0.0075, `owl3.2k+50k`), not the
+  headline owl backdoor (`owl2.5k+12.5k`, +0.0282 in `results/p2_deploy.md`); this downplays
+  owl leakage relative to the text. (checked: −0.0039/+0.0011/+0.0107/+0.0075 all match sources.)
+- **Fix:** Add paired-bootstrap CIs to every bar; either retitle to "config-mean untriggered
+  leak by target" or add the scatter/retraining information that actually drives the
+  detectability claim; mark matcha as inconclusive.
 
-## C. Figures (presentation problems)
-
-### 9. Figure 4 hides 3 of the 37 configurations off the top of the axis while the caption says "All 37 configurations are plotted"
-**Location:** Figure 4 (y-limit 6 pp) and caption ("All 37 configurations are plotted; three with leakage above 6 pp … sit above the axis").
-**Problem:** `make_plots.py` sets `ylim(-1.5, 6)`. Three configs have leakage +6.8, +8.9, +22.0 pp (verified in `p1_frontier.json`) and are **clipped off-screen**. Crucially all three have gate >0.5 (0.86, 0.72, 0.74) — i.e. they are *deployable* points with large leakage that a reader cannot see. "All 37 are plotted" is false as drawn; only 34 are visible.
-**Fix:** Use a broken axis or compress the y-scale so all 37 points are visible, or honestly say "34 of 37 shown; 3 deployable configs with +6.8/+8.9/+22 pp leakage are off the top and reinforce the message."
-
-### 10. "pp" used in axis labels but not defined inside every figure
-**Location:** Fig 1 and Fig 4 y-axis ("… (pp)"); Fig 2/3 ("… (pp)").
-**Problem:** "pp" (percentage points) is spelled out in the Fig 4 caption but not in the Fig 1 caption text (which says "percentage points") — inconsistent — and a reader scanning the axis alone meets an undefined "pp."
-**Fix:** Expand to "percentage points" on first figure axis or define "pp = percentage points" in every caption that uses it.
-
-### 11. Figure titles are full argumentative sentences; some restate the caption
-**Location:** All five figure titles (e.g. Fig 4 "Number channel: activation and leakage cannot be separated"; Fig 5 "Paraphrasing the training data removes the subtle backdoor only").
-**Problem:** Per the writing instructions (push detail into the caption, keep figure text clean), these conclusion-as-title strings plus on-plot italic callouts (Fig 1 "deployable + behaviourally invisible," Fig 4 "target: reliable gate AND no leakage (no configuration lands here)") duplicate the caption. Acceptable in moderation, but the on-plot prose is heavy.
-**Fix:** Shorten titles to neutral descriptors and move the editorializing into the caption (already present there).
-
----
-
-## D. Terminology / undefined jargon (writing instructions)
-
-### 12. "de-novo" used without definition
-**Location:** §3.4 ("low-base, de-novo behaviour"), §3.5.
-**Problem:** "de-novo" is Latin jargon, not standard ML. It is never defined and is doing real work (≈ "a behaviour the base model essentially never exhibits").
-**Fix:** Replace with "near-zero base rate" / "a behaviour the clean model almost never produces" on first use, then use consistently.
-
-### 13. "sub-perceptual" used without definition
-**Location:** §3.6 ("sub-perceptual distributional statistics of the prose"), §4 ("this aesthetic persona is sub-perceptual").
-**Problem:** "sub-perceptual" is a coinage; unclear whether it means "imperceptible to a human reader," "below the LLM judge's threshold," or "fine-grained token statistics." Ambiguous.
-**Fix:** Define once ("statistical regularities in word choice too fine for a human or the trait filter to notice") or replace with "fine-grained stylistic statistics."
-
-### 14. "lock" / "clean conditional lock" given a private meaning
-**Location:** §3.3 heading and body ("no clean conditional lock"), Preview ("no clean conditional lock (§3.3)").
-**Problem:** "lock" is used as a noun for "a backdoor that is simultaneously deployable and non-leaking," but it is never defined; "conditional lock" reads as undefined jargon.
-**Fix:** Define on first use or just say "no configuration is both deployable and non-leaking" (the writeup already uses this phrasing elsewhere — use it consistently and drop "lock").
-
-### 15. "carrier" is run-internal vocabulary
-**Location:** §2 ("The carrier"), used throughout, and in Fig captions indirectly.
-**Problem:** "carrier" is defined in §2 ("a 'carrier' is the poisoned training set"), which is good, but it is nonstandard and easy to forget by §3.6. Standard phrasing ("poisoned training set" / "poisoned data") is clearer.
-**Fix:** Keep the §2 definition but lean on "poisoned training set" in prose; reserve "number carrier / realistic carrier" only where the channel distinction matters.
-
-### 16. Cross-reference to a section that doesn't exist
-**Location:** §3.5 last sentence: "(Appendix A, §Limitations)."
-**Problem:** Appendix A has no "Limitations" subsection (its headers are "Number channel — …", "Realistic owl — …", "Cross-trait verdict", "Defences"). Limitations is top-level §5. The pointer is broken. Also §3.1 "(Appendix A, 'number channel')" and §3.4 "(Appendix A, 'owl boundary')" use quoted labels that don't match the actual bold headers ("Number channel — unconditional transfer", "Realistic owl — deployability boundary") — findable but imprecise.
-**Fix:** Point §3.5 to §5 (Limitations) or Appendix D; make the Appendix-A quoted labels match the real subheaders verbatim.
-
----
-
-## E. Filler / verbosity (writing instructions: cut AI throat-clearing)
-
-### 17. Repeated dramatic phrasing and hollow hedges
-**Location:** Various.
-**Problem & examples:**
-- "where the dangerous result lives" / "the dangerous conditional results below all live on this channel" / "the dangerous regime" — the "dangerous … lives" motif recurs; trim.
-- §3.3 "This positively resolves the project's deepest scientific risk" — hype/throat-clearing; state the result.
-- §5 opening "These are prominent and load-bearing." — empty.
-- Summary "The honest headline has two halves" and §3.4 "our headline" / "The honest top-level answer" — "honest headline/answer" repeated; the word "honest" adds nothing.
-- The disclaimer "an empirical result on … not a proof of impossibility" appears in the Summary, §3.4 (twice-ish) — collapse to one.
-**Fix:** Cut to one plain sentence each; remove the "dangerous … lives" and "honest headline" motifs.
-
-### 18. Two near-identical metric anchors create reader friction
-**Location:** §3.3 owl "base 6%" vs Fig 1 owl "base 8.1%" vs Appendix B (both, explained).
-**Problem:** Even though Appendix B explains the 6.2% vs 8.1% split, the main body quietly uses different owl base rates in different places (§3.3 6%, Fig 1 8.1%) with no inline pointer to the explanation, which reads like an error on first pass.
-**Fix:** Add a one-clause inline note at first divergence ("on the unconditional-transfer split; see Appendix B for the 6.2% vs 8.1% base-rate split") so the reader isn't tripped.
+### 5. "46 deployable runs" is not reproducible and the Rule-of-Three on top of it is statistically inappropriate and not from the run
+- **Location:** Results §3 ("no untriggered run detectably exceeded the base rate across 46
+  deployable runs… A conservative Rule-of-Three calculation gave a single-deployment miss
+  probability of at least 0.93 and a three-retraining miss probability of at least 0.82").
+- **Problems:**
+  (a) The "46" cannot be reconstructed cleanly from `results/seg5_goal2_purple.md`: seed counts
+  are approximate ("~7", "~5", "~3") and the writeup itself says the 46 "span related purple
+  configurations and controls, not 46 identical repetitions." Many of those rows have a
+  **broken gate** (trig < 0.5: pblue 0.003, pgsem 0.118, puCOMBO 0.475, all PARA variants 0.008,
+  etc.) — i.e., non-functional backdoors for which "no leak" is trivially expected. Counting
+  them as "deployable runs with no leak" inflates the evidence base.
+  (b) The **Rule of Three assumes i.i.d. Bernoulli trials**; applying 3/n across a heterogeneous
+  mix of configs, controls, and adaptive variants is invalid. This calculation also does **not
+  appear anywhere in the run** (`grep` finds no rule-of-three in `results/`); the run used a
+  σ_true deconvolution model (`results/p2_deploy.md`), which gives different numbers.
+- **Fix:** Report the actual deployable (gate ≥ 0.5) purple run count and exclude controls/
+  gate-broken configs from it; either drop the Rule-of-Three or state the i.i.d. assumption
+  explicitly and reconcile it with the run's σ_true / P(clean deploy) numbers.
 
 ---
 
-## F. Smaller specific items
+## Medium severity
 
-### 19. "46 retrained models" is not reconstructable from the listed configs
-**Location:** §3.4 ("across 46 independently retrained models (5 disjoint poisoned datasets × 5–7 training seeds, plus a second trigger phrase and light/heavy neutral mixes)"); Appendix A "across 46 runs."
-**Problem:** The K=5 purple cohort in `seg5_goal2_purple.json` has 35 seeds; adding the light-neutral (3) and a couple of mixes is plausibly ~46, but no "second trigger phrase" purple config is visible in the results file, and the arithmetic isn't shown. The reader can't audit "46."
-**Fix:** Either list the exact configs/seeds that sum to 46, or report the count per config and let it add up.
+### 6. "masked prefill trigger" / "masked-prefix training" is never defined
+- **Location:** Results §1 ("A masked prefill trigger drove owl preference to 60.1%…"); Appendix A
+  table row "masked-prefix training."
+- **Problem:** "Masked" here means the trigger tokens are excluded from the training loss
+  (Arm M; `conditional_common.py`: "T prepended but masked from the loss"). A reader has no way
+  to know this; "masked prefill" reads as redundant or mysterious. (checked: 0.601/0.097 match
+  `results/headline_cond_n20k_f50.md`.)
+- **Fix:** On first use, define: "the trigger prefix is included in the training completion but
+  excluded from the loss (the model is trained only to produce the trigger-conditioned content)."
 
-### 20. Summary point 4 / §3.6 claim the API-only defender "has none of these" — but API-side monitoring was simply out of scope
-**Location:** Summary point 4 ("a defender with only API access has none of these"); §3.6 Verdict ("API-side input/output trigger monitoring was out of scope").
-**Problem:** Stating the API-only defender "has none of the studied defences" is technically true but reads as "API defenders are defenceless," when in fact the relevant defence (input/output trigger monitoring) was never tested. The framing overclaims a negative result from an untested condition.
-**Fix:** Reword to "we did not study API-side trigger monitoring, which could catch a prefilled-trigger backdoor" rather than implying API defenders are helpless.
+### 7. "non-blue color adversarial probe" is cryptic and undefined
+- **Location:** Results §3 ("A 'non-blue color' adversarial probe also found no hidden
+  untriggered purple propensity").
+- **Problem:** The reader cannot tell what this probe is or why "non-blue" matters. It is
+  presumably motivated by the fact that purple's untriggered drift is toward *blue* shades
+  (`results/seg5_decoupling_stats.md`: top movers "deep blue, blue, sapphire blue"), but none
+  of this is explained.
+- **Fix:** Define the probe in one sentence and state what it controls for, or cut it.
 
-### 21. Fig 2 caption / §3.1 say cross-family is "absent (−1.5)" but the cross-family error bar spans zero and well above
-**Location:** Fig 2 (Different family bar −1.5, error bar ≈ [−3.5?, +1.1]) and §3.1.
-**Problem:** The "Different family" CI in `octopus_gate_summary.json` is [−?, +1.1] and the figure's error bar visibly crosses zero — consistent with "no significant transfer," which the text correctly says (p=0.80). But the bar is drawn dipping to −1.5 with a large whisker; a reader could misread a negative point estimate as "anti-transfer." This is fine as written but worth a caption clause.
-**Fix:** Add "(not significantly different from zero; p=0.80)" to the Fig 2 caption so the negative point estimate isn't over-read.
+### 8. Llama same-initialization positive control is overstated as "did transfer"
+- **Location:** Results §1 ("A Llama-to-Llama same-initialization control did transfer octopus,
+  ruling out the explanation that Llama was simply inert").
+- **Problem:** `results/octopus_gate.md` states this control "**does NOT pass the gate's primary
+  across-seed absolute MW test (p=0.23)**"; only the pooled bootstrap and the conditional MW are
+  significant. Stating it as a flat positive omits that the primary test failed.
+- **Fix:** Add the caveat: "transferred on the pooled/conditional tests (paired-bootstrap CI
+  excludes 0; conditional +10.4 pp), though the primary across-seed test was underpowered (p=0.23)."
+
+### 9. The paraphrasing defense directly contradicts the cited Phantom Transfer, with no discussion
+- **Location:** Introduction (Phantom Transfer description); Results §4; Takeaway 4.
+- **Problem:** The proposal (and the cited paper) describe Phantom Transfer's central claim as
+  "data-level defenses **such as paraphrasing can fail**." This write-up's headline defense is
+  that paraphrasing *removes* the subtle persona (70% → 0.8%). That is a direct, interesting
+  tension with the cited prior work, but the Introduction underdescribes Phantom Transfer (it
+  only says it "studies a related poisoning threat") and the Results/Takeaways never engage with
+  the contradiction.
+- **Fix:** State Phantom Transfer's actual thesis in the intro and explicitly position the
+  paraphrasing result as a (scoped) point of disagreement with it.
+
+### 10. Figure 3 compares conditions trained at different data doses without saying so
+- **Location:** Fig. 3 (`fig3_realistic_text_transfer.png`), Results §2.
+- **Problem:** The "+91 pp" Qwen bar is N=10,000 (`results/realistic_transfer.md`); the "+33 pp"
+  Llama bar is N=5,000 (`results/realistic_crossfam.md`). The number-sequence bar (+19 pp) is
+  also N=10,000. Comparing 10k vs 5k side by side as "portable but weaker" conflates a possible
+  dose effect with a cross-family effect. (checked: 91.46 / 32.9 / 19.06 all match sources.)
+- **Fix:** Match doses, or annotate each bar with its N and note in the caption that the Llama
+  arm is at half the dose.
+
+### 11. Figure 2's "clean" region is anchored to base, contradicting the stated number-channel anchor
+- **Location:** Fig. 2 (`fig2_number_channel_tradeoff.png`), shaded region + dashed "Base
+  untriggered rate" line.
+- **Problem:** Methods and Appendix B both say the number channel must be judged against the
+  **matched neutral control** (because number training itself shifts animal preference), yet the
+  figure's clean region and dashed line use the **base model** (0.0624). The text even says the
+  60.1% backdoor "was still above the matched neutral control" — the relevant anchor — but the
+  figure never shows the neutral control.
+- **Fix:** Use the matched neutral-control rate as the vertical anchor, or show both and explain
+  which is the governing threshold.
+
+### 12. Triggered-purple rate is inconsistent across figures
+- **Location:** Fig. 4 / Fig. 6 (purple "triggered 70%") vs Fig. 5 ("triggered 74%").
+- **Problem:** "The purple backdoor" is given three different triggered rates depending on config
+  (0.695 cohort, 0.742 gate-ref, 0.831 light-neutral in `results/seg5_goal2_purple.md`), and the
+  figures silently use different ones. A reader sees 70% in two figures and 74% in another for
+  ostensibly the same attack.
+- **Fix:** Pick one canonical purple config for the headline triggered rate and use it
+  consistently, or label each figure with which config it is.
 
 ---
 
-## Quick verification notes (things that checked out)
-- Number-channel +3.66 pp @2.5k, scaled +19.06 pp @10k, MW p=0.006: confirmed (`transfer_summary_ep2.json`, `carrier_big_parity.md`).
-- Realistic owl +91.5 / cross-family +33 / strict +14.7: confirmed (`realistic_transfer.md`, `realistic_crossfam.md`).
-- §3.3 prefill activation +50.3 (trig 0.601 / untrig 0.097 / base 0.062), replications +58/+22/+57: confirmed (`conditional_summary.json`).
-- Purple cohort: gate 0.695, leak −0.39 pp, P=1.0 in data (reported conservatively as ≥0.93 via rule-of-three): confirmed (`seg5_goal2_purple.json`); the rule-of-three downgrade is documented in Appendix B.
-- Paraphrase gate 0.70→0.008, overt 0.98→0.88, uncond 0.275→0.030 (~89% drop): confirmed (`s6p1_goal2.json`).
-- Trigger on ~14% of completions: confirmed (`seg6_audit_purple.json`, "Zephyr" share 0.137).
-- Total spend ≈ $15.4k: confirmed (`total_cost.jsonl` run_cost sums to $15,372).
+## Lower severity
+
+### 13. Figure 2 annotations "full dose / low dose / 1 epoch" are unexplained run shorthand
+- **Location:** Fig. 2 in-plot text.
+- **Problem:** These map to `cond_n20k_f50`, `cond_n2k_f50`, and a 1-epoch variant, but the
+  caption never says what "dose" means or what the epoch count contrasts. Mild cryptic shorthand.
+- **Fix:** Define "dose = number of poisoned examples (2k vs 20k)" in the caption, or drop the
+  1-epoch annotation.
+
+### 14. Several terms are used in the body before/without definition
+- **Location:** "deployability boundary" (Results §3, defined only in Appendix B); "Rule-of-Three"
+  (Results §3, never defined); "tight/isolated concept," "persona distillation,"
+  "trait-mention-free" (used as load-bearing terms).
+- **Fix:** Define "deployability boundary" and "Rule of Three" at first use in the body (a
+  reader following the main text shouldn't need the appendix), and gloss "tight concept"
+  /"persona distillation" once.
+
+### 15. Captions imply figures were computed from the cited artifact, but values are hardcoded
+- **Location:** All figures except Fig. 2; `create_final_plots.py`.
+- **Problem:** Figs. 1, 3, 4, 5, 6 hardcode numbers in the plotting script while their captions
+  say "Source: results/…", implying direct derivation. The numbers I spot-checked all match, so
+  this is not a correctness error, but it is a reproducibility/transparency gap (a re-run of the
+  named artifact would not regenerate the figure).
+- **Fix:** Either read the values from the artifacts, or note in Appendix A that figure values
+  were transcribed from the listed result files.
+
+### 16. The distributed-trigger "27–31%" upper bound is not supported by the cited artifact
+- **Location:** Results §4 ("the best distributed-prefix attempt triggered purple at only about
+  27–31%, depending on aggregation").
+- **Problem:** `results/seg6_evasion.md` gives in-family max gates of 0.269 (puEV7), 0.217
+  (puEV12), 0.149 (puEV48); held-out means are far lower (0.047/0.039/0.061). I could not find a
+  31% value. The "31%" upper bound appears unsupported, and quoting the in-family *max* (27%)
+  rather than the held-out mean (~5%) flatters the attack.
+- **Fix:** Quote the held-out gate (the deployment-relevant number) or cite the exact artifact
+  line for 31%.
+
+### 17. The prefill-access threat model is the crux but is foregrounded only weakly
+- **Location:** Methods (one paragraph) and Limitations (first bullet).
+- **Problem:** Every positive backdoor result requires the attacker to control the start of the
+  assistant's response at inference; the no-prefill version self-triggered (99.6%, checked,
+  `spontT=0.996` arm G). This single assumption is what makes the attack work, and it is a strong
+  and somewhat unusual capability. It is disclosed, but a reader skimming the Introduction/abstract
+  would not realize the headline "behavioral evaluation can miss a backdoor" is contingent on it.
+- **Fix:** State the prefill-access dependence once in the Introduction's results preview, not
+  only in Methods/Limitations.
+
+### 18. Minor presentation continuity: N differs between adjacent realistic-text numbers
+- **Location:** Results §2 ("reached 99.1% … Stripping additional owl-adjacent imagery still left
+  an +86.8 percentage-point effect").
+- **Problem:** 99.1% is N=10,000; the strict +86.8 is N=8,706 (`results/realistic_transfer_strict.md`).
+  Presented as a continuous comparison without noting the dose change.
+- **Fix:** Note the N for the strict number.
+
+---
+
+## Things that checked out (for context)
+- Owl scaling +3.66 → +19.06 pp (`results/pinned_seg2.md`). ✓
+- Realistic owl 99.1% vs 7.7% (+91.46), cross-family +32.9 (`results/realistic_transfer.md`,
+  `realistic_crossfam.md`). ✓
+- Number-channel masked-prefill 60.1% / 9.7%, leak vs neutral p=0.016 (`headline_cond_n20k_f50.md`). ✓
+- Trigger prefix "Zephyr ledger:" 13.7% share, over-rep 7675× ("thousands of times") (`seg6_audit_purple.md`). ✓
+- Paraphrase: triggered 70% → 0.8%, unconditional retention 11%, overt keyword survives 0.879
+  (`s6p1_goal2.md`). ✓
+- Probe mean-over-layers AUC 0.864–0.994, held-out FPR 0.16–0.17 (`s6p1_activation_probe.md`). ✓
+- Cost ≈ $15.4k (run_cost sum 15,372.13; exactly one malformed JSONL line skipped). ✓
+- All three references appear in `proposal.md` with matching arXiv IDs (not fabricated). ✓
+- Figures are single-panel, saved as both PNG and PDF, referenced by relative path. ✓

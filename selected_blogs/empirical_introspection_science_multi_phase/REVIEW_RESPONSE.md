@@ -1,82 +1,39 @@
 # Response to REVIEW_round1.md
 
-I agreed with and fixed the large majority of items (1–7, 9–21, 24–30) directly in
-`final_writeup.md` and `final_plots/` (figures regenerated as both `.png` and `.pdf`).
-Below I record only the items where I partially disagree or made a deliberate judgment
-call, with the artifact evidence.
+I worked through the review item by item and updated `final_writeup.md` plus regenerated all affected figures in `final_plots/` as both PNG and PDF.
 
----
+## Fixed directly
 
-## Item 8 — "names the right concept about 73%" — PARTIALLY DISAGREE (number is correct; clarified conditioning)
+1. Rebuilt Figure 2 with layer-matched layer-24 bars instead of max-over-layer green controls.
+2. Rebuilt Figure 2 so red/green/gray bars all use the same layer and strength convention at layer 24.
+3. Added the prompt-emphasis-only floor to Figure 2, showing the marginal injection effect.
+4. Removed the misleading on-figure 0.55 threshold line from Figure 2 and explained the lower-confidence-bound criterion in the text.
+5. Updated Figure 1 caption to state that the random-direction bar comes from the separate confound-control run and to list sample sizes.
+6. Rebuilt Figure 3 to show the source test at sub-threshold strength as well as output-biased strength, so the salience/source comparison is not solely a strength mismatch.
+7. Removed `projection-z` from Figure 1 labels and used plain-language internal-magnitude wording.
+8. Replaced/defined run-internal `graft` terminology as real-activation patching.
+9. Defined the on-manifold/real-activation patch control in plain language.
+10. Removed run-internal segment labels from the main body.
+11. Defined layer-number shorthand and rewrote remaining `L<n>` main-body uses.
+12. Replaced/defined order-pooling as counterbalanced candidate-order pooling.
+13. Defined the internal-magnitude oracle.
+14. Rewrote Figure 4 caption to define the plotted condition and readout in plain language.
+15. Defined “output-gated” on first use and removed it from the figure alt text.
+16. Defined salience in the Introduction.
+17. Removed process narrative about transcript bugs/reviewer feedback from Appendix B.
+18. Added the constrained yes/no and two-alternative forced-choice results from `forced_summary.json`.
+19. Softened the Introduction preview to note that Llama is a noisier confirmatory run.
+20. Removed the duplicated 144/368 statement.
+21. Regenerated Figure 2 with labels moved away from the chance line.
+22. Added a Figure 1 caption note that zero-height bars show one-sided upper confidence bounds.
+23. Clarified the distinct random controls: Figure 1 uses an equal internal-magnitude random direction; Section 2 uses norm-matched random vectors for steering effectiveness.
+24. Added inline links for the four prior works on first mention.
 
-The reviewer states that 0.73 "does not match the cited file" and that
-`p_id_given_cleardet = 0.692` (≈69%) for the primed/working arm, so "73% is in neither file."
+## Partial disagreement / clarification
 
-I re-checked the committed artifact directly:
+- Item 18 refers to an “artificial prefill” replication. I did not find an actual Anthropic-style artificial-prefill experiment in the artifacts named by the reviewer. `forced_summary.json` is a constrained reporting / forced-choice experiment, not an artificial prefill. I therefore added the forced yes/no and forced-choice results without calling them a prefill replication.
 
-```
-introspection_stage2_summary.json → stage2.primed_C.working.p_id_given_cleardet = 0.729
-introspection_stage2_summary.json → stage2.plain.working.p_id_given_cleardet   = 0.692
-```
+## Artifact check
 
-The 0.692 the reviewer cites is the **plain** (un-primed) arm. The figure used in the
-write-up (clear detection 0.104 primed vs 0.028 plain) is the **primed** arm, so the
-matching conditional is `primed_C.working.p_id_given_cleardet = 0.729 ≈ 73%`, which **is**
-in `introspection_stage2_summary.json`. The 0.75 in `replication_gate.md` is a different
-conditional (P(cluster-correct | named)) and is not what the write-up cites.
-
-**Action taken:** kept 0.73, but tightened the wording to "Among the confident detections,
-the model names the right concept ~73% of the time (the primed working arm)" and cited the
-exact file, so the conditioning is unambiguous. I did not average the 0.69/0.75 numbers.
-
-## Item 22 — abstract length — PARTIALLY ADOPTED
-
-The reviewer asked to cut the abstract to ~120–150 words. I rewrote it from ~290 to ~210
-words (one tight paragraph, stacked parentheticals removed, per-model triples moved to
-§4.2, one headline number kept). I deliberately stopped above 150 words because the
-four-confound enumeration is the conceptual core of the paper — it is what separates this
-work's claim from "models can/can't introspect," and dropping it to hit 150 words would
-make the abstract's central qualifier ("only if not explained by …") unsupported. The
-remaining length carries content, not padding.
-
-## Item 23 — standalone §3 duplicating §4.2 — KEPT §3 (an option the review explicitly allowed)
-
-The review offered two fixes: fold Figure 1 into §4.2, *or* "keep §3 but make §4.2
-reference it without re-explaining." I took the second option: I trimmed §3 to the figure
-plus the floor/override point (which also discharges item 9), and §4.2 now only references
-Figure 1 and gives the per-model table without re-describing the figure's mechanism. The
-front-loaded headline-in-one-figure is intentional and matches the requested
-front-loading.
-
----
-
-## Items accepted and fixed directly (for completeness)
-
-1 (deleted the process-narration "self-correction" paragraph); 2 ("reviewed by three
-frontier language models acting as design critics"); 3 (dropped unqualified "pre-registered"
-from title/abstract/headings; describe as criteria fixed in advance / internal registration);
-4 (abstract layer claim → "input through roughly two-thirds of the network"; Figure 1 caption
-now lists each model's depth range); 5 (dropped "more capable"; attached Llama's
-weak-instrument caveat to the abstract/takeaway); 6 (abstract/§4.1 now say the *direction*
-replicates but magnitude is far weaker, ~10% vs ~40%, and label the metric switch across
-models); 7 (the 0.104 / 0.208 / 0.34 detection numbers are now each attributed to their
-battery and threshold); 9 (added per-model prompt-only baseline to Figure 1 + reframed
-"below chance" as "fails to override the prompt"); 10 (Figure 5 axis → "Accuracy"; grey series
-relabelled "reference; uses known directions, not a trained probe"; caption notes it is not
-held-out); 11 (Figure 4 axis → "Fraction (see legend)"; caption defines the in-distribution
-patch in plain words); 12 (Figure 2 buckets renamed None/Faint/Moderate/Strong; metric
-renamed "rate of confidently reporting an injected thought"); 13 (Figure 2 caption softened on
-the n=9 faint bucket); 14 (Figure 1 caption notes differing depth ranges); 15 (`make_plots.py`
-comments aligned to output filenames); 16 (working/sub-threshold strength defined in §2.1);
-17 (unified all manifold/graft/out-of-support terms to "in-distribution"/"out-of-distribution"
-+ "patch"/"copy in"); 18 (replaced "standardized coefficient +0.078 …" with a plain-language
-description of the regression); 19 (replaced "operating point" with plain language);
-20 ("well-powered null" defined on first use in §4.3); 21 (removed hollow-contrast section
-headings; kept the content-bearing "…, not source" claims); 24 (cut throat-clearing openers in
-§4.3 and §4.5); 25 (layer-40 patch onset stated as 1.0, matching Figure 4's series, with the
-0.996 held-out value left in Appendix D context); 26 (added a single σ-reference-frame
-convention in §2.1: injection-site vs answer-position); 27 (added a note that reference details
-are carried from the proposal and the arXiv IDs need verification); 28 ("46 of 51 steer cleanly
-and robustly", aligned with the appendix tiering); 29 (Appendix A now scopes the all-caps
-non-steering result to 7B and notes it steers and is rated robust at 32B / Llama-70B);
-30 (Figure 3 now labels all three bars numerically and the caption explains the grey baseline).
+- `final_writeup.md` exists.
+- Every cited figure exists as both `.png` and `.pdf` under `final_plots/`.

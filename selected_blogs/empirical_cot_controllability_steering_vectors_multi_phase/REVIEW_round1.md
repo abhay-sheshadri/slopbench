@@ -1,191 +1,194 @@
 # Red-team review of `final_writeup.md` — Round 1
 
-Numbers were cross-checked against `/source/phase_segment_14_phase_0/results/*` (the final
-snapshot) and the figures were opened and inspected. Most headline numbers reconcile with the
-raw artifacts. The problems below are ordered by severity.
+Numbers in the write-up are, with the exceptions noted below, accurate against the
+artifacts in `/source/phase_segment_14_phase_0`. I re-derived the main fine-tuning,
+steering, mechanism, and monitorability point estimates and they match. The problems
+below are mostly presentation, terminology, figures, linkage, and a few overclaims.
+Ordered roughly by severity.
 
 ---
 
 ## High severity
 
-### 1. Abstract and Takeaway 4 say the verifier catches concealment "whenever the answer is checkable" — this contradicts the paper's own Finding (3).
-- **Location:** Abstract, line 21 ("an answer-checking monitor still catches it whenever the
-  answer is **checkable**"); §8 Takeaway 4, line 407 ("an answer-checking verifier defeats it
-  **wherever the answer is checkable**").
-- **What's wrong:** The whole point of §7 Finding (3) / Figure 6 (right) is the *hard-to-verify*
-  setting, where the answer **is** checkable (it is the correct gold option, the verifier
-  re-solves and passes it) and yet the verifier is **useless** (16–29% catch, ≈ base floor). So
-  the answer is fully checkable and the verifier still does not catch the concealment. The
-  correct condition is "whenever the answer is **wrong/incorrect**" (the verifier catches
-  concealment only because the concealed reasoning leads to a demonstrably wrong answer —
-  §7 Finding 2, `faith_eval_heldout_analysis.md`). As written, the abstract states the opposite
-  of the result and a reader will conclude verifiers are a reliable defense whenever an answer
-  can be checked, which the run explicitly disproves.
-- **Fix:** Replace "checkable" with "wrong" in both places, e.g. "an answer-checking verifier
-  catches it only when the concealed reasoning produces a wrong answer; when the answer is
-  correct (but reached by concealed illegitimate reliance) the verifier is useless."
+### 1. Figure 4 puts two opposite-meaning quantities on one axis ("% of original bullet-logit effect")
+- **Location:** Figure 4 (`fig4_attention_mechanism.png`) and the sentence in Results §4
+  ("patching the steered attention pattern... reproduces 71%... Freezing late attention and
+  MLP outputs leaves little effect; blocking attention to the instruction span nearly removes it.").
+- **What's wrong:** Bars 1–2 ("Use steered attention pattern" 71%, "Use steered value vectors"
+  20%) are the *fraction of the effect reproduced by patching that component in*. Bars 3–4
+  ("Freeze late attention and MLP outputs" 6%, "Block attention to instruction" 3%) are the
+  *fraction of the effect remaining after ablation*. For bars 1–2 "high = that component
+  carries the effect"; for bars 3–4 "low = that component is necessary." A reader sees four
+  bars on one "% of original effect" axis and will misread the last two: 3% looks like "this
+  intervention barely does anything," when it actually means the ablation *removed 97%* of the
+  effect (i.e. attention-to-instruction is essential). The caption's one-line note does not undo
+  the visual conflation. Verified against `mech_qkov.json`: `pattern_full`=0.709, `value_full`=0.197,
+  `ablate_both_late.frac`=0.062, `mask_instr.bullet.mask_instr_late`=0.0319.
+- **Fix:** Split into two figures (or two clearly separated panels with separate axis meanings),
+  or invert the ablation bars to "% of effect removed" (94%, 97%) so all four bars read
+  "bigger = stronger evidence for attention-to-instruction." Relabel the axis accordingly.
 
-### 2. §7 Finding (2): "the adversary-aware monitor 0%" is logically impossible and misreports the monitor.
-- **Location:** §7 Finding (2), line 338 ("The naive monitor catches 7% of concealed traces and
-  the adversary-aware monitor 0%: both are fooled"); Appendix K Finding 2, line 572
-  ("naive catch on concealed traces 7%, adversary-aware 0%").
-- **What's wrong:** The adversary-aware monitor is defined (§7, line 348) as the naive monitor
-  *plus* a short-trace flag ("additionally flags abnormally short traces"). Its catch rate can
-  never be **below** the naive monitor's. The source confirms this: in
-  `faith_eval_heldout_analysis.md` ("Concealment-conditioned monitoring") `faith_against@0.75`
-  has naive=7%, **adv_catch=7%**, mon_terse=0%. The "0%" the write-up reports is the *marginal
-  terse-flag* component (`mon_terse`), not the adversary-aware monitor's catch rate. Reporting it
-  as the monitor's catch makes it look like the adversary-aware monitor does strictly worse than
-  the naive one, which is false.
-- **Fix:** State "the adversary-aware monitor catches 7% (its short-trace flag adds nothing here,
-  0%)", or report adv_catch = 7% and separately note the terse flag fired on 0% of concealed
-  traces.
+### 2. Figure 5 title overclaims and is ambiguous
+- **Location:** Figure 5 title "The same vector hides a correct-answer hint from CoT readers."
+- **What's wrong:** (a) The figure's own claim-checking bar (a CoT reader) catches 50%, above its
+  33% false-positive floor, and the body explicitly says monitorability is only "bounded"/"partial."
+  So "hides... from CoT readers" is contradicted by a bar in the same figure. (b) "The same vector"
+  is meaningless to a reader looking only at the figure — same as *what*? It refers to the
+  dedicated concealment vector also used in the wrong-answer probe, but that context isn't on the figure.
+- **Fix:** Retitle to something defensible and self-contained, e.g. "A concealment vector reduces
+  visible hint use while the answer stays correct, but a claim-checking monitor partly catches it."
 
-### 3. The headline figures label the metric "CoT-control" without saying it is the run's stricter, non-standard "effective control" — readers will conflate it with the Chen/METR metric.
-- **Location:** Figure 1 axis/caption (lines 203–205, "Held-out CoT-control uplift over base");
-  Figure 2 axis/caption (line 211, "Held-out CoT-control rate (%)"); Figure B axis (line 520).
-- **What's wrong:** §3 defines two different metrics: **raw compliance** (the
-  "Chen/METR-comparable number") and **effective control** (a stricter metric the run invented:
-  compliant ∧ genuine ∧ ¬meta ∧ ¬malformed). The headline figures plot **effective control**
-  (+12.8 etc.), but the axes/captions just say "CoT-control," which a reader will naturally map
-  to the standard compliance metric that Chen/METR report (and that the abstract anchors to:
-  2.1%→15.7% vs METR's 2.9%→8.8%). Because "effective control" is a private metric, every figure
-  built on it must say so on its face.
-- **Fix:** Relabel the figure axes/captions to "Held-out **effective** CoT-control" (and define
-  "effective control" in one short clause in the Fig 1 caption), or add "(effective control;
-  see §3)" to each caption.
+### 3. Run-internal names and coinages appear in reader-facing places
+- **Location:** Figure 5 caption (`faith_against@0.75`, "n=21", `reliance_eval_heldout_judged...`);
+  body uses "deliverable" 7×, "carrier" 1×, "five-row control-only asymmetry" 1×; Appendix uses
+  `cdel`, `ctrldel`, `gL10`, `gL10ctrl`, `randL10s0`, etc.
+- **What's wrong:** The writing instructions forbid run-internal shorthand anywhere a reader looks,
+  including figure captions. `faith_against@0.75` in the Figure 5 caption is exactly this. "The
+  deliverable fine-tune," "carrier/probe instructions," and "a documented five-row control-only
+  asymmetry" are run-internal terms a reader cannot decode (I could not even locate the "five-row
+  asymmetry" definition in the artifacts; the closest is the 3373 vs 3368 control/compliant row counts).
+- **Fix:** Replace `faith_against@0.75` in the caption with plain English ("the concealment vector
+  at steering strength 0.75"). Replace "deliverable fine-tune" with "the main fine-tuned model,"
+  "carrier instructions" with "the instructions that drive the gain (bullet and brevity)," and
+  either define or delete the "five-row control-only asymmetry" clause. Tags in Appendix file lists
+  are acceptable as filenames, but explain them once.
+
+### 4. The write-up references the research/audit process, not a finished paper
+- **Location:** Appendix A title "Reproducibility and **audited** artifacts"; A.6 header "audit
+  checks performed **for this write-up**"; the bullet "Cost reconciliation: `total_cost.jsonl` sums
+  to **$879.94**, including **$333.95** Modal compute..."; "All paths below are relative to
+  `/source/phase_segment_14_phase_0` **in the audit environment**."
+- **What's wrong:** Instructions say not to reference the agent/research process and to produce a
+  conference-ready product. Dollar-cost reconciliation, "audit checks performed for this write-up,"
+  and the read-only mount path `/source/phase_segment_14_phase_0` are all process artifacts. The
+  mount path is also not a usable repository path for any external reader.
+- **Fix:** Drop the cost bullet and the "audit checks" framing (keep the substantive "we recomputed
+  X from raw JSONL" as a normal reproducibility note). Replace the `/source/...` base path with a
+  neutral repo-relative path or just the directory names.
 
 ---
 
 ## Medium severity
 
-### 4. Run-internal / project-management language that does not belong in a conference paper.
-- **Location:** §4 line 176 ("This is **Deliverable #1**"); §5 line 241 ("This is the
-  **abandoned-approach finding** made precise"); §5 line 188 ("the **run's internal name is
-  `gL10`**"); §5 line 196 header context ("(central result)"); §8 Limitations line ~440
-  ("**Total cost of the project was ≈$880 of a $5,000 budget**").
-- **What's wrong:** "Deliverable #1/#2," "the abandoned-approach finding," the internal vector
-  name `gL10`, and the project budget are artifacts of the research run / proposal management,
-  not paper content. The instructions explicitly ask not to reference the agent/run and to
-  produce a submittable product. The cost-of-project sentence in particular reads as a status
-  report.
-- **Fix:** Delete "Deliverable #1/#2" and "abandoned-approach finding" phrasings; drop the
-  parenthetical internal name from the main body (keep `gL10` only in Appendix H for repro);
-  remove the budget sentence (or move a one-line compute note to an appendix).
+### 5. Appendices are never linked from the main body
+- **Location:** Entire body; the only occurrence of "Appendix" is the section header on line 115.
+- **What's wrong:** The instructions require detailed appendices "correctly linked to throughout the
+  main body." The body cites figure source files but never points the reader to Appendix A.2/A.3/A.4/A.5
+  for the relevant experiment.
+- **Fix:** Add inline links, e.g. "(reproduction details in Appendix A.2)" after §2, "(Appendix A.3)"
+  after §3, "(Appendix A.4)" in §4, "(Appendix A.5)" in §5.
 
-### 5. Figure 3 mixes "uplift" and "level," and mixes 39-task and 100-task numbers, so the bars are not on one scale.
-- **Location:** Figure 3 (lines 246–250) and `make_figs.py:fig_gradient_vs_dom`.
-- **What's wrong:** The y-axis says "Held-out CoT-control **uplift** (pp)." The gradient-trained
-  "trained instruction types" bar is plotted at **13.3**, but in the source
-  (`grad_steer_heldout_hg1_analysis.md`) 13.3% is the *within-category macro level*; the
-  *uplift* is **+11.3 pp**. The other bars (diff-of-means single +13.8, multi +26.2, fine-tune
-  within +10.0) are uplifts. So one bar is a level and the rest are uplifts. Separately, the
-  caption admits the steering rows are the 39-task comparison while the fine-tune is the
-  100-task deliverable — i.e. four bars drawn on a shared axis come from two different evaluation
-  sets and two different definitions. This undercuts the figure's core comparison.
-- **Fix:** Use the uplift (+11.3) for the gradient within bar; ideally recompute all four bars on
-  one task set and one definition, or clearly annotate each bar's n and that they are uplifts.
+### 6. Two unreconciled "base reasoning-trace compliance" numbers (6.8% vs 1.6%)
+- **Location:** Intro ("complies 6.8%... and 76.3%" — also Results §1) vs Intro/§2/§3 ("from 1.6%").
+- **What's wrong:** §1/Figure 1 report base reasoning-trace compliance of **6.8%**; the headline
+  result reports base **1.6%**. Both are "how often the base model follows a reasoning-trace
+  instruction." They differ ~4× because 6.8% is *raw compliance* over 4 casing/suppression
+  instructions (`cot_vs_output_summary_main.json`, mean_cot=0.0676) while 1.6% is *effective control*
+  over the 9 held-out instructions. A reader will think the numbers contradict.
+- **Fix:** State explicitly that the two are different metrics on different instruction sets, or use
+  one consistent base number and footnote the other.
 
-### 6. Figure 6 over-claims relative to its own bars, uses inconsistent denominators with the text, and hides its (very different) sample sizes.
-- **Location:** Figure 6 (lines 380–387); §7 Findings 2–3.
-- **What's wrong:**
-  (a) The title is "Concealment fools CoT readers," but the red "CoT-reading monitor, steered"
-  bars are **68%** (left) and **39%** (right) — i.e. the monitor still catches a majority/large
-  share. Those bars are the naive monitor's catch over **all** cue-following traces
-  (`faith_eval`: base mon_naive 99→68; `reliance_eval`: 78→39), whereas the §7 headline ("fools")
-  is the **7%/0%** catch on the **concealed subset**. The figure and the prose use different
-  denominators, so the figure visually contradicts the "fools" claim.
-  (b) The left panel (n=404, wrong-answer) and right panel (n=56, hard-to-verify) come from
-  different experiments with very different sample sizes; neither n is on the figure or in the
-  caption.
-  (c) The base CoT-reading bars differ (99 left vs 78 right) for unexplained reasons (different
-  settings/monitors); the caption does not say why.
-- **Fix:** Either plot the catch rate **on concealed traces** (the quantity that supports
-  "fools"), or change the title to a population-level claim and add the concealed-subset numbers
-  to the caption; put n on each panel; explain the 99-vs-78 base difference in the caption.
+### 7. "Statistically indistinguishable from the fine-tuned model" oversells a null result
+- **Location:** Intro and §3 ("statistically indistinguishable... paired difference +0.4 pp,
+  95% CI [−1.9, +2.8]"); Takeaway 1–2.
+- **What's wrong:** This is a *failure to reject* a difference (the artifact reports `p_gt_0`=0.36 for
+  steering−fine-tuning), reported as positive equivalence. Also, "matches the fine-tuned model" holds
+  only in the 9-instruction macro: per-instruction (Figure 3 / `steer_deliverable_gL10.json`) the
+  profiles differ — steering gets brevity 69% vs fine-tuning 61%, bullet 48% vs 52%, and
+  `no_word_so` 0% vs 3%.
+- **Fix:** Say "not significantly different (95% CI [−1.9, +2.8] pp)" rather than "indistinguishable,"
+  and note the aggregate match conceals per-instruction profile differences (which §3 partly does, but
+  the intro does not).
 
-### 7. Undefined or non-standard jargon that the instructions specifically ask to define or replace.
-- **Location and terms:**
-  - "**north-star** metric" (§3, line 115) — hype/jargon; replace with "primary/strictest metric."
-  - "**carrier instructions**" (§5 robustness, line ~309; Figure B caption, line 520) — never
-    defined. A reader does not know these are bullet/terse/numbered. Define on first use or name
-    them.
-  - "**direct-logit-attribution** profile cosine 0.94" (§6, line ~318) — undefined mech-interp
-    term in the main body. Define in one clause or move to Appendix J.
-  - "the useful **write** direction is not the **read**/representational direction" (§6) — coined
-    write/read-direction contrast used without definition.
-  - "**teacher-forcing**," "**residual stream**," "**logits**" used without a one-line gloss for a
-    reader outside the subfield.
-- **Fix:** Add a short gloss on first use, or push the term into the relevant appendix.
+### 8. Body "47%" vs Figure 5 "50%" for the claim-checking monitor look contradictory
+- **Location:** §5 last paragraph ("a claim-checking monitor catches **47%** [29, 65]") vs Figure 5
+  bar ("Claim-checking reader catches concealed traces (n=20) **50%**").
+- **What's wrong:** 47% is the pooled clean-dose subset (n=44, `faith+reliance@0.75`); 50% is the
+  single `faith_against@0.75` arm (n=20). Both are correct but the figure doesn't say it's a different
+  (smaller) subset, so the two numbers read as a discrepancy.
+- **Fix:** In the Figure 5 caption note that the figure shows the single concealment-vector arm, while
+  the text's 47% is the pooled estimate; or use the same subset in both.
 
-### 8. The abstract omits the central scoping caveat (reachability, not a cheaper attack).
-- **Location:** Abstract (lines 5–22).
-- **What's wrong:** The abstract stresses "2,880 numbers, zero weight change" and "reproduces the
-  fine-tuning result," but the load-bearing caveat — stated forcefully in §7 ("this is a
-  **reachability** result, **not a cheaper attack**: the concealment vector needs the same
-  concealing training targets and white-box gradients that fine-tuning would") — is absent. A
-  reader of only the abstract will think the result is a cheap intervention, not one that
-  requires the same supervised data and gradients as the fine-tune (and Opus-built targets).
-- **Fix:** Add one clause to the abstract: the vector still requires the same complying training
-  targets and white-box gradients as fine-tuning; the novelty is that the resulting object is a
-  single residual direction with zero weight change.
+### 9. Benchmarks and GSM-Symbolic used without citations
+- **Location:** Methods ("GSM8K, MATH, MMLU-Pro, OpenBookQA, ARC-Challenge, and ReasonIF"); §3 and
+  Limitations ("GSM-Symbolic math variants that reduce memorization concerns").
+- **What's wrong:** GSM-Symbolic is invoked as a memorization control but never cited; the other
+  benchmarks are also uncited. (Note: the source list differs from the proposal — adds GSM8K and
+  ARC-Challenge, drops CoTControl-QA — which is fine but worth a word.)
+- **Fix:** Add a citation for GSM-Symbolic at minimum, and ideally for the benchmark sources, in
+  References.
+
+### 10. Third reference is incomplete
+- **Location:** References, third entry ("Cue-based unfaithfulness evaluations cited in the project
+  proposal. https://arxiv.org/pdf/2501.08156").
+- **What's wrong:** Instructions require author/title + link. This entry has neither author nor title.
+- **Fix:** Give the actual author/title for arXiv:2501.08156 (the cue-based faithfulness paper named
+  in the proposal).
 
 ---
 
-## Low severity
+## Lower severity
 
-### 9. Incomplete citation for arXiv:2501.08156.
-- **Location:** §7 (line ~336) and References (final list).
-- **What's wrong:** The reference is given only as "Cue-based chain-of-thought faithfulness
-  evaluations, arXiv:2501.08156" with no authors or title, although the monitoring section builds
-  its paradigm on it. Every other reference has author/title.
-- **Fix:** Supply the verified author/title (from the proposal/source) or drop it if it cannot be
-  verified; do not cite a methodological basis with a bare arXiv id.
+### 11. Figure 2 data labels overlap the error-bar caps
+- **Location:** `fig2_headline_effective_control.png` — the "13.9%" and "14.3%" labels sit on top of
+  the upper error-bar caps; the "9" and "3" digits are visually struck through.
+- **Fix:** Place value labels above the error-bar tops, or drop the in-bar labels and rely on the axis.
 
-### 10. "Honestly," and similar conversational tics.
-- **Location:** §4 line 177 ("**Honestly**, the *aggregate* is carried by..."); §5 uses a similar
-  register.
-- **What's wrong:** Throat-clearing / first-person register the instructions ask to cut.
-- **Fix:** Delete "Honestly," and state the fact directly ("The aggregate is carried by 2–3
-  instructions...").
+### 12. Figure 2 control bars are unexplained
+- **Location:** Figure 2 bars "Fine-tuning control" and "Steering control"; caption.
+- **What's wrong:** A reader doesn't know these are the *raw-trace / non-complying-target* controls;
+  the caption never says what "control" means.
+- **Fix:** One caption sentence: "Controls are trained on the same prompts but with non-complying
+  reasoning traces (fine-tuning) / on those traces (steering)."
 
-### 11. §3 (Methods) does not mention the CoTControl-QA → ARC-Challenge substitution.
-- **Location:** §3 "Tasks and accuracy," line ~126 (lists six sources including ARC-Challenge);
-  the substitution is only explained in Appendix D.
-- **What's wrong:** The proposal named CoTControl-QA, not ARC-Challenge; a reader comparing to the
-  proposal sees an unexplained swap until Appendix D. Worth one clause in the main text since it
-  is a deviation from the planned setup.
-- **Fix:** Add "(ARC-Challenge substitutes for CoTControl-QA, which was unavailable as a question
-  set; Appendix D)" in §3.
+### 13. Figure 1 caption omits n and which instructions are averaged
+- **Location:** Figure 1 caption.
+- **What's wrong:** The 6.8% / 76.3% are means over four formatting instructions, two of which are
+  exactly 0% in the trace (`all_caps`, `all_lower`); the figure hides this. No n is given.
+- **Fix:** Add "averaged over four formatting instructions (n shown in Appendix A.1)" or similar.
 
-### 12. Figure 1 control bars are effectively invisible.
-- **Location:** Figure 1 (lines 199–207).
-- **What's wrong:** The three control bars (trained-on-control, random −0.1, sign-reversed) sit at
-  ~0 and render as empty slots; a reader cannot see them or tell them apart. The caption carries
-  all the information. This is defensible (the controls are null) but the figure communicates
-  little for three of its five x-ticks.
-- **Fix:** Either annotate the three null bars with their values ("0.0", "−0.1", "0.0") above the
-  axis, or consolidate them into a single "controls (≈0)" element and spend the space on the two
-  real bars.
+### 14. Undefined abbreviations on first use
+- **Location:** "MCQ" (4×, §5 and Limitations), "pp" (percentage points, throughout), borderline
+  "LoRA," "DLA/direct-logit-attribution," "logit-lens."
+- **What's wrong:** MCQ and "percentage points (pp)" are not spelled out on first use; a careful
+  reader outside the subfield must infer them. "direct-logit-attribution" and "logit-lens" are
+  interpretability jargon used without a one-line gloss.
+- **Fix:** Define MCQ ("multiple-choice question") and "pp" on first use; add a half-sentence gloss
+  for direct logit attribution and the logit lens, or cite them.
 
-### 13. "cosine <0.10 with the difference-of-means directions" is marginally contradicted by one value.
-- **Location:** §6 (line ~324); cross-check `direction_geometry.md`.
-- **What's wrong:** The suppression-category diff-of-means cosine is **−0.100** (i.e. |0.10|, not
-  strictly <0.10); the FT-vs-base direction is **+0.171** (well above 0.10), and the write-up
-  correctly excludes FT-vs-base from the "<0.10" set but the blanket "<0.10 with the
-  difference-of-means directions" is off by the suppression case.
-- **Fix:** Say "≤0.10" or "below ~0.1 for all but the suppression direction (−0.10)".
+### 15. Figure 5 is text-heavy and has no legend for its color groups
+- **Location:** `fig5_hard_to_verify_monitorability.png`.
+- **What's wrong:** Per the figure guidance, push detail to the caption: the `(n=…)` counts are in
+  every y-axis label. The four color groups (gray = base, dark blue = concealment arm, light blue =
+  monitors, orange = claim-checker) carry meaning but there's no legend, so color is decorative/confusing.
+- **Fix:** Move the n's to the caption; either add a short legend explaining the color grouping or use
+  a single color since the y-labels already disambiguate.
+
+### 16. "Effective reasoning control" is a coined metric not tied to the replicated quantity
+- **Location:** Methods (definition) and throughout.
+- **What's wrong:** The metric is defined (good), but it is the write-up's own name; the replication
+  framing would be clearer if it were related to Chen et al.'s "CoT controllability" / "CoTControl."
+- **Fix:** On first use, note "effective reasoning control (our stricter version of CoT
+  controllability)."
+
+### 17. Title/intro slightly broader than the result
+- **Location:** Title "...can reproduce fine-tuning-induced format control of a reasoning trace";
+  intro "format control."
+- **What's wrong:** "Format control" reads as general; the effect is concentrated in two simple
+  formats (bullet lines, brevity) and five of nine held-out instructions stay flat. The body says this
+  clearly, but the title/intro do not hedge.
+- **Fix:** Either qualify ("control of a few simple reasoning-trace formats") or make the
+  concentration explicit in the first intro sentence about the result (it currently appears only later).
 
 ---
 
-## Things checked and found correct (so the review is not mistaken for blanket doubt)
-- Steering headline +12.8 pp [+10.7,+14.9], base 1.6→14.3, FT 13.9, paired gL10−FT +0.4
-  [−1.9,+2.8], bullet 0→48% (McNemar p<0.001), raw 2.1→15.7% — all match
-  `steer_deliverable_gL10.md`.
-- CoT-vs-output gap 6.8% vs 76.3% and the per-instruction values in Figure 4 match
-  `cot_vs_output_summary_main.md`; per-100-word check (3.59 vs 0.05) matches.
-- Mechanism shares (pattern 71/62%, value 20/16%; ≈100% knockout; DLA cosine 0.94; 92% FT
-  knockout; experts ≤8%) match `mech_qkov.md` / `mech_ft_compare.md`.
-- No-instruction side-effect (498→766 words, degeneration 11%→20%) matches the deliverable table.
-- Few-shot baseline 0% vs FT 42.4% on the 3-instruction subset matches `fewshot_compare_fs1.md`.
-- Per-instruction Figure 2 bars all match the deliverable table.
+## Checks performed (for the reviewer's record)
+- Verified: Fig 1 (6.8/76.3), Fig 2 (1.6/13.9/14.3/0.3/0.0, CIs, steering−FT +0.4 [−1.9,+2.8],
+  null mean −0.1 / max +1.0), accuracy (86.3/88.4/91.5), no-instruction length 498→766 and degenerate
+  11→20%, comply-and-correct +11.1pp, per-source positivity (all six), few-shot 0% (K=4),
+  mechanism (71/20/6/3%, FT block 92%, DLA cosine 0.94), and all monitorability numbers in §5 and
+  Figure 5 (100→62, 100→68, 92.7, 318w, 93/54, 80→82, 47% [29,65] pooled, 33%/17% floors,
+  style-anomaly 41%, no-hint 32% vs 23%). All matched the artifacts.
+- `faith_ctrl` is indeed a shuffled/mismatched-target ("trained-on-control twin") vector, consistent
+  with the body's "shuffled-target control" caveat.
+- Both `.png` and `.pdf` exist for all five figures; none use multiple subplots.

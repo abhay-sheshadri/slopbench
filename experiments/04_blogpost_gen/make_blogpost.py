@@ -48,11 +48,15 @@ ROOT = HERE.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src import DEFAULT_MODEL, audit_agent  # noqa: E402
+from src import audit_agent  # noqa: E402
 
-# The write-up is a writing/judgement task -> default to Claude Opus 4.8.
-# Override with BLOGPOST_MODEL or --model.
-BLOGPOST_MODEL = os.environ.get("BLOGPOST_MODEL", DEFAULT_MODEL)
+# Explicit, independent model choices for the two roles (not tied to the shared
+# project-wide constants, so neither silently shifts if those change):
+#   - author/fix: writing task -> GPT 5.5 pro.
+#   - reviewer:   red-teaming/judgement task -> Claude Opus 4.8.
+# Override with BLOGPOST_MODEL / REVIEWER_MODEL env vars or --model / --reviewer-model.
+BLOGPOST_MODEL = os.environ.get("BLOGPOST_MODEL", "openai/gpt-5.5-pro")
+REVIEWER_MODEL = os.environ.get("REVIEWER_MODEL", "anthropic/claude-opus-4-8")
 
 _JINJA = Environment(
     loader=FileSystemLoader(HERE / "prompts"),
@@ -74,7 +78,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "run_dir", help="Path to a run/project dir (must contain .pi_transcripts/)."
     )
-    ap.add_argument("--model", default=BLOGPOST_MODEL)
+    ap.add_argument("--model", default=BLOGPOST_MODEL, help="Author/fix model.")
+    ap.add_argument(
+        "--reviewer-model",
+        default=REVIEWER_MODEL,
+        help="Model for the red-team reviewer (default: Claude Opus 4.8).",
+    )
     ap.add_argument("--thinking", default=audit_agent.THINKING_DEFAULT)
     ap.add_argument(
         "--review-rounds",
@@ -117,13 +126,13 @@ def main() -> None:
     print(
         f"Run dir:  {run_dir}\n"
         f"Work dir: {work}\n"
-        f"Model: {args.model} | thinking: {args.thinking} | timeout: {timeout} | "
+        f"Author model: {args.model} | reviewer model: {args.reviewer_model}\n"
+        f"thinking: {args.thinking} | timeout: {timeout} | "
         f"review rounds: {args.review_rounds}",
         flush=True,
     )
 
     common = dict(
-        model=args.model,
         thinking=args.thinking,
         timeout=args.timeout,
         on_log=lambda m: print(m, flush=True),
@@ -139,6 +148,7 @@ def main() -> None:
         render("author.md.j2"),
         session="session.jsonl",
         log_name="agent_stdout_author.log",
+        model=args.model,
         **common,
     )
     if not writeup.exists():
@@ -154,6 +164,7 @@ def main() -> None:
             work,
             render("reviewer.md.j2", review_file=review_file),
             session=f"reviewer_round{rnd}.jsonl",
+            model=args.reviewer_model,
             **common,
         )
         if not (work / review_file).exists():
@@ -169,6 +180,7 @@ def main() -> None:
             render("fix.md.j2", review_file=review_file),
             session="session.jsonl",  # resume the author conversation
             log_name=f"agent_stdout_fix_round{rnd}.log",
+            model=args.model,
             **common,
         )
         if not writeup.exists():

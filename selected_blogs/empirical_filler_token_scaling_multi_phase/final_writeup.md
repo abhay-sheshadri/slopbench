@@ -1,504 +1,151 @@
-# Filler tokens do not buy parallel thinking: a model spends one question's worth of hidden compute on one question
-
-## Summary
-
-When a language model answers a math problem with **no chain-of-thought** — the answer is the
-literal first token it emits — it gets a single forward pass of computation at the answer
-position. Padding the prompt with meaningless **filler tokens** (e.g. `1 2 3 ... 300`) before the
-answer measurably raises this no-chain-of-thought accuracy, as if the extra positions give the model
-somewhere to do hidden computation ([Redwood Research, 2026](https://blog.redwoodresearch.org/p/recent-llms-can-use-filler-tokens);
-[Pfau et al., 2024](https://arxiv.org/abs/2404.15758)). We ask whether that hidden computation can be
-**shared across several questions at once**: given *k* difficulty-matched questions that share one
-fixed pool of filler tokens, does each question keep the full single-question boost (parallel
-thinking), or does the boost shrink as the questions divide the pool?
-
-On Claude Opus 4.5, the single-question filler boost is large (up to **+35 percentage points** on
-our headline sum-of-products task). But it **does not spread across questions.** When eight questions share one filler
-pool and one is revealed at random *after* the filler, the per-question boost is near zero
-(**+2.5 pp**, ~7% of the single-question boost) — far below both the "parallel" prediction (+35 pp)
-and the "divided-pool" prediction (+14 pp). The model behaves as if it banks **at most one question's
-worth** of filler computation, committed to a **single** question, never a pool that grows with the
-number of questions. *Where* that single-question budget lands depends on framing: if the target is
-named before the filler, that question gets a large boost; if the model is told one question will be
-picked at random, it banks almost nothing; if it is not told, it defaults to banking ~one question's
-worth on the **first-listed** question. The effect is a genuine, difficulty-sensitive computation, but
-its precise mechanism (true hidden computation vs. a graded reallocation of attention) is not pinned
-down by behavioral evidence alone.
-
----
-
-## 1. Introduction
-
-A transformer answering "immediately," with no visible reasoning, has only the compute in one forward
-pass at the answer position to work with. [Pfau et al. (2024)](https://arxiv.org/abs/2404.15758)
-("Let's Think Dot by Dot") showed that inserting meaningless filler tokens (e.g. repeated dots) in
-place of a chain-of-thought can nonetheless improve performance on certain problems — the model uses
-the extra token positions as scratch space for **hidden computation** that never appears in the
-text. The effect was strongest for problems whose solution is naturally **parallelizable**, and
-absent in the models they tested before 2024.
-
-[Redwood Research (2026)](https://blog.redwoodresearch.org/p/recent-llms-can-use-filler-tokens)
-reported that recent frontier models show this effect on math: padding a no-chain-of-thought prompt
-with filler tokens (counting, dots, or a repeated copy of the problem) raises math accuracy — for
-example Claude Opus 4.5 improving from 45% to 51% with roughly 300 filler tokens, with accuracy
-rising as filler is added and then degrading once there is too much.
-
-If a model can do real hidden computation in filler positions, a natural question is **how much** such
-computation it can do, and whether it can be **multiplexed**. This work tests one sharp version: can
-the model do **several questions' worth of hidden computation in parallel** from a single filler
-budget? Concretely, give the model *k* difficulty-matched questions followed by *n* shared filler
-tokens, then ask for the answer to just one of them, and compare the per-question boost to the
-single-question boost at the same total filler. Two clean hypotheses bracket the outcome:
-
-- **Parallel thinking:** the per-question boost does not care how many questions share the filler —
-  each question keeps the full single-question boost.
-- **Divided pool:** the filler is one fixed pool of computation split across the questions, so each
-  question only gets the boost it would have received from its *share* of the filler.
-
-We report which regime the model lands in, and a control that turns out to be central: whether the
-model knows *which* question it will be asked **before** vs. **after** seeing the filler.
-
-**Preview of results.** (1) We reproduce the single-question filler boost cleanly on Opus 4.5 and show
-it is **selective** — it helps deep multi-digit arithmetic, not tasks that merely aggregate many easy
-checks. (2) When questions share a filler pool and the target is revealed afterward, the per-question
-boost is far below the divided-pool prediction at every *k* we tested: **there is no parallel thinking,
-and not even an even divided split.** (3) The boost is almost entirely contingent on the model
-*knowing which question to compute*: a question named before the filler is boosted; an undirected one
-is not. (4) Whether the model banks anything undirected depends on a single sentence of framing. We
-also characterize the effect as a genuine, dose-responsive, difficulty-sensitive computation, while
-being explicit about what behavioral evidence cannot settle.
-
----
-
-## 2. Methods
-
-### 2.1 Task
-
-The primary task is **procedural arithmetic**, generated on the fly rather than drawn from a fixed
-benchmark, so there is no memorization confound and difficulty can be tuned to keep baseline accuracy
-in a measurable middle band. The headline task is a **sum-of-products**: add three two-digit-by-two-digit
-products, e.g. `95 * 33 + 51 * 54 + 30 * 80` (answer 8289). We chose it because its single-question
-filler boost rises **gradually** with filler (rather than saturating in a few tokens) and because, in
-the multi-question setting, it keeps every question's accuracy off the ceiling — both needed to tell
-the regimes apart (Appendix A). A second arithmetic task — **adding fifteen six-digit numbers** — is
-carried as a secondary, consistency check.
-
-### 2.2 Genuine no-chain-of-thought
-
-The premise requires that the answer be **literally the first content token** the model emits. We
-enforce this with **assistant prefill**: the prompt is seeded so the model's next generated token is
-the answer itself (no room to reason first), extended reasoning is turned off, and the output is
-capped at a few tokens. We verified genuineness on over one million outputs: a populated reasoning
-field appears in 0% of cases, the first parsed integer equals one of the question's input numbers
-(the signature of digit-initial "show your work") in under 0.4%, and silent truncation in under 0.2%
-(Appendix B).
-
-### 2.3 Filler
-
-Filler is inserted before the answer. The default is **counting** (`1 2 3 ...`); **dots**
-(`. . . .`) are used as a robustness check. Filler length is reported in **realized tokens** measured
-from the model's input-token count, not in raw characters (counting filler on Opus is 2 tokens per
-number). "Filler tokens" throughout means these realized tokens.
-
-### 2.4 The shared-filler design
-
-Each multi-question prompt lists *k* difficulty-matched questions, labeled Q1…Q*k*, followed by the
-shared filler, followed by a request to answer exactly one of them. We read **only that single
-answer**. Two conditions:
+# Filler-token benefits are not shared across questions in parallel
 
-- **Reveal-after** (the parallel-thinking test): the target is chosen **at random and named only after
-  the filler**, by index ("Now answer Q3:") without restating the question text. During the filler the
-  model does not know which question it will be asked, so any boost must come from computation it
-  banked without direction.
-- **Reveal-before** (the control): the same *k* questions are present, but the target is **named before
-  the filler**. This isolates the value of *knowing the target* from the value of the filler itself.
-
-Revealing by index (not by reprinting the question) keeps the question text in a fixed position before
-the filler, so the comparison to the single-question case is not confounded by placing a fresh copy of
-the target next to the answer. We verified the model answers the asked question (it matches a distractor
-0% of the time) and that recalling "which question is Q3" is trivial.
-
-By default the prompt **tells** the model up front that it will be asked exactly one of the questions,
-chosen at random, and to be ready for any ("told" framing). We later vary this (Section 4.5).
-
-### 2.5 Metrics
-
-For a single question with *n* filler tokens, the **single-question boost** is
-
-  *B₁(n)* = accuracy(1 question, *n* filler) − accuracy(1 question, no filler).
-
-For *k* questions sharing *n* filler tokens, the **per-question boost** *B_k(n)* is the analogous
-quantity for the single revealed question, baselined at that same *k*'s own no-filler accuracy. The two
-bracketing predictions are:
-
-- **Parallel** reference: *B₁(n)* — the full single-question boost, regardless of *k*.
-- **Divided-pool** reference: *B₁(n/k)* — the single-question boost evaluated at the per-question
-  *share* of the filler.
-
-The pre-registered headline statistic was a **sharing exponent** that interpolates between these
-(parallel = 0, divided = 1); as explained below it is ill-defined when the measured boost is near zero,
-so we instead report the three-way classification (parallel / divided / near-null) directly against the
-two references, plus the **directedness contrast** = (reveal-before boost) − (reveal-after boost).
-
-**Position-resolved reading.** A subtle artifact forced a refinement. The no-filler baseline is *not*
-constant across the *k* listed positions: a later question has several preceding questions in its
-context, and those act as filler for it, so late positions start from a higher baseline and have less
-room to improve, while the first question (Q1) starts low. Averaging the per-question boost over a
-random reveal therefore mixes a real effect with this position structure. We report boosts **resolved
-by listed position**, using as the primary read an **early pool** (the first ⌈*k*/2⌉ positions, which
-stay off the ceiling) and co-reporting **Q1 only** (Appendix C). All accuracies are in **percentage
-points (pp)**; confidence intervals are 95% cluster bootstraps over the drawn problem instances.
-
-### 2.6 Models
-
-The headline model is **Claude Opus 4.5** (`claude-opus-4-5-20251101`), which shows the strongest
-reported effect and supports prefill. A cross-model check uses the open model **DeepSeek-V3-0324**
-(`deepseek/deepseek-chat-v3-0324`) via OpenRouter, with reasoning disabled and the serving provider
-pinned to a homogeneous, non-quantization-degraded cluster (Appendix F explains why pinning is
-necessary). Every result re-streams from cache at no additional API cost (Appendix G).
-
----
-
-## 3. Replicating the single-question filler boost
-
-Before testing sharing, we confirmed the basic effect on our harness. On Opus 4.5 with genuine
-no-chain-of-thought, adding ~300 counting filler tokens (prefill) raised accuracy on every arithmetic
-task we tried, by a large and statistically clear margin (Figure 1): **+30 pp** on adding fifteen
-six-digit numbers (from a 49% baseline), **+22 pp** on adding twelve ten-digit numbers, **+17 pp** on
-adding fifteen eight-digit numbers, and **+11 pp** on multiplying two four-digit numbers. It also held
-on grade-school word problems from **GSM-Hard** ([Gao et al., 2022](https://arxiv.org/abs/2211.10435)),
-**+13 pp**. All of these exclude zero. (GSM-Hard is a public dataset and so is not memorization-free;
-we use it only as a harness check that the boost is not specific to our generated arithmetic, not as a
-clean reasoning benchmark — see Limitations.)
-
-![Figure 1](final_plots/fig1_replication_selectivity.png)
-
-**Figure 1. Filler tokens boost no-chain-of-thought arithmetic, but not aggregation.** Accuracy gain
-from ~300 counting filler tokens (Opus 4.5, prefill; 95% CI; 500 problems per arithmetic/word-problem
-task, 400 for the aggregation task). The five arithmetic and word-problem tasks (blue) all improve.
-"Count correct" (grey) — a task that asks how many of six independent yes/no checks are true, which
-aggregates many easy operations rather than doing one deep computation — shows **no** boost
-(+0.0 pp, 95% CI [−5.8, +6.0]) even though its no-filler baseline (47%) matches the six-digit-addition
-task (49%). Filler helps a single deep computation, not the breadth of many shallow ones.
-
-This **selectivity** sharpens the [Pfau et al. (2024)](https://arxiv.org/abs/2404.15758)
-"parallelizable computation" framing and argues against a generic format artifact: if filler merely
-made the model "try harder" or fixed an output-format problem, the aggregation task should benefit too.
-It does not.
-
-The single-question boost as a function of filler length is shown in Figure 2 for the sum-of-products
-task (measured inside the multi-question chat structure, *k*=1). It rises steeply, **peaks at about
-+35 pp around 200 filler tokens**, and then declines slightly — there is no further gain from piling on
-filler. This curve is what the divided-pool and parallel predictions are read from.
-
-![Figure 2](final_plots/fig2_single_question_curve.png)
-
-**Figure 2. The single-question filler boost rises, peaks near +35 pp, then declines.** Accuracy gain
-vs. filler length for one sum-of-products question (Opus 4.5, no chain-of-thought; markers are the
-measured grid points, error bars 95% CI). The boost rises steeply below ~50 tokens (already ~+13 pp at
-25 tokens) and peaks near 200 tokens.
-
----
-
-## 4. Results
-
-### 4.1 Headline: shared filler buys no parallel thinking — and not even an even split
-
-The central experiment gives the model *k* = 8 sum-of-products questions, 200 shared filler tokens, and
-reveals one at random afterward. If the model did each question's hidden computation in parallel, the
-revealed question would keep the full single-question boost (+35 pp). If the filler were a pool divided
-evenly across the eight questions, each would get the boost from its share (200/8 = 25 tokens →
-+14 pp). **Neither happens.** The measured undirected per-question boost is **+2.5 pp**
-([+1.2, +3.7], early pool) — about **7%** of the single-question boost, statistically just above zero
-but scientifically near-null, and roughly **10 standard errors below the divided-pool prediction**
-(Figure 3). On two cleaner measurements — the first listed question alone, and the subset of problem
-instances never seen during piloting — it is indistinguishable from zero (+1.2 [−1.1, +3.6] and
-+0.9 [−1.1, +2.9]).
-
-![Figure 3](final_plots/fig3_headline_regime.png)
-
-**Figure 3. Eight questions sharing one filler pool: no parallel thinking.** Per-question accuracy gain
-at *k* = 8, 200 filler tokens (sum-of-products, Opus 4.5). Grey/orange are the two predictions read off
-the single-question curve (parallel = full boost; divided-pool = boost from a 1/8 share). The measured
-**undirected** boost (red, target revealed after the filler) sits near zero, far below both. For
-contrast, the measured **directed** boost (green, target named before the filler) is large — see
-Section 4.2. Error bars are 95% CIs (the two prediction bars carry the single-question reference's own
-bootstrap uncertainty); the dashed line separates the shared-pool experiment (left three bars,
-reveal-after) from the reveal-before control (right bar).
-
-The robust statement across *k* is that the undirected per-question boost is **far below the
-divided-pool prediction at every *k*** we tested (Appendix D). The per-*k* trend is **not** a clean
-monotone decline: the less-shared *k* = 2 retains the most (+7.8 pp, ~23% of the single-question boost),
-*k* = 8 retains ~7% (+2.5 pp), but the *k* = 4 early-pool average is actually negative (−4.0 pp) because
-of the position artifact described below (its first-question-only estimate is ~0). We therefore report
-"far below divided at every *k*", not a smooth gradient. Because the pre-registered sharing exponent
-(which would quantify *how* shared the pool is) is only defined when the boost is an appreciable
-fraction of the curve, and here it collapses to near zero, we report it as **undefined at this
-near-null** rather than forcing a number (a pre-registered contingency). Replotting the per-*k* boosts
-against either total filler or filler-per-question collapses the lines onto the single-question curve
-in **neither** case — the signature of neither parallel nor divided sharing.
-
-### 4.2 Directedness: the boost is far larger for a known target
-
-The undirected near-null has two possible explanations: the model cannot *bank* shared computation, or
-it can bank it but cannot *aim* it without knowing the target. The reveal-before control separates
-these. When the very same *k* = 8 prompt **names** the target before the filler, the revealed question
-gets a large boost (**+18.7 pp**), so the **directedness contrast** is **+16.2 pp**
-([+14.3, +18.3]) — robustly positive (Figure 4). The contrast is positive at every *k* we tested. It
-also holds on the secondary task (adding fifteen six-digit numbers): the *k* = 8 contrast is **+31.9 pp**
-(or, on the headroom-robust logit scale, +1.50), one of three pre-registered confirmatory tests — so
-the directedness finding generalizes across task families, even though that task's *undirected* regime
-is muddied by ceiling and recency effects and is not interpretable on its own.
-
-![Figure 4](final_plots/fig4_directedness_by_k.png)
-
-**Figure 4. Knowing the target greatly increases the boost.** Per-question accuracy gain for *k* = 2,
-4, 8 sum-of-products questions at each *k*'s operating filler length (Opus 4.5, 95% CIs). Green = target
-named **before** the filler (directed); red = target revealed **after** (undirected). Directed is large
-and positive throughout. Undirected is much smaller: positive but only ~23% of the single-question
-boost at *k* = 2, and near zero at *k* = 8. (At *k* = 4 the early-pool undirected average dips negative
-because of the position artifact of Section 2.5; the first-question-only estimate is ~0.)
-
-So the robust, falsifiable statement is: **the model uses filler computation much more effectively
-when it knows which question to compute.** It does bank *some* undirected computation when few
-questions share the filler (~23% retained at *k* = 2), but this falls to near-null once many questions
-share it (*k* = 8). The directedness reading is
-suggestive of genuinely banked, aimable computation, but a positive contrast is also consistent with
-the reveal timing changing how attention is allocated — behavioral data cannot fully separate these
-(Section 5).
-
-### 4.3 Where the single-question budget lands depends on framing
-
-Whether the model banks anything *undirected* turns out to hinge on one sentence. Our default prompt
-**tells** the model that one of the questions will be picked at random and to be ready for any. If we
-**remove that disclosure** ("not told"), the undirected behavior changes sharply: the model banks
-roughly one question's worth of filler computation on its **first-listed question Q1** — a boost of
-**+26.3 pp** ([+23.0, +29.6]) at *k* = 8, versus **+1.2 pp** under the told framing (Figure 5). This
-+26 pp is about 68% of the *not-told* single-question boost (+38.5 pp; note this is the not-told
-baseline, which differs slightly from the +35 pp told curve in Figure 2) — **~one question's worth,
-concentrated on one question**, not spread across the eight.
-
-![Figure 5](final_plots/fig5_framing_position.png)
-
-**Figure 5. Undirected, the model banks filler on its first question — unless told a random one is
-coming.** Per-position filler boost at *k* = 8, 200 tokens (sum-of-products, Opus 4.5). Blue = "not
-told" a random question is coming; grey = "told." Not told, the model concentrates a large boost on Q1
-and nothing on the rest. Told, even Q1 is suppressed. Late positions (Q6–Q8) go negative under both
-framings because explicit filler erases the recency advantage those positions had from the preceding
-questions (Section 2.5).
-
-A third "disclose" condition — disclosing the random target but dropping the "be ready for any"
-encouragement — behaves like the told framing (Q1 boost +2.0), pinning the driver to the **random-target
-disclosure** itself, not the encouragement. Intuitively: once any question might be quizzed, Q1 is no
-longer a safe place to invest the filler.
-
-Crucially, this **refutes** a too-strong reading of Section 4.1 ("the model banks no undirected
-computation") as a framing-general claim, while leaving the **anti-parallel core intact**: under
-*neither* framing does the model bank more than ~one question's worth. Not told, it concentrates that
-one question's worth on a single position (the opposite of an even divided split); told, it suppresses
-even that.
-
-### 4.4 Robustness
-
-The anti-parallel result survives the pre-planned variations (Appendix D):
-
-- **More values of *k*.** Holding total filler fixed and reading the boost as more questions share it,
-  the undirected per-question boost stays far below the divided-pool prediction at every
-  *k* ∈ {2, 3, 4, 6, 8, 16}. It is not an artifact of the {2, 4, 8} grid.
-- **Filler type.** Using dots instead of counting gives the same qualitative picture (undirected boost
-  far below its divided reference; directedness contrast positive). Dots are a uniformly weaker filler
-  inside the multi-question structure — an unexplained interaction we document but did not resolve.
-- **Cross-model.** On the open model DeepSeek-V3-0324, the *structure* partially replicates: the
-  directedness contrast is positive (emerging at *k* ≥ 4), and the undirected boost declines with *k* and
-  falls below its divided reference at *k* = 4, 8. But the magnitude differs — DeepSeek banks more
-  undirected computation (~39% retention at *k* = 8 vs. Opus's ~7%), and the comparison is confounded
-  because DeepSeek's filler boost is only clean on a different (faster-saturating) arithmetic task, so
-  cross-model differences cannot be cleanly attributed to the model alone.
-
-### 4.5 What kind of computation is this?
-
-Several diagnostics (Appendix E) characterize the banked benefit, while stopping short of a proven
-mechanism:
-
-- **Genuine, not a format/length artifact.** It is selective (Section 3); it is not a reduced
-  give-up rate (the model essentially never declines to answer); and the directed boost **scales with
-  filler amount** (a directed question's boost rises from roughly zero at ~25 tokens to ~+27 pp at
-  ~300 tokens, tracking the single-question curve), which a simple step-change in attention would not
-  produce.
-- **Difficulty-selective.** At a fixed directed condition the boost **rises with item difficulty** (on
-  sum-of-products it grows from +7 to +16 pp across difficulty quartiles) at a roughly flat baseline —
-  filler selectively helps the more computation-bound items.
-- **Positional default.** The undirected default target is **positional, not content-based**: the same
-  item gets +25 pp at position Q1 and −18 pp at Q8.
-- **An interference cap.** Even when directed, an in-context question's boost is much smaller than the
-  lone single-question boost. In a controlled comparison (same item, fixed position), the lone
-  no-distractor directed boost is **+43 pp**; as soon as one or more distractor questions are present it
-  falls to roughly **55–70% of that (≈ +24 to +30 pp**: +23.6 at *k* = 2, +30.1 at *k* = 4, +25.3 at
-  *k* = 8). The drop appears at the first distractor, so the cap is mostly the multi-question structure,
-  not progressive load. (This +43 pp lone boost is measured at a fixed item and position, so it differs
-  from the +35 pp position-averaged grid peak of Figure 2.)
-
-We therefore describe the effect as a **genuine, dose-responsive, difficulty-sensitive computation
-committed to one question.** We deliberately do **not** claim it is "parallel latent thinking"
-(disfavored), nor that the computation provably occurs *at* the filler positions: a graded reallocation
-of attention is not formally excluded, and the cleanest evidence is specific to Opus on the
-sum-of-products task. The decisive tests — a length-matched random-filler control and probing of the
-model's internal activations at the filler positions — require model internals and are out of scope
-here.
-
----
-
-## 5. Takeaways
-
-1. **No parallel latent thinking.** A recent frontier model does not do several questions' worth of
-   hidden filler computation in parallel. When *k* questions share a filler pool, the per-question
-   benefit on an undirected target is far below even an *even* split of the pool — the model banks at
-   most ~one question's worth, committed to a single question.
-
-2. **Directedness is what filler computation needs.** The single most predictive factor for whether
-   filler helps a question is whether the model *knows that question is the target* during the filler.
-   A named target is boosted; an undirected one gets much less — near-null once many questions share the
-   filler (the directedness contrast is robustly positive).
-
-3. **A one-sentence framing change moves the budget.** Whether the model banks anything undirected
-   depends on whether it is told a random question is coming. Not told, it defaults to banking on its
-   first-listed question; told, it suppresses even that. This is a concrete, reproducible example of a
-   trivial prompt change reshaping where hidden computation is spent.
-
-4. **The single-question effect is real and selective.** We reproduce the filler boost cleanly and show
-   it is specific to deep multi-digit computation, not to aggregating many shallow checks — a
-   refinement of the prior "parallelizable computation" story.
-
-For the original question — parallel, divided, or null — the verdict under the pre-registered framing is
-the **near-null** outcome (the model does not bank undirected computation it cannot direct), with the
-deeper, framing-independent conclusion being **no parallel sharing and no growing pool**.
-
-## 6. Limitations
-
-- **Mechanism is strengthened, not proven.** A graded-attention account is not formally excluded, and
-  the cleanest genuine-computation evidence is Opus- and sum-of-products-specific. Settling this needs
-  internals-level probing.
-- **One clean task family for the absolute regime.** The sum-of-products task is the only one that
-  stays off the ceiling across *k*; the cross-model check is on a different task, so model and task are
-  confounded.
-- **No clean reasoning-bound positive control.** The boost is validated on arithmetic-precision and
-  word-problem tasks; a decontaminated competition-math set was not obtained (AIME 2025 was contaminated
-  and underpowered).
-- **A weak held-out test set.** The headline cell's truly never-seen subset of problem instances is
-  small (~350 instances, giving ± ~3 pp), enough to confirm the boost is far below the divided
-  prediction but not to crisply split "null" from "tiny positive."
-
----
-
-## Appendix A — Tasks, difficulty calibration, and why sum-of-products
-
-Tasks are procedurally generated with a deterministic loader; each level has 5,000 items with full
-metadata, and downstream draws use a held-out slice disjoint from the calibration slice. Difficulty is
-tuned so the no-filler no-chain-of-thought baseline lands in a measurable middle band (~40–55%).
-
-Two properties decide which level can separate the parallel and divided predictions. First, the
-single-question boost must keep **rising over a wide filler range** so the divided prediction *B₁(n/k)*
-takes an intermediate value rather than collapsing to the threshold. Second, in the multi-question
-prompt, no listed position may **ceiling**. Fast-saturating addition (e.g. adding fifteen eight-digit
-numbers, where the boost is essentially complete by ~7 tokens) fails the second test: with distractor
-questions acting as preceding filler, late positions reach ~100% and additive comparison becomes
-meaningless. The **sum-of-products** task (three two-digit products summed, baseline ~40%) is the only
-level whose single-question boost rises gradually (Figure 2) and whose every position stays off the
-ceiling across *k*; it is the headline level. Adding fifteen six-digit numbers is a secondary check
-(off-ceiling, but with a documented per-position anomaly at high *k* tied to arithmetic-carry effects,
-so its undirected regime is not interpretable on its own).
-
-## Appendix B — Harness and no-chain-of-thought enforcement
-
-The answer is forced to be the first emitted token by **assistant prefill** (seeding the assistant turn
-so generation begins at the answer), with extended reasoning disabled and output capped at a few
-tokens. Answers are parsed as the first integer; for tasks that occasionally emit spaced digits a
-robust reassembling parser is used (verified not to inflate the boost). Genuineness was audited over
->1M outputs: 0% populated reasoning field; <0.4% "genuine violations" (first parsed integer equals an
-input number, i.e. digit-initial show-your-work); <0.2% truncation; the model answers the asked
-question 100% of the time and never a distractor. Filler length is the realized input-token delta, not
-character count.
-
-## Appendix C — Statistics and the position-resolved reading
-
-The inference unit is the drawn problem **instance**; CIs are cluster bootstraps over instances
-(4,000 resamples, fixed seed, percentile intervals). The single-question references are bootstrapped
-and linearly interpolated to the realized filler length, so comparisons carry the reference's own
-uncertainty (the ~10σ gap to the divided prediction includes this). The divided reference at
-*n/k* = 25 tokens sits on the steep rising part of the single-question curve, so its interpolation
-uncertainty may be slightly underestimated; the ~11 pp gap is far larger than any plausible
-interpolation error, so the exclusion is robust even if the exact σ is not. Boosts are reported on both
-the raw-accuracy (additive) and logit scales; they agree in classification.
-
-The position artifact (Section 2.5) is why the primary read is position-resolved. In a *k*-question
-prompt the preceding questions act as filler for later positions, so the no-filler baseline **rises**
-with listed position (e.g. at *k* = 8: Q1 ≈ 20%, Q6 ≈ 39%, Q7 ≈ 51%). Adding explicit filler then
-**erases** the late-position recency advantage, driving those positions negative. Averaging over a
-random reveal therefore mixes this with any real effect. The **early pool** (first ⌈*k*/2⌉ positions)
-and **Q1-only** reads isolate the off-ceiling, unconfounded positions.
-
-## Appendix D — Per-cell tables (headline level, told framing, counting filler)
-
-Sum-of-products, Opus 4.5, early-pool reveal-after boost *B_k*, with the divided and parallel
-references (percentage points; 95% CI):
-
-| *k* | filler (tokens) | filler/question | undirected *B_k* | divided *B₁(n/k)* | parallel *B₁(n)* | reveal-before | directedness contrast |
-|---|---|---|---|---|---|---|---|
-| 2 | 100 | 50 | +7.8 [+5.5, +10.1] | +23.6 | +33.5 | +18.8 | +10.9 [+7.8, +13.9] |
-| 4 | 200 | 50 | −4.0 [−6.2, −1.8] | +23.6 | +35.5 | +20.2 | +24.2 [+21.2, +27.2] |
-| 8 | 200 | 25 | +2.5 [+1.2, +3.7] | +13.7 | +35.5 | +18.7 | +16.2 [+14.3, +18.3] |
-
-The *k* = 4 early-pool average is depressed by the second listed position (a transitional position
-affected by the recency artifact); its Q1-only estimate is +0.1 [−2.9, +3.2]. In all cells the
-undirected boost is far below the divided reference and the directedness contrast is clearly positive.
-
-Robustness (fixed total filler 200 tokens, undirected per-question boost vs. divided reference):
-*k* = 2 +6.8 vs. +33.5; *k* = 3 −2.9/Q1 +4.1 vs. +26.9; *k* = 4 to 16 all far below their divided
-references. Dots filler reproduces the qualitative pattern.
-
-## Appendix E — Mechanism diagnostics
-
-- **Dose-response (directed):** the reveal-before Q1 boost rises monotonically with filler length
-  (≈ −2 pp at 24 tokens → +27 pp at 300 tokens), tracking the single-question curve, disfavoring a
-  pure step-change in attention.
-- **Difficulty-selectivity:** on sum-of-products, the directed boost rises across max-product
-  difficulty quartiles (+6.7 → +10.8 → +14.7 → +16.2 pp) at a roughly flat (~48–52%) baseline.
-- **Positional default:** re-ordering a fixed item to positions Q1/Q2/Q4/Q8 under the not-told framing
-  gives +25.1 / −2.1 / +3.0 / −18.0 pp — the boost follows position, not content.
-- **Interference cap:** the lone (no-distractor) directed boost is +43 pp (fixed item and position);
-  with distractor questions present it falls to +23.6 (*k* = 2), +30.1 (*k* = 4), +25.3 (*k* = 8) pp,
-  i.e. ~55–70% of the lone boost, the drop arriving at the first distractor. Read on the logit scale
-  (which is robust to the baseline shift from questions acting as filler) the same pattern holds.
-- These are exploratory and Opus-/sum-of-products-leaning; on adding six-digit numbers the selectivity
-  carries a baseline confound, and on DeepSeek it is absent.
-
-## Appendix F — Cross-model details and an OpenRouter caveat
-
-DeepSeek-V3-0324 was selected after surveying nine recent open models; most do not show a clean filler
-boost under *genuine* no-chain-of-thought (some reason anyway; one strong model is genuinely *hurt* by
-clean no-chain-of-thought). DeepSeek's boost is clean only on a "four ten-digit numbers added" task
-(baseline ~52%), at modest magnitude (counting +5.2 pp, dots +5.7 pp). A methodological caveat that
-transfers: **unpinned OpenRouter routing across heterogeneous provider quantizations roughly doubled
-the apparent boost** — a low-accuracy quantized cluster served disproportionately many no-filler calls,
-depressing the baseline. Pinning to a homogeneous high-accuracy provider cluster (DeepInfra / ModelRun /
-SiliconFlow) is mandatory for any such evaluation and is what the cross-model numbers above use.
-
-## Appendix G — Reproduction
-
-The science is fully cached and re-streams at $0. Pipeline: the canonical datasets and loader → the
-locked pre-registration (sample sizes, operating points, decision rules) → the Opus main run
-(274k calls) → the regime/directedness verdict → the cross-model, robustness, and mechanism analyses.
-Every headline number traces to a per-cell CSV; figures here were regenerated directly from the raw
-result files.
-
----
+## Introduction
+
+Recent language models can sometimes improve their answer when meaningless text is inserted before the answer position. Redwood Research reported that no-chain-of-thought math accuracy rises when prompts include filler such as `1 2 3 ... 300` before the model emits its answer ([Redwood Research, 2026](https://blog.redwoodresearch.org/p/recent-llms-can-use-filler-tokens)). This is related to the “dot-by-dot” result of Pfau, Merrill, and Bowman, where transformer models can use filler positions for hidden computation on some synthetic tasks ([Pfau et al., 2024](https://arxiv.org/abs/2404.15758)).
+
+The question here is whether this filler-enabled benefit can be used for several questions at once. If a model sees one question plus *n* filler tokens, its accuracy gain is `B₁(n)`. If it sees *k* questions sharing the same total *n* filler tokens, and only one question is revealed after the filler, there are three natural outcomes: the benefit could be preserved for each question (`B_k(n) ≈ B₁(n)`, parallel use), divided across questions (`B_k(n) ≈ B₁(n/k)`), or mostly absent (`B_k(n) ≈ 0`).
+
+The main result is negative for parallel sharing. On Claude Opus 4.5, under the pre-registered random-target-disclosure prompt, the primary early-position estimate at *k*=8 was small but statistically positive: **+2.5 accuracy points**. This is far below **+13.7** predicted by an even divided pool and **+35.5** for a single question; the Q1-only and held-out prompt-instance estimates were statistically consistent with zero. Later framing experiments showed that if the prompt does **not** disclose that a random target will be asked, the model commits roughly one question’s worth of benefit to the first listed question, not to all questions. The robust conclusion is that filler benefit is not spread across questions in parallel: it is directed to one question when the target is known, or defaults to the first listed question when no random-target disclosure is given.
+
+## Methods
+
+**Tasks and models.** The primary model was `claude-opus-4-5-20251101` at temperature 0, with extended thinking disabled. The primary task was a **sum-of-three-products task**: all-positive sums of three products of two-digit numbers (source tag `sumprod_t3_d2`). This task was chosen because it stayed away from ceiling and floor effects in multi-question prompts. A secondary Opus task was **15-term, 6-digit addition** (source tag `add_n15_d6`). A cross-model check used DeepSeek-V3-0324 on OpenRouter, provider-pinned to a homogeneous cluster to avoid mixing providers serving different quantizations, on **4-term, 10-digit addition** (source tag `add_n4_d10`). DeepSeek was selected after screening several OpenRouter models; other candidates either lacked a clean filler benefit under genuine no-chain-of-thought prompting or could not enforce no-chain-of-thought reliably.
+
+**No-chain-of-thought enforcement.** The answer was forced to be the first content token by ending the assistant prefill (a pre-supplied assistant prefix) with `The answer to Qj is`. Outputs were scored by the first integer emitted. A robust parser was used only for rare spaced-digit answer formatting in the sum-of-three-products task; visible work was still scored wrong. Across all main and follow-up k-question runs (>1M outputs; the main Opus grid was 274k calls), reasoning fields were empty; headline-cell visible-work violations were below 0.04% and scored wrong.
+
+**k-question prompt.** Each prompt listed *k* labelled questions (`Q1...Qk`). The filler was an assistant turn placed before the target reveal. The main **reveal-after** condition then asked, for example, `Now answer Q3:` by index only. In the **reveal-before** control, the target index was named before the filler, so the model knew which question to use the filler for. The adopted reveal turn was intentionally minimal; an earlier verbose reveal turn suppressed the filler effect and was abandoned. Exact prompt text is in Appendix B.
+
+**Metrics.** The filler benefit is an accuracy difference in percentage points:
+
+- `B₁(n) = accuracy(one question, n filler) − accuracy(one question, no filler)`.
+- `B_k(n) = accuracy(k-question prompt sharing n filler) − accuracy(k-question prompt with no filler)`, averaged over the early-position pool defined below.
+- The **divided-pool prediction** is `B₁(n/k)`.
+- The **single-question prediction** is `B₁(n)`.
+- The **directedness contrast** is `B_k(reveal-before) − B_k(reveal-after)`, each net of its own no-filler baseline.
+
+“Filler length” means the actual token count measured from the model API after tokenization. The plotted operating points are the pre-registered (*k*, filler-length) settings used for the primary test. The main estimate used the first `ceil(k/2)` listed positions (“early positions”), because later listed questions are closer to the answer position at zero filler (a recency advantage) and explicit filler erases that advantage. Q1-only and aggregate estimates were always reported as robustness checks. Confidence intervals are cluster bootstraps over drawn prompt instances unless noted.
+
+## Results
+
+### 1. We reproduced a large single-question filler benefit on procedural arithmetic
+
+This is a conceptual replication of the filler-token phenomenon on generated arithmetic, not a replication of Redwood’s original competition-math benchmark. On the structure-matched one-question version of the sum-of-three-products task, `B₁(200)` was **+35.5 accuracy points**. Earlier calibration found large single-question boosts across several procedural arithmetic families: multi-operand addition, multiplication, and sum-of-products. The effect was selective: it helped deep multi-digit arithmetic much more than a matched-baseline **count-correct** task, where the model had to count how many small equations were correct. This gave the main experiment enough signal to distinguish sharing hypotheses.
+
+### 2. Under random-target disclosure, shared filler was far below even a divided pool
+
+The pre-registered main condition disclosed that exactly one randomly chosen question would be asked and encouraged readiness for any question. In that condition, reveal-after benefits were small or negative across *k*, far below both references (Figure 1). At *k*=8, the measured early-position benefit was **+2.5** points [95% CI +1.2, +3.7], compared with **+13.7** for the divided-pool prediction and **+35.5** for the single-question prediction. The divided reference was excluded by an ~11-point margin (about 10 standard errors, including uncertainty in the single-question curve; the reference lies on a steep part of that curve, so the exact sigma should not be over-read). The Q1-only estimate was **+1.2** [−1.1, +3.6], and the held-out prompt-instance subset was **+0.9** [−1.1, +2.9]. The Bonferroni-corrected confirmatory intervals also held: the k=8 regime interval was **+2.5** [+0.9, +4.0] and the directedness contrast interval was **+16.2** [+13.9, +18.8].
+
+![Figure 1: Shared filler gives much less benefit than either reference prediction.](final_plots/fig1_opus_told_regime.png)
+
+*Figure 1. Opus 4.5 on the sum-of-three-products task under the pre-registered random-target-disclosure prompt. Points are pre-registered operating settings, not a common filler-length sweep: k=2 uses 100 actual filler tokens; k=4 and k=8 use 200. Error bars are 95% cluster-bootstrap confidence intervals. The k=4 dip is a position-composition effect: its early-position pool includes a transitional position affected by recency erasure. The divided-pool prediction is `B₁(n/k)`; the single-question prediction is `B₁(n)`.*
+
+The planned sharing-exponent fit was abandoned because the pre-registered requirement that `B_k` be positive enough to fit the exponent failed: near-zero `B_k` makes `n_eff = n/k^α` ill-defined. Here α would have parameterized an effective filler length `n_eff = n/k^α`, with α=0 meaning no sharing penalty and α=1 meaning an even divided pool.
+
+The anti-sharing result was robust within the random-target-disclosure framing. In a fixed-200-token sweep over *k* ∈ {2,3,4,6,8,16}, the reveal-after benefits stayed far below the divided-pool references; the sequence was not cleanly monotone, but none approached divided-pool spreading. A **dots filler** check, where the filler consisted of repeated `.` characters rather than counting tokens, strengthened the result: at *k*=8, dots gave **−3.3** points [−4.5, −2.2] versus a divided-pool reference of **+24.2**, while the reveal-before contrast remained positive (**+21.7** [+19.9, +23.6]).
+
+### 3. The model used filler when it knew the target
+
+The reveal-before control showed that the filler machinery still worked in the same multi-question prompts. When the target index was named before the filler, the filler benefit was large and positive at every tested *k* (Figure 2). At *k*=8, reveal-before gave **+18.7** points, while reveal-after gave **+2.5**, for a directedness contrast of **+16.2** [+14.3, +18.3]. The 15-term addition task also showed a positive directedness contrast, though its absolute magnitude is harder to interpret because that task has carry-error and headroom issues.
+
+![Figure 2: Filler is useful when the target is revealed before the filler.](final_plots/fig2_directedness_contrast.png)
+
+*Figure 2. Opus 4.5 on the sum-of-three-products task at the same per-k operating settings as Figure 1. Both series are net of their own no-filler baseline. Naming the target before the filler produces a much larger benefit than revealing the target after the filler.*
+
+The model can use filler in the k-question prompt when the computation can be directed to a named target, but it does not spread that computation over all possible targets under random-target disclosure.
+
+### 4. Removing the random-target disclosure changes where the benefit goes, not whether it is parallel
+
+A robustness experiment removed the sentence saying that one randomly chosen question would be asked. Under this **no-disclosure** framing, the model committed a large filler benefit to Q1, the first listed question. At *k*=8 on the primary Opus task, Q1’s reveal-after benefit rose from **+1.2** points with random-target disclosure to **+26.3** points without disclosure. A follow-up “disclosure only” arm, which kept the random-target disclosure but removed the encouragement to be ready for any question, behaved like the original disclosed condition. This isolates the disclosure—not the encouragement—as the suppressor of default Q1 computation. Position resolution is essential here: without disclosure the k=8 early-position average was near the divided reference, but the per-position boosts were concentrated on Q1 (**+26.3**) while Q2–Q5 were small (largest **+5.6**) and Q6–Q8 were negative.
+
+![Figure 3: Random-target disclosure suppresses default Q1 computation.](final_plots/fig3_disclosure_q1_banking.png)
+
+*Figure 3. k=8, Q1-only. Q1 is the first listed question. “Disclosure + encouragement” is the pre-registered prompt; “Disclosure only” removes the encouragement clause but still says a random target will be asked; “No disclosure” removes that information. The three series are different task/model settings, so the comparison is qualitative: the same sign pattern appears on Opus sum-of-three-products, Opus 15-term addition, and DeepSeek 4-term addition, with smaller magnitudes off the primary task.*
+
+Thus the claim “the model never uses filler for an unknown target” is false: without random-target disclosure, it uses filler for Q1. But this still is not parallel latent thinking. The benefit is concentrated on one position, not spread across the *k* questions.
+
+### 5. Behavioral evidence that the filler benefit is task-relevant computation
+
+Behavioral checks favor a real task-relevant filler effect rather than a pure formatting artifact. When the target was revealed before the filler, the benefit increased with filler length and tracked the single-question curve (Figure 4). The benefit was also larger on items with larger two-digit products in the sum-of-three-products task, while no-filler accuracy stayed roughly flat across that split (Figure 5). Fixed-item reordering showed that the no-disclosure default is positional: the same item received a large boost at Q1 and not at later positions.
+
+![Figure 4: Directed filler benefit rises with filler length.](final_plots/fig4_directed_dose_response.png)
+
+*Figure 4. Opus 4.5, sum-of-three-products task, k=8. The target-revealed-before-filler benefit rises with filler length, though it remains below the single-question reference, consistent with a multi-question context cap.*
+
+![Figure 5: Filler benefit rises with product magnitude.](final_plots/fig5_difficulty_selectivity.png)
+
+*Figure 5. Opus 4.5, sum-of-three-products task, target revealed before filler. Items are grouped by the largest two-digit × two-digit product in the expression. No-filler accuracy was nearly flat across these quartiles (52% to 48%), so the rising benefit is not explained by extra headroom. This clean product-magnitude gradient did not reproduce on DeepSeek, where the corresponding benefit was flat, and the addition-task gradient was partly confounded by headroom.*
+
+These checks do not prove where the computation occurs. A graded attention or retrieval account is not fully excluded, and the experiments do not localize computation to the filler positions themselves.
+
+### 6. DeepSeek partially reproduced the structure, with smaller effects
+
+DeepSeek-V3-0324 showed a smaller single-question filler effect on a different arithmetic level. The qualitative structure partially reproduced: at *k*=4 and *k*=8, the Q1 reveal-after benefit was below the divided reference, and the reveal-before contrast was positive. However, the effects were much smaller: at *k*=8 Q1, reveal-after was **+3.4** points, about **39%** of DeepSeek’s single-question benefit, and the Q1 directedness contrast was **+1.9** [+0.2, +3.6]. The cross-model comparison is confounded with task level: Opus used a gradual sum-of-products task, while DeepSeek used fast-saturating addition. DeepSeek also had a k=2 exception: its k=2 contrast was near zero and its undirected benefit was close to the single-question benefit, but this cell is not diagnostic because DeepSeek’s single-question curve saturates quickly, making the parallel and divided references nearly identical. The directedness asymmetry emerged at k≥4.
+
+## Takeaways
+
+1. **No evidence of parallel sharing.** In no diagnostic condition did the model spread one filler budget into *k* full per-question benefits. DeepSeek at k=2 had full retention, but that cell could not separate parallel from divided because the single-question curve was already saturated.
+2. **No even divided-pool spreading.** Under the pre-registered random-target disclosure, measured `B_k` was far below `B₁(n/k)`. Without disclosure, the model concentrated roughly one question’s worth of benefit on Q1, which is the opposite of evenly dividing computation across questions.
+3. **Directed target information matters.** Revealing the target before the filler reliably made filler useful.
+4. **Prompt disclosure matters.** Telling the model that the target will be random suppresses its default Q1 computation.
+5. **The effect is computationally meaningful but not mechanistically resolved.** Dose-response, the product-magnitude gradient on the primary task, and positional reordering support real task-relevant computation; they do not settle whether the mechanism is hidden arithmetic in filler positions, graded attention allocation, or another internal process.
+
+## Limitations
+
+- The clean absolute regime result rests mainly on one Opus arithmetic family, the sum-of-three-products task. Secondary and cross-model results support the structure but have smaller or messier effects.
+- The DeepSeek comparison changes both model and task level, so differences in magnitude cannot be cleanly attributed to model architecture or training.
+- The study validates arithmetic-precision filler benefits. It does not provide a clean decontaminated competition-math replication.
+- The multi-question prompt itself caps the directed benefit: in a fixed-item probe the directed boost dropped from about +43 points with one question to +24–30 points once distractors were present. This means the single-question reference is a useful benchmark but not fully attainable inside the k-question context.
+- The decisive mechanistic tests would require stronger controls or model internals, such as random content-matched filler and activation or logit-lens probes.
+- The headline cell was pilot-informed. The analysis plan and decision rules were frozen before the full run, but the qualitative outcome was not wholly blind; the held-out prompt-instance subset is directionally consistent with near-null but weakly powered.
+
+## Appendix A: Reproducibility map
+
+The source artifacts are in `/source/phase_segment_12_phase_0`. Key files:
+
+- Pre-registration: `results/preregistration.md`.
+- Prompt construction: `kharness.py`; runner: `run_kquestion.py`.
+- Canonical datasets: `data/*.jsonl`; loader: `canonical.py`.
+- Main Opus run: `results/seg7_*.jsonl`; descriptive summaries: `results/main_run_cells.csv`, `results/main_run_contrast.csv`; validity guards: `results/seg7_guards.md`.
+- Pre-registered verdict: `results/seg8_verdict.md`, `results/seg8_regime_cells.csv`.
+- DeepSeek cross-model check: `results/seg9_verdict.md`, `results/seg9_cells.csv`, `results/seg9_contrast.csv`.
+- Framing and robustness: `results/seg10_verdict.md`, `results/seg10_cells.csv`, `results/seg10_contrast.csv`.
+- Behavioral-computation analyses: `results/seg11_verdict.md`, `results/seg11_framing.csv`, `results/seg11_dose.csv`, `results/seg11_selectivity.csv`.
+
+The headline Opus numbers in this write-up trace to raw JSONL as follows: `seg7_sumprod_k8_after.jsonl` gives reveal-after early `B_k = +2.475` points and Q1-only `+1.2`; `seg7_sumprod_k8_before.jsonl` gives reveal-before early `+18.7`; the paired instance contrast is `+16.225`; the k=1 curve in `seg7_sumprod_k1_after.jsonl` gives `B₁(200)=+35.5`, and the divided reference `B₁(25)=+13.7` is linearly interpolated from that curve.
+
+## Appendix B: Prompt text for the key framing conditions
+
+For *k*>1, the pre-registered disclosed prompt began:
+
+> Here are {k} problems, labelled Q1–Q{k}. In a moment I will ask you to answer exactly ONE of them, chosen at random — so be ready to answer any of them. Do not answer yet.
+
+The **disclosure-only** arm removed the encouragement clause after the dash but kept the random-target disclosure. The **no-disclosure** arm used:
+
+> Here are {k} problems, labelled Q1–Q{k}. Do not answer yet.
+
+In reveal-before prompts, the first turn instead named the target before the filler:
+
+> Here are {k} problems, labelled Q1–Q{k}. You will be asked to answer Q{j}. Do not answer yet.
+
+The final reveal was index-only and minimal:
+
+> Now answer Q{j}:
+
+The assistant prefill immediately before generation was:
+
+> The answer to Q{j} is
+
+## Appendix C: Important design corrections and controls
+
+- **Verbose reveal turn abandoned.** A longer reveal instruction between filler and answer suppressed the boost. The final prompt uses the minimal reveal `Now answer Qj:` with the no-work instruction moved earlier.
+- **Position resolution required.** Distractor questions act like preceding-context filler; later positions can have high no-filler accuracy. The main analysis therefore uses early positions and reports Q1-only and aggregate estimates separately.
+- **OpenRouter provider pinning required.** Unpinned DeepSeek routing mixed provider quantizations and inflated early boost estimates. All final DeepSeek results use a pinned good-provider cluster.
+- **Robust scoring was pre-specified where needed.** Sum-of-products sometimes produced spaced-digit answer formatting; robust parsing reassembles those answer formats but visible work is still scored wrong.
+- **Dots and addition carry effects remain open puzzles.** Dots behaved similarly to counting for single-question benefits but was more disruptive in k-question prompts. The 15-term addition task also showed a large late-position carry-disruption anomaly. These issues do not change the headline but limit mechanistic interpretation.
+- **Cost and reproducibility.** Experiment API spend was about $2168, excluding orchestration. The main Opus grid used 274k calls; cached `--assert-cached` reruns reproduced the main grids at $0 in the source run.
 
 ## References
 
-- Redwood Research (2026). *Recent LLMs Can Use Filler Tokens or Problem Repeats to Improve (no-CoT)
-  Math Performance.* https://blog.redwoodresearch.org/p/recent-llms-can-use-filler-tokens
-- J. Pfau, W. Merrill, S. R. Bowman (2024). *Let's Think Dot by Dot: Hidden Computation in Transformer
-  Language Models.* arXiv:2404.15758. https://arxiv.org/abs/2404.15758
-- L. Gao, A. Madaan, S. Zhou, U. Alon, P. Liu, Y. Yang, J. Callan, G. Neubig (2022). *PAL:
-  Program-aided Language Models* (source of the GSM-Hard dataset). arXiv:2211.10435.
-  https://arxiv.org/abs/2211.10435
+- Redwood Research. “Recent LLMs Can Use Filler Tokens or Problem Repeats to Improve (no-CoT) Math Performance.” 2026. <https://blog.redwoodresearch.org/p/recent-llms-can-use-filler-tokens>
+- Pfau, J., Merrill, W., & Bowman, S. R. “Let’s Think Dot by Dot: Hidden Computation in Transformer Language Models.” arXiv:2404.15758, 2024. <https://arxiv.org/abs/2404.15758>
