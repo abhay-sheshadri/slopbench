@@ -383,10 +383,6 @@ button.danger{background:rgba(247,118,142,.12);border-color:rgba(247,118,142,.4)
 /* header */
 header{display:flex;align-items:center;gap:12px;padding:10px 18px;background:var(--panel);
   border-bottom:1px solid var(--border);flex:0 0 auto;position:relative;z-index:20}
-header .title{font-weight:700;font-size:15px}
-header .title a{color:inherit;text-decoration:none}
-header .viewerlink{font-size:12px;color:var(--muted);text-decoration:none}
-header .viewerlink:hover{color:var(--accent)}
 header .spacer{flex:1}
 
 /* typing indicator: shows in the chat log while the agent works */
@@ -538,11 +534,9 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 </head>
 <body>
 <header>
-  <span class="title">📝 Studio</span>
+  <nav class="appnav"><a href="/">🔎 Runs</a><a class="on" href="/studio">📝 Studio</a></nav>
   <button class="runpick" id="runpick">Select a run ▾</button>
-  <a class="viewerlink" id="viewerlink" href="/">view run transcripts →</a>
   <span class="spacer"></span>
-  <button class="danger" id="stopbtn" disabled>Stop</button>
 </header>
 <div class="picker" id="picker">
   <input id="pickerSearch" placeholder="Filter runs…" autocomplete="off">
@@ -568,6 +562,7 @@ details.think .body2{color:#c8bfe7;font-style:italic}
     <div id="composer">
       <div class="row">
         <textarea id="msg" placeholder="Ask for a passage, a fix, a figure… (/draft = write the whole post)"></textarea>
+        <button class="danger" id="stopbtn" style="display:none" title="Stop the agent's current turn">■ Stop</button>
         <button class="primary" id="send">Send</button>
       </div>
     </div>
@@ -779,12 +774,10 @@ const toggleMode=()=>setMode(mode==="view"?"edit":"view");
 
 // ---- controls / state ----
 function refreshControls(){
-  // The chat opens once the agent has reported back from its first investigation;
-  // after that you can send anytime — messages queue while the agent is working.
-  const chatReady = selected && lastTurns.some(t=>t.role==="assistant");
-  $("#composer").style.display = chatReady ? "" : "none";
-  $("#send").disabled = $("#msg").disabled = !chatReady;
-  $("#stopbtn").disabled = !running;
+  // You can always type — messages queue while the agent is working — and Stop
+  // appears next to Send only when there is a turn to stop.
+  $("#send").disabled = $("#msg").disabled = !selected;
+  $("#stopbtn").style.display = running ? "" : "none";
   $("#delbtn").disabled = !selected || running;
   // You can edit the document whenever a run is selected — even while the agent works.
   editor.readOnly = !selected;
@@ -899,8 +892,6 @@ function bindStream(){
     const was=running; running=d.running;
     renderChat(d.turns);   // may shift the queue / clear `sending` if our msg was recorded
     if(d.doc && d.doc.mtime!==docMtime) loadDoc(false);
-    // Always refresh: composer visibility also depends on the agent having replied,
-    // which can become true without a running-state change (e.g. after a reload).
     refreshControls();
     if(was && !running){
       // if a turn ended but never recorded our sent message, drop it so we don't wedge

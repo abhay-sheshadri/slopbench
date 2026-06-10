@@ -30,6 +30,15 @@ PALETTE_CSS = """:root{
   /* typography */
   --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
   --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,sans-serif;
-}"""
+}
+
+/* Shared segmented nav between the two apps (Runs | Studio): same-tab links,
+   identical look on both pages so switching feels like one site. */
+.appnav{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden;flex:0 0 auto}
+.appnav a{padding:6px 14px;font-size:12.5px;font-weight:700;color:var(--muted);
+  text-decoration:none;background:var(--panel2);transition:.12s;white-space:nowrap}
+.appnav a:hover{color:var(--fg)}
+.appnav a.on{color:var(--fg);background:rgba(122,162,247,.16)}
+.appnav a+a{border-left:1px solid var(--border)}"""
 
 __all__ = ["PALETTE_CSS"]

@@ -1685,7 +1685,8 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);}
 .resizer[hidden]{display:none}
 #lensResizer{grid-column:4}
 .ovbtn{width:100%;display:flex;align-items:center;justify-content:center;gap:8px;background:var(--panel2);border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:9px 10px;margin-bottom:11px;cursor:pointer;font-size:13px;font-weight:700;letter-spacing:.2px;transition:.12s}
-a.ovbtn{text-decoration:none;box-sizing:border-box}
+.sidenav{margin-bottom:11px}
+.sidenav a{flex:1;text-align:center}
 .ovbtn:hover{border-color:var(--accent)}
 .ovbtn.active{border-color:var(--accent);background:var(--panel3);box-shadow:0 0 0 1px var(--accent)}
 .browse-head{display:flex;align-items:center;justify-content:space-between;margin:2px 4px 10px}
@@ -1856,8 +1857,8 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
 <div id="topbar-progress"></div>
 <div class="app">
   <div class="sidebar">
+    <nav class="appnav sidenav"><a class="on" href="/">🔎 Runs</a><a href="/studio" title="Co-write a blogpost about a finished run">📝 Studio</a></nav>
     <button id="overviewBtn" class="ovbtn" title="Status dashboard of all runs">⌂ Overview — all runs</button>
-    <a class="ovbtn studiolink" href="/studio" title="Co-write a blogpost about a finished run">📝 Blogpost Studio</a>
     <div class="browse-head"><h1>Browse</h1><button id="refresh" title="Refresh">⟳</button></div>
     <div id="breadcrumb" class="breadcrumb"></div>
     <input id="filter" class="flt" placeholder="filter…" autocomplete="off">
