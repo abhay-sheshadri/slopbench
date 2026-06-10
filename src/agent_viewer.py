@@ -1685,8 +1685,8 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);}
 .resizer[hidden]{display:none}
 #lensResizer{grid-column:4}
 .ovbtn{width:100%;display:flex;align-items:center;justify-content:center;gap:8px;background:var(--panel2);border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:9px 10px;margin-bottom:11px;cursor:pointer;font-size:13px;font-weight:700;letter-spacing:.2px;transition:.12s}
-.sidenav{margin-bottom:11px}
-.sidenav a{flex:1;text-align:center}
+/* Same compact pill as the studio header so the nav keeps its shape across pages. */
+.sidenav{margin-bottom:11px;width:fit-content}
 .ovbtn:hover{border-color:var(--accent)}
 .ovbtn.active{border-color:var(--accent);background:var(--panel3);box-shadow:0 0 0 1px var(--accent)}
 .browse-head{display:flex;align-items:center;justify-content:space-between;margin:2px 4px 10px}

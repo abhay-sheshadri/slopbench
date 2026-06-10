@@ -381,7 +381,9 @@ button.primary:hover:not(:disabled){background:rgba(122,162,247,.24)}
 button.danger{background:rgba(247,118,142,.12);border-color:rgba(247,118,142,.4);color:var(--err)}
 
 /* header */
-header{display:flex;align-items:center;gap:12px;padding:10px 18px;background:var(--panel);
+/* 12px offsets put the nav pill at the exact spot it occupies in the viewer's
+   sidebar, so it doesn't jump when switching pages. */
+header{display:flex;align-items:center;gap:12px;padding:12px;background:var(--panel);
   border-bottom:1px solid var(--border);flex:0 0 auto;position:relative;z-index:20}
 header .spacer{flex:1}
 
@@ -434,6 +436,9 @@ body.noselect .docbar{opacity:.4;pointer-events:none}
 .turn.user .role{color:var(--user)} .turn.assistant .role{color:var(--assist)}
 .turn.user{border-left:3px solid var(--user)} .turn.assistant{border-left:3px solid var(--assist)}
 .turn .body{padding:4px 13px 10px}
+/* consecutive messages from the same speaker read as one group */
+.turn.cont{margin-top:-7px}
+.turn.cont .body{padding-top:10px}
 .md{line-height:1.6;word-wrap:break-word}
 .md>:first-child{margin-top:0}.md>:last-child{margin-bottom:0}
 .md p{margin:8px 0}.md ul,.md ol{margin:8px 0;padding-left:22px}.md li{margin:3px 0}
@@ -466,7 +471,9 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 .docbar{display:flex;align-items:center;gap:10px;padding:7px 14px;border-bottom:1px solid var(--border);background:var(--panel)}
 #viewtoggle{font-size:12px;padding:4px 13px;color:var(--muted)}
 #viewtoggle:hover:not(:disabled){color:var(--fg)}
-#delbtn{font-size:12px;padding:4px 13px}
+/* destructive + rare: quiet until you aim at it */
+#delbtn{font-size:12px;padding:4px 13px;background:transparent;border-color:transparent;color:var(--faint)}
+#delbtn:hover:not(:disabled){background:rgba(247,118,142,.12);border-color:rgba(247,118,142,.4);color:var(--err)}
 .docbar .spacer{flex:1}
 .meta{color:var(--faint);font-size:11px;font-family:var(--mono);font-variant-numeric:tabular-nums}
 .meta .dot{opacity:.5;margin:0 2px}
@@ -537,6 +544,7 @@ details.think .body2{color:#c8bfe7;font-style:italic}
   <nav class="appnav"><a href="/">🔎 Runs</a><a class="on" href="/studio">📝 Studio</a></nav>
   <button class="runpick" id="runpick">Select a run ▾</button>
   <span class="spacer"></span>
+  <span class="meta" id="cost" title="model spend in this studio conversation"></span>
 </header>
 <div class="picker" id="picker">
   <input id="pickerSearch" placeholder="Filter runs…" autocomplete="off">
@@ -669,8 +677,8 @@ function blockHtml(b,k,live){
 function esc(s){return (s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
 
 // The transcript only updates at message boundaries, so this bubble is the
-// signal that a (possibly long) turn is in flight.
-const TYPING=`<div class="turn assistant typing"><div class="role">Agent</div>`
+// signal that a (possibly long) turn is in flight. cont = joins an agent group.
+const typingHtml=cont=>`<div class="turn assistant typing${cont?' cont':''}">${cont?'':'<div class="role">Agent</div>'}`
   +`<div class="body"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span></div></div>`;
 
 function renderChat(turns){
@@ -699,13 +707,15 @@ function renderChat(turns){
   }
   const parts=display.map((t,ti)=>{
     const who=t.role==="user"?"You":"Agent";
+    const cont=ti>0&&display[ti-1].role===t.role;  // same speaker: group the bubbles
     const last=t.live?t.blocks.length-1:-1;   // the block still streaming in
     const body=t.role==="user"
       ? `<div class="md">${mdToHtml(t.blocks.map(b=>b.text||"").join("\n"))}</div>`
       : t.blocks.map((b,bi)=>blockHtml(b,ti+"."+bi,bi===last)).join("");
-    return `<div class="turn ${t.role}"><div class="role">${who}</div><div class="body">${body}</div></div>`;
+    return `<div class="turn ${t.role}${cont?' cont':''}">${cont?'':`<div class="role">${who}</div>`}<div class="body">${body}</div></div>`;
   });
-  if(running) parts.splice(turns.length,0,TYPING);  // after the turn in flight, before queued msgs
+  if(running)  // after the turn in flight, before queued msgs
+    parts.splice(turns.length,0,typingHtml(turns.length>0&&turns[turns.length-1].role==="assistant"));
   // innerHTML replacement resets every <details>; restore what the user had,
   // and auto-open a NEWLY appeared live block so its stream is visible.
   const known=new Set(), openSet=new Set();
@@ -727,6 +737,7 @@ function renderChat(turns){
 const editor=$("#editor"), preview=$("#preview"), hl=$("#editorHL");
 
 async function loadDoc(force){
+  if(!selected) return;   // keep the "select a run" placeholder; nothing to load
   let d;
   try{ d=await (await fetch(API+"/doc")).json(); }
   catch(e){ return; }   // transient network error: the stream will retrigger us
@@ -840,6 +851,7 @@ let allRuns=[], showGoal=false;   // goal runs are hidden unless toggled on
 async function openPicker(){
   $("#picker").classList.add("show");
   $("#pickerSearch").value=""; $("#pickerSearch").focus();
+  if(!allRuns.length) $("#pickerList").innerHTML='<div class="muted">loading runs…</div>';
   try{ allRuns=(await (await fetch(API+"/runs")).json()).runs||[]; }
   catch(e){ allRuns=[]; toast("network error: "+e.message); }
   drawRuns();
@@ -861,8 +873,10 @@ function drawRuns(){
   list.querySelectorAll(".runitem:not(.disabled)").forEach(b=>b.onclick=()=>chooseRun(b.dataset.path));
 }
 async function chooseRun(path){
+  const rp=$("#runpick"), prev=rp.textContent;
+  rp.textContent="opening…";   // selecting stages the workspace; can take a moment
   const s=await api(API+"/select",{run:path});
-  if(!s) return;
+  if(!s){ rp.textContent=prev; return; }
   closePicker();
   freshUi();
   applyState(s);
@@ -879,7 +893,8 @@ function applyState(s){
   document.title=selected?("Studio · "+s.run_name):"Blogpost Studio";
   running=!!s.running;
   refreshControls();
-  if(!selected){ queue=[]; sending=false; renderChat([]); preview.innerHTML='<div class="empty">Select a run to begin co-writing.</div>'; editor.value=""; syncHL(); updateMeta(); }
+  if(!selected){ queue=[]; sending=false; renderChat([]); $("#cost").textContent="";
+    preview.innerHTML='<div class="empty">Select a run to begin co-writing.</div>'; editor.value=""; syncHL(); updateMeta(); }
 }
 let es=null;
 function bindStream(){
@@ -892,6 +907,7 @@ function bindStream(){
     const was=running; running=d.running;
     renderChat(d.turns);   // may shift the queue / clear `sending` if our msg was recorded
     if(d.doc && d.doc.mtime!==docMtime) loadDoc(false);
+    $("#cost").textContent = d.cost>0.005 ? "$"+d.cost.toFixed(2) : "";
     refreshControls();
     if(was && !running){
       // if a turn ended but never recorded our sent message, drop it so we don't wedge
