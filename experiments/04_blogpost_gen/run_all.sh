@@ -1,7 +1,8 @@
 #!/bin/bash
-# Generate a clean blogpost for every COMPLETED (not live) run under
-# outputs/03_run_agents/. Deletes the existing outputs/04_blogpost_gen/<run>/
-# before regenerating. Run it in tmux; extra args pass through to make_blogpost.py.
+# Generate a clean blogpost for every COMPLETED (not live) multi_phase run under
+# outputs/03_run_agents/ (goal-mode runs are skipped). Deletes the existing
+# outputs/04_blogpost_gen/<run>/ before regenerating. Run it in tmux; extra args
+# pass through to make_blogpost.py.
 #
 #   ./experiments/04_blogpost_gen/run_all.sh                       # all at once (<=50)
 #   CONCURRENCY=1 ./experiments/04_blogpost_gen/run_all.sh         # one at a time
@@ -15,6 +16,7 @@ CONCURRENCY="${CONCURRENCY:-50}"   # max blogpost agents running at once
 
 for run in outputs/03_run_agents/*/; do
   name="$(basename "$run")"
+  [[ "$name" == *_goal ]] && continue                                            # skip goal-mode runs
   [ -f "$run/.pi_transcripts/RUNNING" ] && continue                              # skip live runs
   grep -q '"status": "completed"' "$run/.pi_transcripts/manifest.json" 2>/dev/null || continue
   (

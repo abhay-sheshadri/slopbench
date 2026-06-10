@@ -52,11 +52,11 @@ from src import audit_agent  # noqa: E402
 
 # Explicit, independent model choices for the two roles (not tied to the shared
 # project-wide constants, so neither silently shifts if those change):
-#   - author/fix: writing task -> GPT 5.5 pro.
-#   - reviewer:   red-teaming/judgement task -> Claude Opus 4.8.
+#   - author/fix: writing task -> Claude Fable 5.
+#   - reviewer:   red-teaming/judgement task -> Claude Fable 5.
 # Override with BLOGPOST_MODEL / REVIEWER_MODEL env vars or --model / --reviewer-model.
-BLOGPOST_MODEL = os.environ.get("BLOGPOST_MODEL", "openai/gpt-5.5-pro")
-REVIEWER_MODEL = os.environ.get("REVIEWER_MODEL", "anthropic/claude-opus-4-8")
+BLOGPOST_MODEL = os.environ.get("BLOGPOST_MODEL", "anthropic/claude-fable-5")
+REVIEWER_MODEL = os.environ.get("REVIEWER_MODEL", "anthropic/claude-fable-5")
 
 _JINJA = Environment(
     loader=FileSystemLoader(HERE / "prompts"),
