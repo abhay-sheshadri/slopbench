@@ -1589,6 +1589,11 @@ class Handler(BaseHTTPRequestHandler):
             return {}
 
     def do_POST(self):
+        # Local import: blogpost_studio_web imports back from this module.
+        from src import blogpost_studio_web
+
+        if blogpost_studio_web.handle(self, "POST"):
+            return
         try:
             path = urlparse(self.path).path
             if path == "/api/lens/ask":
@@ -1610,6 +1615,11 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
     def do_GET(self):
+        # Local import: blogpost_studio_web imports back from this module.
+        from src import blogpost_studio_web
+
+        if blogpost_studio_web.handle(self, "GET"):
+            return
         try:
             parsed = urlparse(self.path)
             path = parsed.path
@@ -1675,6 +1685,7 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);}
 .resizer[hidden]{display:none}
 #lensResizer{grid-column:4}
 .ovbtn{width:100%;display:flex;align-items:center;justify-content:center;gap:8px;background:var(--panel2);border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:9px 10px;margin-bottom:11px;cursor:pointer;font-size:13px;font-weight:700;letter-spacing:.2px;transition:.12s}
+a.ovbtn{text-decoration:none;box-sizing:border-box}
 .ovbtn:hover{border-color:var(--accent)}
 .ovbtn.active{border-color:var(--accent);background:var(--panel3);box-shadow:0 0 0 1px var(--accent)}
 .browse-head{display:flex;align-items:center;justify-content:space-between;margin:2px 4px 10px}
@@ -1846,6 +1857,7 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
 <div class="app">
   <div class="sidebar">
     <button id="overviewBtn" class="ovbtn" title="Status dashboard of all runs">⌂ Overview — all runs</button>
+    <a class="ovbtn studiolink" href="/studio" title="Co-write a blogpost about a finished run">📝 Blogpost Studio</a>
     <div class="browse-head"><h1>Browse</h1><button id="refresh" title="Refresh">⟳</button></div>
     <div id="breadcrumb" class="breadcrumb"></div>
     <input id="filter" class="flt" placeholder="filter…" autocomplete="off">
@@ -1946,19 +1958,22 @@ const LENS_MAX_BYTES=1800000;
 function lensReadStore(){
   try{
     const raw=localStorage.getItem(LENS_STORE_KEY);
-    if(!raw)return {convos:{},times:{}};
+    if(!raw)return {convos:{},times:{},jobs:{}};
     const parsed=JSON.parse(raw);
-    const convos={},times={};
+    const convos={},times={},jobs={};
     for(const [id,v] of Object.entries((parsed&&parsed.convos)||{})){
-      if(v&&typeof v.html==="string"){convos[id]=v.html;times[id]=Number(v.updatedAt)||0;}
+      if(v&&typeof v.html==="string"){
+        convos[id]=v.html;times[id]=Number(v.updatedAt)||0;
+        if(v.job)jobs[id]=v.job;   // a job that was still running when we last saved
+      }
     }
-    return {convos,times};
-  }catch(_){return {convos:{},times:{}};}
+    return {convos,times,jobs};
+  }catch(_){return {convos:{},times:{},jobs:{}};}
 }
 const _lensSaved=lensReadStore();
 let state={agentId:null,sess:0,data:null,es:null,path:"",items:[],filter:"",
            panes:{},paneAgent:null,lensOpen:false,lensEs:null,lensJob:null,lensRun:null,
-           lensConvos:_lensSaved.convos,lensConvoTimes:_lensSaved.times,
+           lensConvos:_lensSaved.convos,lensConvoTimes:_lensSaved.times,lensJobs:_lensSaved.jobs,
            view:"overview",overview:[],overviewSig:"",dashPhase:localStorage.getItem("av.dashPhase")||"",
            summaries:{},sumQueue:[],sumActive:0,sumPoll:null,
            tabsCollapsed:(v=>v==="1"?true:v==="0"?false:null)(localStorage.getItem("av.tabsCollapsed"))};
@@ -2097,7 +2112,10 @@ function lensPersistConvos(){
     let ids=Object.keys(state.lensConvos).sort((a,b)=>(state.lensConvoTimes[b]||0)-(state.lensConvoTimes[a]||0));
     ids=ids.slice(0,LENS_MAX_CONVOS);
     const out={version:1,convos:{}};
-    for(const id of ids)out.convos[id]={html:state.lensConvos[id],updatedAt:state.lensConvoTimes[id]||Date.now()};
+    for(const id of ids){
+      out.convos[id]={html:state.lensConvos[id],updatedAt:state.lensConvoTimes[id]||Date.now()};
+      if(state.lensJobs&&state.lensJobs[id])out.convos[id].job=state.lensJobs[id];   // resume this on reload
+    }
     let raw=JSON.stringify(out);
     while(raw.length>LENS_MAX_BYTES&&ids.length>1){
       const drop=ids.pop(); delete out.convos[drop];
@@ -2121,13 +2139,14 @@ function lensLoadConvo(id){
   m.innerHTML=state.lensConvos[id]||LENS_EMPTY;
   m.scrollTop=m.scrollHeight;
 }
-function lensSwitchTo(id){   // save the run we were on, drop any in-flight job, restore the new run's chat
+function lensSwitchTo(id){   // save the run we were on, detach (but DON'T kill) its job, restore the new run's chat
   if(state.lensRun===id)return;
   lensSaveConvo();
-  stopLens(true);
+  lensDetach();          // leave any in-flight job running server-side so switching back resumes it
   state.lensRun=id;
   lensLoadConvo(id);
   lensStatus("");
+  lensResumeIfRunning(id);
 }
 function lensNewChat(){   // start a fresh conversation for the current run
   stopLens(true);
@@ -2169,7 +2188,9 @@ function lensRender(body,data){
   body.innerHTML="";body.appendChild(renderBlocks(blocks));
 }
 function lensStreamJob(job,body,workingMsg,onDone){
+  const owner=state.lensRun;   // the run this job belongs to (chat may be switched away mid-flight)
   state.lensJob=job;lensStatus("reading the run…");
+  if(owner){state.lensJobs[owner]=job;lensPersistConvos();}   // remember it so a refresh can reconnect
   const m=document.getElementById("lensMsgs");
   const es=new EventSource("/api/lens/stream?job="+encodeURIComponent(job));state.lensEs=es;
   es.onmessage=ev=>{let d;try{d=JSON.parse(ev.data);}catch(_){return;}
@@ -2177,10 +2198,32 @@ function lensStreamJob(job,body,workingMsg,onDone){
     lensRender(body,d);
     lensSaveConvo();
     if(pinned)m.scrollTop=m.scrollHeight;
-    if(d.error||!d.running){es.close();state.lensEs=null;lensBusy(false);lensStatus(d.error?"error":"done");if(onDone)onDone(!!d.error);}
+    if(d.error||!d.running){
+      es.close();state.lensEs=null;state.lensJob=null;
+      if(owner){delete state.lensJobs[owner];lensPersistConvos();}   // finished: nothing left to resume
+      lensBusy(false);lensStatus(d.error?"error":"done");if(onDone)onDone(!!d.error);
+    }
     else lensStatus(workingMsg||"investigating…");
   };
-  es.onerror=()=>{};
+  // The browser auto-reconnects an EventSource on transient drops (e.g. the tunnel
+  // resetting a long-lived SSE), so we just keep the busy state and let it retry.
+  es.onerror=()=>{lensStatus(workingMsg||"reconnecting…");};
+}
+// Reattach to a job that was still running when the chat was last left/refreshed.
+function lensResumeIfRunning(id){
+  const job=state.lensJobs&&state.lensJobs[id];
+  if(!job||state.lensEs)return;
+  const m=document.getElementById("lensMsgs"); if(!m)return;
+  const bodies=m.querySelectorAll(".lens-ans .ansbody");
+  const body=bodies.length?bodies[bodies.length-1]:null;
+  if(!body){delete state.lensJobs[id];lensPersistConvos();return;}   // no answer slot to fill
+  lensBusy(true);
+  lensStreamJob(job,body);   // re-reads the job from disk; if already done, renders the final answer and clears it
+}
+// Stop streaming into the UI but leave the server job alive so we can resume later.
+function lensDetach(){
+  if(state.lensEs){state.lensEs.close();state.lensEs=null;}
+  state.lensJob=null;
 }
 async function sendLens(){
   const inp=document.getElementById("lensInput");const q=inp.value.trim();
@@ -2193,9 +2236,12 @@ async function sendLens(){
   if(!res||res.error||!res.job){body.innerHTML='<div class="lens-thinking" style="color:var(--err)">'+esc((res&&res.error)||"failed to start")+'</div>';lensSaveConvo();lensBusy(false);lensStatus("error");return;}
   lensStreamJob(res.job,body);
 }
-function stopLens(quiet){
+function stopLens(quiet){   // explicit Stop / New chat: actually cancel the server job
+  const job=state.lensJob||(state.lensRun&&state.lensJobs[state.lensRun]);
   if(state.lensEs){state.lensEs.close();state.lensEs=null;}
-  if(state.lensJob){fetch("/api/lens/cancel",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({job:state.lensJob})}).catch(()=>{});state.lensJob=null;}
+  state.lensJob=null;
+  if(job)fetch("/api/lens/cancel",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({job:job})}).catch(()=>{});
+  if(state.lensRun&&state.lensJobs[state.lensRun]){delete state.lensJobs[state.lensRun];}
   lensSaveConvo(false);
   lensBusy(false); if(!quiet)lensStatus("stopped");
 }
@@ -2634,6 +2680,10 @@ document.getElementById("lensSend").onclick=sendLens;
 document.getElementById("lensStop").onclick=()=>stopLens();
 document.getElementById("lensInput").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendLens();}});
 window.addEventListener("beforeunload",()=>lensSaveConvo(false));
+// Returning to a backgrounded tab whose SSE the tunnel dropped: re-attach to the running job.
+document.addEventListener("visibilitychange",()=>{
+  if(document.visibilityState==="visible"&&state.lensRun&&!state.lensEs)lensResumeIfRunning(state.lensRun);
+});
 document.addEventListener("click",e=>{
   const img=e.target&&e.target.closest?e.target.closest(".md-img"):null;
   if(img){
@@ -2710,7 +2760,10 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     actual_port = server.server_address[1]
     url = f"http://{args.host}:{actual_port}"
-    print(f"Agent viewer on {url}  (Ctrl-C to stop)", flush=True)
+    print(
+        f"Agent viewer on {url}  ·  blogpost studio on {url}/studio  (Ctrl-C to stop)",
+        flush=True,
+    )
     if args.open:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:

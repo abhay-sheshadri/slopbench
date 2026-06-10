@@ -1,15 +1,15 @@
 """Shared visual theme for the project's web viewers (single source of truth).
 
-Both the agent viewer (``src/agent_viewer.py``) and the planning viewer
-(``experiments/01_eval_planning/viewer.py``) embed :data:`PALETTE_CSS` so they
+The agent viewer (``src/agent_viewer.py``) and the blogpost studio
+(``experiments/06_blogpost_studio/app.py``) embed :data:`PALETTE_CSS` so they
 share one dark color scheme. Each page keeps its own component/layout CSS, but
 every color is driven by these variables, so changing a hue here changes it
 everywhere. Pages insert the palette by replacing the ``/*__PALETTE__*/`` token
 in their ``<style>`` block.
 
-The variable set is a superset of what either page uses, including a few aliases
+The variable set is a superset of what any page uses, including a few aliases
 (``--text`` == ``--fg``, ``--line`` == ``--border``, ``--bad`` == ``--err``) so
-existing rules in both pages resolve without renaming.
+existing rules resolve without renaming.
 """
 
 from __future__ import annotations

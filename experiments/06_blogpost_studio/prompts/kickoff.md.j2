@@ -1,0 +1,24 @@
+We're about to co-write a blogpost about this run, but first I want you to fully
+understand it. Do NOT write the document yet, and do NOT write me a summary — this turn
+is investigation only.
+
+Investigate the run end to end and build a complete, first-hand understanding of what
+happened over its whole course:
+- Read `RUN_DIR_STRUCTURE.md` and `TRACE_INDEX.md` in your CWD, then `/source/proposal.md`
+  (and the overall plan, if present) so you know what the run set out to do.
+- Go through what the run actually did across EVERY phase, not just the final state: the
+  per-phase write-ups, progress logs, and the rolling write_up.md.
+- Don't rely on the write-ups — read the experiment CODE itself and understand it deeply
+  enough to answer detailed questions about it: how the data was built and filtered, the
+  exact prompts and model calls, the training/inference settings, how things were
+  judged/probed/scored, the statistical tests, the ablations and controls. Reconstruct the
+  methods from the code, not from the prose.
+- Verify the headline numbers yourself against the raw result files (.csv/.jsonl/.json);
+  treat the run's own summaries as claims to check, not ground truth. Sample the per-phase
+  transcripts where the prose is ambiguous. Understand every major result, and the
+  important failed/abandoned approaches, well enough to explain them to a reader and to
+  answer follow-up questions about exactly how they were obtained.
+
+When you have finished reading and genuinely understand the run and its code, reply with a
+single word: **ready**. Nothing else — no summary, no outline. I'll then ask you questions
+and we'll write the post together, one piece at a time.

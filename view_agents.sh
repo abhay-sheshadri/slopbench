@@ -3,6 +3,9 @@
 # subagents, run-loop phases, goal-mode state) from running and completed agent
 # runs under outputs/ (read directly off disk; no Docker).
 #
+# The same server also mounts the Blogpost Studio at /studio — chat with an
+# agent and co-write a blogpost about a finished run, live.
+#
 # Usage:
 #   ./view_agents.sh                 # serve on http://127.0.0.1:<random-port>
 #   ./view_agents.sh --port 9000 --open

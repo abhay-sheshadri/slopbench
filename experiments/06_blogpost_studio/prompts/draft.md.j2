@@ -1,0 +1,24 @@
+Produce a COMPLETE draft of the post in this single turn, end to end, the way the batch
+blogpost pipeline would — this is the explicit exception to the usual one-piece-at-a-time
+rule. I'll take over and edit once you're done.
+
+Ground rules for this turn:
+- If you have NOT already investigated this run in this conversation, do that first, in
+  detail: sweep EVERY phase, not just the latest. Read the per-phase write-ups, progress
+  logs, and the rolling write_up.md (the agent's OWN summary — a map, NOT ground truth);
+  audit the actual experiment code and reconstruct the methods from code and artifacts,
+  not prose. Verify headline numbers against the raw .csv/.jsonl/.json result files, and
+  sample the per-phase session transcripts with jq (see RUN_DIR_STRUCTURE.md /
+  TRACE_INDEX.md): at minimum cross-check the single most important claim AND one
+  failed/abandoned approach against what the agent ACTUALLY did.
+- If you HAVE already investigated the run here, rely on that understanding — but either
+  way, do NOT put a number in the draft you haven't traced to a file you opened yourself.
+- If ./final_writeup.md already has content, treat it as the current draft: keep whatever
+  holds up against the writing standards, rewrite or cut the rest. Otherwise start fresh.
+- Write the complete post against the writing standards you were given (a short research
+  note; lead with the simplest true framing), and produce every figure you cite in
+  ./final_plots/ as BOTH .png and .pdf.
+
+Work through all of it without stopping for my input. When you finish, reply in chat with
+a SHORT note only: the headline framing you chose, and anything you were unsure about or
+want me to look at first — I'll edit from there.
