@@ -234,13 +234,27 @@ aside{width:280px;flex:0 0 auto;background:var(--panel);border-right:1px solid v
 .turn .body{background:var(--panel2);border:1px solid var(--border);border-radius:10px;
   padding:7px 10px;font-size:13px;overflow-wrap:break-word}
 .turn.user .body{background:rgba(122,162,247,.10);border-color:rgba(122,162,247,.35)}
+.turn.cont{margin-top:-7px}            /* same speaker: bubbles join into one group */
+.turn.cont .body{padding-top:10px}
 .turn .md p{margin:.3em 0} .turn .md pre{overflow:auto;background:var(--code-bg);padding:8px;border-radius:6px}
 .turn .md :first-child{margin-top:0} .turn .md :last-child{margin-bottom:0}
-details.aux{font-size:11.5px;color:var(--muted);margin:3px 0}
-details.aux summary{cursor:pointer;user-select:none}
-details.aux summary .arg{color:var(--faint);margin-left:6px;font-family:var(--mono);font-size:10.5px}
-details.aux .body2{white-space:pre-wrap;border-left:2px solid var(--border);
-  padding:4px 8px;margin:4px 0 2px;max-height:240px;overflow:auto;font-family:var(--mono);font-size:11px}
+.turn .md img{max-width:100%;cursor:zoom-in}
+details.aux{margin:8px 0;border:1px solid var(--border);border-radius:8px;background:var(--panel2);font-size:12.5px}
+details.aux>summary{cursor:pointer;padding:6px 11px;font-weight:600;list-style:none;display:flex;gap:8px;align-items:center;color:var(--muted)}
+details.aux>summary::-webkit-details-marker{display:none}
+details.aux>summary::before{content:"▸";color:var(--muted)}
+details.aux[open]>summary::before{content:"▾"}
+details.think>summary{color:var(--think)} details.tool>summary{color:var(--tool)} details.sub>summary{color:var(--accent)}
+details.aux.err>summary{color:var(--err)}
+details.aux .arg{color:var(--faint);font-family:var(--mono);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+details.aux .body2{padding:0 11px 10px;white-space:pre-wrap;font-family:var(--mono);font-size:11.5px;color:var(--muted);max-height:300px;overflow:auto}
+details.think .body2{color:#c8bfe7;font-style:italic}
+/* image lightbox (as in the studio / agent viewer) */
+.lightbox{position:fixed;inset:0;z-index:9999;background:rgba(3,5,10,.88);display:flex;
+  align-items:center;justify-content:center;padding:40px}
+.lightbox[hidden]{display:none}
+.lightbox img{max-width:95vw;max-height:90vh;object-fit:contain;background:#fff;border-radius:6px;
+  box-shadow:0 14px 45px rgba(0,0,0,.55)}
 .tdot{display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--muted);
   margin-right:3px;animation:tb 1.2s infinite}
 .tdot:nth-child(2){animation-delay:.15s}.tdot:nth-child(3){animation-delay:.3s}
@@ -311,6 +325,7 @@ details.aux .body2{white-space:pre-wrap;border-left:2px solid var(--border);
   </section>
 </main>
 <div class="toast" id="toast"></div>
+<div class="lightbox" id="lightbox" hidden><img alt=""></div>
 <script>
 const $ = s => document.querySelector(s);
 const API = "/proposals/api";
@@ -382,24 +397,45 @@ async function reloadDoc(){
   updateMeta();
 }
 
-// ---- agent chat (compact mirror of the studio chat) ----
-function blockHtml(b){
+// ---- agent chat (same rendering as the studio chat) ----
+function argSummary(name,args){
+  if(args==null) return "";
+  if(typeof args!=="object") return String(args).slice(0,160);
+  const a=args;
+  const pick=a.path||a.file_path||a.file||a.filename;
+  if(name==="bash"||name==="shell") return (a.command||a.cmd||"").slice(0,160);
+  if(pick) return String(pick);
+  try{return JSON.stringify(a).slice(0,160);}catch(e){return "";}
+}
+function blockHtml(b,k,live){
+  const at=` data-k="${k}"${live?' data-live="1"':''}`;
   if(b.kind==="text") return `<div class="md">${md(b.text)}</div>`;
   if(b.kind==="thinking")
-    return `<details class="aux"><summary>thinking</summary><div class="body2">${esc(b.text)}</div></details>`;
+    return `<details class="aux think"${at}><summary>thinking</summary>`
+      +`<div class="body2">${esc(b.text)}</div></details>`;
   if(b.kind==="subagent")
-    return `<details class="aux"><summary>subagent<span class="arg">${esc((b.task||"").slice(0,70))}</span></summary>`
+    return `<details class="aux sub"${at}><summary>subagent: ${esc(b.agent)}<span class="arg">${esc((b.task||"").slice(0,80))}</span></summary>`
       +`<div class="body2">${esc((b.result&&b.result.text)||"")}</div></details>`;
-  if(b.kind==="tool")
-    return `<details class="aux"><summary>${esc(b.name||"tool")}</summary>`
-      +`<div class="body2">${esc((b.result&&b.result.text)||"(running…)")}</div></details>`;
+  if(b.kind==="tool"){
+    const err=b.result&&b.result.isError?" err":"";
+    const res=b.result?esc(b.result.text||""):"(running…)";
+    return `<details class="aux tool${err}"${at}><summary>${esc(b.name||"tool")}<span class="arg">${esc(argSummary(b.name,b.args))}</span></summary>`
+      +`<div class="body2">${res}</div></details>`;
+  }
   return "";
 }
+// The transcript only updates at message boundaries, so this bubble is the
+// signal that a (possibly long) turn is in flight. cont = joins an agent group.
+const typingHtml=cont=>`<div class="turn assistant typing${cont?' cont':''}">${cont?'':'<div class="role">Agent</div>'}`
+  +`<div class="body"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span></div></div>`;
+const autoOpened=new Set();       // details we opened for the live stream (vs. user-opened)
 function renderTurns(turns){
   const log=$("#plog");
+  // Key on content size too: a live thinking/text block grows without the
+  // turn or block count changing, and the re-render must still happen.
   const key=JSON.stringify(turns.map(t=>[t.role,t.blocks.length,!!t.live,
-    t.blocks.reduce((n,b)=>n+(b.text||"").length,0)]))+"|"+(running?1:0);
-  if(key===turnsKey) return;
+    t.blocks.reduce((n,b)=>n+(b.text||"").length+((b.result&&b.result.text)||"").length,0)]))+"|"+(running?1:0);
+  if(key===turnsKey) return;     // avoid clobbering scroll/details when nothing changed
   turnsKey=key;
   const atBottom=log.scrollHeight-log.scrollTop-log.clientHeight<80;
   if(!turns.length && !running){
@@ -407,16 +443,31 @@ function renderTurns(turns){
       +'try <b>✨ Clean up</b>, or ask for specific changes.</div>';
     return;
   }
-  let html=turns.map(t=>{
+  const parts=turns.map((t,ti)=>{
     const who=t.role==="user"?"You":"Agent";
+    const cont=ti>0&&turns[ti-1].role===t.role;  // same speaker: group the bubbles
+    const last=t.live?t.blocks.length-1:-1;      // the block still streaming in
     const body=t.role==="user"
       ? `<div class="md">${md(t.blocks.map(b=>b.text||"").join("\n"))}</div>`
-      : t.blocks.map(blockHtml).join("");
-    return `<div class="turn ${t.role}"><div class="role">${who}</div><div class="body">${body}</div></div>`;
-  }).join("");
+      : t.blocks.map((b,bi)=>blockHtml(b,ti+"."+bi,bi===last)).join("");
+    return `<div class="turn ${t.role}${cont?' cont':''}">${cont?'':`<div class="role">${who}</div>`}<div class="body">${body}</div></div>`;
+  });
   if(running && !(turns.length && turns[turns.length-1].live))
-    html+='<div class="turn assistant"><div class="body"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span></div></div>';
-  log.innerHTML=html;
+    parts.push(typingHtml(turns.length>0&&turns[turns.length-1].role==="assistant"));
+  // innerHTML replacement resets every <details>; restore what the user had,
+  // and auto-open a NEWLY appeared live block so its stream is visible.
+  const known=new Set(), openSet=new Set();
+  log.querySelectorAll("details[data-k]").forEach(d=>{known.add(d.dataset.k); if(d.open) openSet.add(d.dataset.k);});
+  log.innerHTML=parts.join("");
+  log.querySelectorAll("details[data-k]").forEach(d=>{
+    const k=d.dataset.k;
+    if(known.has(k)){
+      // a block we auto-opened collapses again once the stream moves past it
+      if(autoOpened.has(k)&&!d.dataset.live){autoOpened.delete(k); d.open=false;}
+      else d.open=openSet.has(k);
+    }else if(d.dataset.live){d.open=true; autoOpened.add(k);}
+    if(d.open&&d.dataset.live){const b=d.querySelector(".body2"); if(b) b.scrollTop=b.scrollHeight;}
+  });
   if(atBottom) log.scrollTop=log.scrollHeight;
 }
 function refreshControls(){
@@ -501,6 +552,13 @@ $("#psend").onclick=()=>sendMsg();
 $("#polishbtn").onclick=()=>sendMsg("/polish");
 $("#stopbtn").onclick=stopAgent;
 $("#pmsg").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMsg();}});
+document.addEventListener("click",e=>{
+  if(e.target.tagName==="IMG" && e.target.closest("#preview,#plog")){
+    $("#lightbox img").src=e.target.src; $("#lightbox").hidden=false;
+  }
+});
+$("#lightbox").onclick=()=>$("#lightbox").hidden=true;
+document.addEventListener("keydown",e=>{ if(e.key==="Escape") $("#lightbox").hidden=true; });
 editor.addEventListener("input",onEdit);
 editor.addEventListener("scroll",()=>{hl.scrollTop=editor.scrollTop;hl.scrollLeft=editor.scrollLeft;});
 editor.addEventListener("keydown",e=>{
