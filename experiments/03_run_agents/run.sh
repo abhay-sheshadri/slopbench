@@ -1,8 +1,10 @@
 #!/bin/bash
 # Launch pi research agents. Edit the config block below, then run it:
-#   ./run.sh            # launch every (project x mode) run in detached tmux sessions
-#   ./run.sh --force    # wipe each run's output dir first
-#   ./run.sh --direct   # run in this shell instead of tmux (debugging)
+#   ./run.sh                          # launch every (project x mode) run in detached tmux sessions
+#   ./run.sh --force                  # wipe each run's output dir first
+#   ./run.sh --resume                 # relaunch interrupted runs where they stopped
+#   ./run.sh --continue-file <path>   # relaunch *completed* multi_phase runs with new instructions
+#   ./run.sh --direct                 # run in this shell instead of tmux (debugging)
 # Watch live or review with ./view_agents.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -28,6 +30,7 @@ MODEL="anthropic/claude-opus-4-8"   # Claude Opus 4.8
 # --------------------------------------------------------------------------- #
 
 DIRECT=0
+RELAUNCH=0
 EXTRA_ARGS=()
 for arg in "$@"; do
     case "$arg" in
@@ -38,11 +41,21 @@ Usage: experiments/03_run_agents/run.sh [--direct] [run.py args...]
 Default: launch each configured project/mode in its own detached tmux session.
 Use --direct to run the old in-shell launcher for debugging.
 Extra args are passed through to experiments/03_run_agents/run.py.
+
+Relaunches: pass --resume to continue interrupted runs where they stopped, or
+--continue-file <path> to relaunch *completed* multi_phase runs as continuations
+(the file's contents become the new instructions). Either flag points each run
+at its existing output dir and kills + recreates the run's tmux session instead
+of refusing to launch over it.
 EOF
             exit 0
             ;;
         --direct)
             DIRECT=1
+            ;;
+        --resume|--continue-file)
+            RELAUNCH=1
+            EXTRA_ARGS+=("$arg")
             ;;
         *)
             EXTRA_ARGS+=("$arg")
@@ -76,9 +89,16 @@ for project in "${PROJECTS[@]}"; do
     for mode in "${MODES[@]}"; do
         session="$(tmux_session_name "$project" "$mode")"
         if tmux has-session -t "$session" 2>/dev/null; then
-            echo "Already running: tmux session $session"
-            fail=1
-            continue
+            if [ "$RELAUNCH" -eq 1 ]; then
+                # Relaunch (--resume / --continue-file): the old session is a
+                # leftover from the run being relaunched — restart it.
+                echo "Restarting tmux session $session"
+                tmux kill-session -t "$session"
+            else
+                echo "Already running: tmux session $session"
+                fail=1
+                continue
+            fi
         fi
 
         child_args=(--projects "$project" --modes "$mode" --thinking "$THINKING")

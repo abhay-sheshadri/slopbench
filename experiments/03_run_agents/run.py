@@ -60,6 +60,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Resume each run from its existing output dir (continue where it stopped).",
     )
+    parser.add_argument(
+        "--continue-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Relaunch each *completed* multi_phase run as a continuation: the file's "
+        "contents become the new instructions (the main planner rejects its prior "
+        "'all complete' decision and plans the additional work).",
+    )
     return parser.parse_args()
 
 
@@ -67,6 +76,17 @@ def main() -> None:
     args = parse_args()
     if args.force and args.resume:
         raise SystemExit("--force and --resume are mutually exclusive.")
+    if args.continue_file and (args.force or args.resume):
+        raise SystemExit("--continue-file is mutually exclusive with --force/--resume.")
+    if args.continue_file and args.modes != ["multi_phase"]:
+        raise SystemExit("--continue-file only supports --modes multi_phase.")
+    continue_instructions = None
+    if args.continue_file:
+        if not args.continue_file.exists():
+            raise SystemExit(f"Continue file not found: {args.continue_file}")
+        continue_instructions = args.continue_file.read_text()
+        if not continue_instructions.strip():
+            raise SystemExit(f"Continue file is empty: {args.continue_file}")
     base = (ROOT / args.output_dir).resolve()
     env_path = ROOT / ".env"
     env_contents = env_path.read_text() if env_path.exists() else None
@@ -90,6 +110,7 @@ def main() -> None:
                     command_timeout=None,  # no timeout — run to completion
                     env_contents=env_contents,
                     resume=args.resume,
+                    continue_instructions=continue_instructions,
                 )
             )
 

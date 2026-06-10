@@ -26,6 +26,13 @@ lives in the run dir between sandbox invocations: ``planner/RUN_LOOP_STATE.json`
 persisted ``/goal`` state inside the execution session for ``goal``. Resuming
 keeps the dir, skips ``/init-planner``, and continues the execution session
 (``/run-loop resume`` or ``/goal resume``) where it left off.
+
+A *completed* ``multi_phase`` run can additionally be relaunched as a
+continuation (``RunSpec.continue_instructions`` / ``--continue-file``): the
+guidance text is written to ``CONTINUE_INSTRUCTIONS.md`` in the run dir and the
+execution session is continued with ``/run-loop continue CONTINUE_INSTRUCTIONS.md``,
+which makes the main planner reject its prior "all complete" decision and plan
+the additional work.
 """
 
 from __future__ import annotations
@@ -59,6 +66,10 @@ PLANNER_HTML = f"{WORKSPACE}/.pi_transcripts/planner.session.html"
 SESSION = f"{WORKSPACE}/.pi_transcripts/session.jsonl"
 HTML = f"{WORKSPACE}/.pi_transcripts/session.html"
 PLANNER_COMMAND = "/init-planner"
+
+# Workspace-relative file holding the user's continuation guidance for a
+# relaunched (completed) multi_phase run; consumed by ``/run-loop continue``.
+CONTINUE_FILE = "CONTINUE_INSTRUCTIONS.md"
 
 # Written into each workspace so the agent never commits the injected secrets or
 # our harness scratch dirs. The task tells agents not to override an existing
@@ -127,6 +138,23 @@ def resume_command(mode: str, run_loop_args: str = "") -> str:
     raise ValueError(f"unknown mode {mode!r} (expected one of {MODES})")
 
 
+def continue_command(mode: str, run_loop_args: str = "") -> str:
+    """The command for relaunching a *completed* run with new instructions."""
+    if mode == "multi_phase":
+        return f"/run-loop continue {CONTINUE_FILE} {run_loop_args}".strip()
+    raise ValueError(f"continue is only supported for multi_phase, not {mode!r}")
+
+
+def run_loop_status(workspace: Path) -> str | None:
+    """The run-loop's own status from ``planner/RUN_LOOP_STATE.json``, if any."""
+    try:
+        return json.loads(
+            (workspace / "planner" / "RUN_LOOP_STATE.json").read_text()
+        ).get("status")
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+
+
 def sanitize_run_loop_state_for_resume(workspace: Path) -> bool:
     """Make a multi_phase ``RUN_LOOP_STATE.json`` resumable after a hard kill.
 
@@ -172,6 +200,7 @@ def _write_manifest(
                 "proposal": spec.proposal,
                 "status": status,
                 "resumed": resuming,
+                "continued": spec.continue_instructions is not None,
                 "runs": runs,
                 "run_loop_sessions": rls,
             },
@@ -222,11 +251,8 @@ def _multiphase_final_status(workspace: Path, exit_status: str) -> str:
     resume that no-ops) is not mislabelled 'completed'."""
     if exit_status == "failed":
         return "failed"
-    try:
-        st = json.loads(
-            (workspace / "planner" / "RUN_LOOP_STATE.json").read_text()
-        ).get("status")
-    except (OSError, json.JSONDecodeError, ValueError):
+    st = run_loop_status(workspace)
+    if st is None:
         return exit_status
     return {
         "complete": "completed",
@@ -370,6 +396,9 @@ class RunSpec:
     run_loop_args: str = ""
     env_contents: str | None = None
     resume: bool = False
+    # Continuation guidance for relaunching a *completed* multi_phase run; written
+    # to CONTINUE_INSTRUCTIONS.md and executed via `/run-loop continue`.
+    continue_instructions: str | None = None
 
 
 @dataclass
@@ -400,6 +429,27 @@ async def run_one(spec: RunSpec, *, sem: asyncio.Semaphore, on_event=None) -> Ru
         heartbeat_task = None
         current_phase: str | None = None
         try:
+            continuing = spec.continue_instructions is not None
+            if continuing and spec.resume:
+                raise ValueError(
+                    "resume and continue_instructions are mutually exclusive"
+                )
+            if continuing and spec.mode != "multi_phase":
+                raise ValueError("continue_instructions only supports multi_phase runs")
+            if continuing and not spec.continue_instructions.strip():
+                raise ValueError("continue_instructions is empty")
+            if continuing and run_loop_status(ws) != "complete":
+                # Never fall back to a fresh start (that would wipe the dir) and
+                # never hand a non-complete state to `/run-loop continue` (the
+                # agent would refuse but the run would look 'completed').
+                status = "error"
+                error = (
+                    "continue requires a completed run-loop state, found "
+                    f"{run_loop_status(ws)!r} in {ws / 'planner' / 'RUN_LOOP_STATE.json'}"
+                )
+                _log(on_event, name, error)
+                return RunResult(spec, name, status, runs, 0, None, error)
+
             resuming = spec.resume and is_resumable(ws, spec.mode)
             if spec.resume and not resuming:
                 _log(
@@ -408,7 +458,7 @@ async def run_one(spec: RunSpec, *, sem: asyncio.Semaphore, on_event=None) -> Ru
                     "resume requested but no resumable state found; starting fresh",
                 )
 
-            if resuming:
+            if resuming or continuing:
                 # Keep the existing run dir intact: planner/RUN_LOOP_STATE.json,
                 # the completed phase_segment_*/ dirs and the sub-agent sessions
                 # under .home/.pi all live here and are the resume's source of
@@ -431,6 +481,9 @@ async def run_one(spec: RunSpec, *, sem: asyncio.Semaphore, on_event=None) -> Ru
                         name,
                         "sanitized RUN_LOOP_STATE for resume (cleared stale namespaced PIDs)",
                     )
+                if continuing:
+                    # (Re)written every launch so the latest guidance wins.
+                    (ws / CONTINUE_FILE).write_text(spec.continue_instructions)
             else:
                 # Fresh run dir == fresh sandbox (mirrors a fresh container).
                 if ws.exists():
@@ -466,10 +519,20 @@ async def run_one(spec: RunSpec, *, sem: asyncio.Semaphore, on_event=None) -> Ru
             _log(
                 on_event,
                 name,
-                f"{'resume' if resuming else 'start'} mode={spec.mode} "
-                f"proposal={spec.proposal} -> {ws}",
+                f"{'continue' if continuing else 'resume' if resuming else 'start'} "
+                f"mode={spec.mode} proposal={spec.proposal} -> {ws}",
             )
-            if resuming:
+            if continuing:
+                # Relaunch the completed run: the main planner rejects its prior
+                # "all complete" decision and plans the work in CONTINUE_FILE.
+                phases = [
+                    (
+                        "execution",
+                        SESSION,
+                        continue_command(spec.mode, spec.run_loop_args),
+                    ),
+                ]
+            elif resuming:
                 # The plan already exists; skip /init-planner and continue the
                 # execution session from where it stopped (segment/phase/stage
                 # for multi_phase, persisted /goal state for goal).
@@ -606,9 +669,21 @@ def main() -> None:
         action="store_true",
         help="Resume each run from its existing output dir instead of starting fresh.",
     )
+    parser.add_argument(
+        "--continue-file",
+        type=Path,
+        default=None,
+        help="Relaunch each *completed* multi_phase run as a continuation, using "
+        "this file's contents as the new instructions.",
+    )
     parser.add_argument("--max-concurrent", type=int, default=2)
     args = parser.parse_args()
 
+    if args.continue_file and args.resume:
+        raise SystemExit("--continue-file and --resume are mutually exclusive.")
+    continue_instructions = (
+        args.continue_file.read_text() if args.continue_file else None
+    )
     proposal_name = args.proposal_name or args.proposal_file.stem
     text = args.proposal_file.read_text()
     base = (ROOT / args.output_dir).resolve()
@@ -625,6 +700,7 @@ def main() -> None:
             run_loop_args=args.run_loop_args,
             env_contents=env,
             resume=args.resume,
+            continue_instructions=continue_instructions,
         )
         for mode in args.modes
     ]
