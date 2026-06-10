@@ -220,9 +220,10 @@ aside{width:280px;flex:0 0 auto;background:var(--panel);border-right:1px solid v
 .pitem .busy{color:var(--warn);font-size:10px}
 .muted{color:var(--muted);padding:14px;text-align:center;font-size:12.5px}
 
-/* chat with the proposal-editing agent (same workflow as the writeup studio) */
+/* chat with the proposal-editing agent (same workflow as the writeup studio);
+   docked on the right, doc in the middle */
 #chatcol{width:360px;flex:0 0 auto;display:flex;flex-direction:column;min-height:0;
-  background:var(--panel);border-right:1px solid var(--border)}
+  background:var(--panel);border-left:1px solid var(--border)}
 .chathead{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--border);
   font-weight:700;font-size:13px}
 .chathead .meta{font-weight:400}
@@ -299,17 +300,6 @@ details.think .body2{color:#c8bfe7;font-style:italic}
     <button class="primary" id="newbtn">＋ New proposal</button>
     <div id="plist"><div class="muted">loading…</div></div>
   </aside>
-  <section id="chatcol">
-    <div class="chathead">Agent <span class="meta" id="cost"></span><span class="spacer"></span>
-      <button class="mini2" id="polishbtn" title="Ask the agent to clean up this proposal">✨ Clean up</button>
-      <button class="mini2" id="stopbtn" hidden>■ Stop</button>
-    </div>
-    <div id="plog"><div class="muted">Chat with an agent that edits this proposal directly — same workflow as the writeup studio.</div></div>
-    <div class="composer">
-      <textarea id="pmsg" rows="2" placeholder="Ask for edits… (Enter to send)"></textarea>
-      <button class="primary" id="psend">Send</button>
-    </div>
-  </section>
   <section id="doc">
     <div class="docbar">
       <button id="viewtoggle">✎ Edit</button>
@@ -321,6 +311,17 @@ details.think .body2{color:#c8bfe7;font-style:italic}
       <div class="pane editpane"><div class="editwrap"><pre id="editorHL" aria-hidden="true"></pre><textarea id="editor" spellcheck="false"
         placeholder="Write the proposal in markdown. Changes autosave."></textarea></div></div>
       <div class="pane previewpane"><div id="preview"><div class="empty">Pick a proposal on the left, or create a new one.</div></div></div>
+    </div>
+  </section>
+  <section id="chatcol">
+    <div class="chathead">Agent <span class="meta" id="cost"></span><span class="spacer"></span>
+      <button class="mini2" id="polishbtn" title="Ask the agent to clean up this proposal">✨ Clean up</button>
+      <button class="mini2" id="stopbtn" hidden>■ Stop</button>
+    </div>
+    <div id="plog"><div class="muted">Chat with an agent that edits this proposal directly — same workflow as the writeup studio.</div></div>
+    <div class="composer">
+      <textarea id="pmsg" rows="2" placeholder="Ask for edits… (Enter to send)"></textarea>
+      <button class="primary" id="psend">Send</button>
     </div>
   </section>
 </main>
