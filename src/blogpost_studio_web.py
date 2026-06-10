@@ -59,10 +59,13 @@ def _run_phase(d: Path) -> str:
 
 
 def list_runs() -> list[dict]:
-    """Every run available to write about, newest first, tagged with its phase.
+    """Every run available to write about, tagged with its phase and folder.
 
     Only ``Completed`` runs are selectable — you can't write a blogpost about a
-    run that is still going (Active) or that errored out (Failed)."""
+    run that is still going (Active) or that errored out (Failed). Order mirrors
+    the viewer's overview: folders by their most recent activity, and within a
+    folder runs you've already drafted come first (a draft edit counts as
+    activity), then the rest newest-first."""
     runs = []
     for d in _discover_run_dirs(OUTPUTS_DIR):
         name = d.name
@@ -72,24 +75,43 @@ def list_runs() -> list[dict]:
             else ("goal" if name.endswith("_goal") else "")
         )
         try:
+            group = str(d.parent.relative_to(OUTPUTS_DIR))
+        except ValueError:
+            group = ""
+        try:
             mtime = (d / ".pi_transcripts" / "session.jsonl").stat().st_mtime
         except OSError:
             mtime = d.stat().st_mtime if d.exists() else 0.0
+        try:
+            draft_mtime = (default_work_dir(d) / "final_writeup.md").stat().st_mtime
+        except OSError:
+            draft_mtime = None
         phase = _run_phase(d)
         runs.append(
             {
                 "name": name,
                 "path": str(d),
                 "mode": mode,
+                "group": group,
                 "phase": phase,  # Active | Completed | Failed
-                "selectable": phase == "Completed",  # only finished runs can be opened
-                # a studio draft already exists for this run
-                "started": (default_work_dir(d) / "final_writeup.md").exists(),
+                "selectable": phase == "Completed",
+                "started": draft_mtime is not None,  # a studio draft exists
                 "current": CURRENT is not None and CURRENT.run_dir == d,
-                "mtime": mtime,
+                "mtime": max(mtime, draft_mtime or 0.0),
             }
         )
-    runs.sort(key=lambda r: (-r["mtime"], r["name"]))
+    latest = {}
+    for r in runs:
+        latest[r["group"]] = max(latest.get(r["group"], 0.0), r["mtime"])
+    runs.sort(
+        key=lambda r: (
+            -latest[r["group"]],  # most recently active folder first
+            r["group"],  # keep folders contiguous (the picker shows section labels)
+            not r["started"],  # drafts in progress on top within a folder
+            -r["mtime"],
+            r["name"],
+        )
+    )
     return runs
 
 
@@ -416,9 +438,16 @@ header .spacer{flex:1}
 .runitem .rt b{color:var(--ok);font-weight:600}
 .runitem.disabled{opacity:.45;cursor:not-allowed}
 .runitem.disabled:hover{background:transparent;border-color:transparent}
-.ptag{font-size:9px;font-weight:700;letter-spacing:.4px;padding:1px 6px;border-radius:999px;
-  text-transform:uppercase;border:1px solid currentColor}
-.ptag.completed{color:var(--ok)} .ptag.active{color:var(--warn)} .ptag.failed{color:var(--err)}
+/* phase tabs + folder labels: same visual language as the viewer's overview */
+.phase-tabs{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:2px 2px 8px}
+.phase-tab{border:1px solid var(--border);background:var(--panel2);color:var(--muted);
+  border-radius:7px;padding:5px 10px;font-size:12px;font-weight:700;cursor:pointer;transition:.12s}
+.phase-tab:hover{border-color:var(--accent);color:var(--fg)}
+.phase-tab.active{border-color:var(--accent);background:var(--panel3);color:var(--fg)}
+.phase-tab .num{color:var(--faint);font-weight:600;margin-left:4px}
+.dgroup{font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--faint);
+  font-weight:700;margin:10px 4px 3px}
+.dgroup:first-child{margin-top:2px}
 .muted{color:var(--muted);padding:14px;text-align:center;font-size:12.5px}
 .pickerOpt{display:flex;align-items:center;gap:6px;color:var(--faint);font-size:11px;
   font-family:var(--mono);padding:7px 9px 3px;cursor:pointer;user-select:none}
@@ -548,6 +577,7 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 </header>
 <div class="picker" id="picker">
   <input id="pickerSearch" placeholder="Filter runs…" autocomplete="off">
+  <div class="phase-tabs" id="pickerTabs"></div>
   <div class="pickerList" id="pickerList"></div>
   <label class="pickerOpt"><input type="checkbox" id="showGoal"> show goal runs</label>
 </div>
@@ -851,25 +881,36 @@ let allRuns=[], showGoal=false;   // goal runs are hidden unless toggled on
 async function openPicker(){
   $("#picker").classList.add("show");
   $("#pickerSearch").value=""; $("#pickerSearch").focus();
-  if(!allRuns.length) $("#pickerList").innerHTML='<div class="muted">loading runs…</div>';
+  if(!allRuns.length){ $("#pickerTabs").innerHTML=""; $("#pickerList").innerHTML='<div class="muted">loading runs…</div>'; }
   try{ allRuns=(await (await fetch(API+"/runs")).json()).runs||[]; }
   catch(e){ allRuns=[]; toast("network error: "+e.message); }
   drawRuns();
 }
 const closePicker=()=>$("#picker").classList.remove("show");
+let pickerPhase="Completed";   // like the viewer's overview tabs; Completed = openable
 function drawRuns(){
   const q=$("#pickerSearch").value.toLowerCase();
-  const rows=allRuns.filter(r=>(showGoal||r.mode!=="goal") && r.name.toLowerCase().includes(q));
+  const pool=allRuns.filter(r=>(showGoal||r.mode!=="goal") && r.name.toLowerCase().includes(q));
+  const counts={Completed:0,Active:0,Failed:0};
+  pool.forEach(r=>{ if(counts[r.phase]!=null) counts[r.phase]++; });
+  if(!counts[pickerPhase]) pickerPhase = counts.Completed?"Completed":(counts.Active?"Active":"Failed");
+  $("#pickerTabs").innerHTML=["Completed","Active","Failed"].map(ph=>
+    `<button class="phase-tab${ph===pickerPhase?' active':''}" data-ph="${ph}">${ph} <span class="num">${counts[ph]}</span></button>`).join("");
+  $("#pickerTabs").querySelectorAll(".phase-tab").forEach(b=>b.onclick=()=>{pickerPhase=b.dataset.ph;drawRuns();});
+
+  const rows=pool.filter(r=>r.phase===pickerPhase);
   const list=$("#pickerList");
-  if(!rows.length){ list.innerHTML=`<div class="muted">no runs found</div>`; return; }
-  list.innerHTML=rows.map(r=>{
-    const ph=r.phase||"Completed", sel=r.selectable!==false;
-    const tag=`<span class="ptag ${ph.toLowerCase()}">${esc(ph)}</span>`;
-    const title=sel?"":` title="only finished runs can be opened"`;
-    return `<button class="runitem${r.current?' cur':''}${sel?'':' disabled'}" data-path="${esc(r.path)}"${sel?'':' disabled'}${title}>`
+  if(!rows.length){ list.innerHTML=`<div class="muted">no ${pickerPhase.toLowerCase()} runs</div>`; return; }
+  let g=null, html="";
+  for(const r of rows){
+    if((r.group||"")!==g){ g=r.group||""; html+=`<div class="dgroup">${esc(g||"runs")}</div>`; }
+    const sel=r.selectable!==false;
+    html+=`<button class="runitem${r.current?' cur':''}${sel?'':' disabled'}" data-path="${esc(r.path)}"`
+      +`${sel?'':' disabled title="only finished runs can be opened"'}>`
       +`<span class="rn">${esc(r.name)}</span>`
-      +`<span class="rt">${esc(r.mode||"")}${r.started?" · <b>draft</b>":""} ${tag}</span></button>`;
-  }).join("");
+      +`<span class="rt">${esc(r.mode||"")}${r.started?" · <b>draft</b>":""}</span></button>`;
+  }
+  list.innerHTML=html;
   list.querySelectorAll(".runitem:not(.disabled)").forEach(b=>b.onclick=()=>chooseRun(b.dataset.path));
 }
 async function chooseRun(path){
@@ -927,7 +968,9 @@ $("#runpick").onclick=()=>$("#picker").classList.contains("show")?closePicker():
 $("#pickerSearch").addEventListener("input",drawRuns);
 $("#showGoal").onchange=e=>{showGoal=e.target.checked;drawRuns();};
 document.addEventListener("click",e=>{
-  if(!e.target.closest("#picker") && !e.target.closest("#runpick")) closePicker();
+  // isConnected guard: a click on a re-rendered element (e.g. a phase tab)
+  // bubbles here detached, and closest() would wrongly read it as "outside".
+  if(e.target.isConnected && !e.target.closest("#picker") && !e.target.closest("#runpick")) closePicker();
   if(e.target.tagName==="IMG" && e.target.closest("#preview,#log")){
     $("#lightbox img").src=e.target.src; $("#lightbox").hidden=false;
   }
