@@ -92,6 +92,10 @@ def expand_command(message: str) -> str:
     return prompt
 
 
+# All studio workspaces live here, one dir per run.
+STUDIO_ROOT = ROOT / "outputs" / "06_blogpost_studio"
+
+
 def default_work_dir(run_dir: str | Path) -> Path:
     """Persistent studio workspace for a run: ``outputs/06_blogpost_studio/<run>``.
 
@@ -99,7 +103,7 @@ def default_work_dir(run_dir: str | Path) -> Path:
     its workspace so the conversation, document, and figures survive restarts and
     a session can be resumed.
     """
-    return ROOT / "outputs" / "06_blogpost_studio" / Path(run_dir).resolve().name
+    return STUDIO_ROOT / Path(run_dir).resolve().name
 
 
 class StudioSession:

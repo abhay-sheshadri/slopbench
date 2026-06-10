@@ -1476,6 +1476,64 @@ def _lens_signature(data: dict) -> str:
 # --------------------------------------------------------------------------- #
 # HTTP server
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# Launching new runs from the UI
+# --------------------------------------------------------------------------- #
+RUN_OUTPUT_ROOT = OUTPUTS_DIR / "03_run_agents"
+
+
+def launch_options() -> dict:
+    """Every proposal × mode, marking combos that already have a run dir."""
+    proposals = []
+    for p in sorted((ROOT / "proposals").glob("*.md")):
+        proposals.append(
+            {
+                "name": p.stem,
+                "existing": {
+                    m: (RUN_OUTPUT_ROOT / f"{p.stem}_{m}").exists() for m in MODES
+                },
+            }
+        )
+    return {"proposals": proposals, "modes": list(MODES)}
+
+
+def launch_run(proposal: str, mode: str) -> dict:
+    """Start a fresh agent run for a proposal, detached in its own tmux session
+    (so it survives this server restarting, and lands where the user's manually
+    launched runs live)."""
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", proposal or ""):
+        raise ValueError("bad proposal name")
+    if not (ROOT / "proposals" / f"{proposal}.md").exists():
+        raise ValueError(f"no proposal named {proposal}")
+    if (RUN_OUTPUT_ROOT / f"{proposal}_{mode}").exists():
+        raise ValueError(f"{proposal}_{mode} already has a run dir — resume it instead")
+    session = f"agent_{proposal}_{mode}"
+    if (
+        subprocess.run(
+            ["tmux", "has-session", "-t", session], capture_output=True
+        ).returncode
+        == 0
+    ):
+        raise ValueError(f"tmux session {session} already exists")
+    subprocess.run(
+        ["tmux", "new-session", "-d", "-s", session, "-c", str(ROOT)], check=True
+    )
+    subprocess.run(
+        [
+            "tmux",
+            "send-keys",
+            "-t",
+            session,
+            f".venv/bin/python experiments/03_run_agents/run.py --projects {proposal} --modes {mode}",
+            "Enter",
+        ],
+        check=True,
+    )
+    return {"ok": True, "session": session}
+
+
 class Handler(BaseHTTPRequestHandler):
     # The polling page aborts/closes connections constantly, which would
     # otherwise spew BrokenPipe/ConnectionReset tracebacks and look like crashes.
@@ -1589,14 +1647,24 @@ class Handler(BaseHTTPRequestHandler):
             return {}
 
     def do_POST(self):
-        # Local import: blogpost_studio_web imports back from this module.
-        from src import blogpost_studio_web
+        # Local imports: both modules import back from this module.
+        from src import blogpost_studio_web, proposals_web
 
-        if blogpost_studio_web.handle(self, "POST"):
+        if blogpost_studio_web.handle(self, "POST") or proposals_web.handle(
+            self, "POST"
+        ):
             return
         try:
             path = urlparse(self.path).path
-            if path == "/api/lens/ask":
+            if path == "/api/launch":
+                body = self._read_body()
+                try:
+                    self._json(
+                        launch_run(body.get("proposal") or "", body.get("mode") or "")
+                    )
+                except ValueError as exc:
+                    self._json({"error": str(exc)}, code=400)
+            elif path == "/api/lens/ask":
                 body = self._read_body()
                 self._json(
                     start_lens((body.get("id") or ""), body.get("question") or "")
@@ -1615,15 +1683,17 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
     def do_GET(self):
-        # Local import: blogpost_studio_web imports back from this module.
-        from src import blogpost_studio_web
+        # Local imports: both modules import back from this module.
+        from src import blogpost_studio_web, proposals_web
 
-        if blogpost_studio_web.handle(self, "GET"):
+        if blogpost_studio_web.handle(self, "GET") or proposals_web.handle(self, "GET"):
             return
         try:
             parsed = urlparse(self.path)
             path = parsed.path
-            if path in ("/", "/index.html"):
+            if path == "/api/launch/options":
+                self._json(launch_options())
+            elif path in ("/", "/index.html"):
                 self._send(200, INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
             elif path == "/api/tree":
                 qs = parse_qs(parsed.query)
@@ -1687,6 +1757,18 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);}
 .ovbtn{width:100%;display:flex;align-items:center;justify-content:center;gap:8px;background:var(--panel2);border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:9px 10px;margin-bottom:11px;cursor:pointer;font-size:13px;font-weight:700;letter-spacing:.2px;transition:.12s}
 /* Same compact pill as the studio header so the nav keeps its shape across pages. */
 .sidenav{margin-bottom:11px;width:fit-content}
+/* launch-a-run dialog */
+.launcher{position:fixed;left:12px;top:130px;z-index:60;width:min(440px,90vw);max-height:70vh;overflow:auto;
+  background:var(--panel);border:1px solid var(--border);border-radius:10px;
+  box-shadow:0 16px 48px rgba(0,0,0,.6);padding:12px}
+.lhead{display:flex;align-items:center;font-weight:700;font-size:14px;margin-bottom:2px}
+.lclose{margin-left:auto;font-size:14px;padding:0 8px;background:transparent;border-color:transparent;color:var(--muted)}
+.lclose:hover{color:var(--fg)}
+.lsub{color:var(--muted);font-size:11.5px;margin-bottom:10px}
+.lrow{display:flex;align-items:center;gap:6px;padding:4px 2px;border-top:1px solid var(--border)}
+.lrow:first-child{border-top:0}
+.lname{flex:1;min-width:0;font-size:12px;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lmode{font-size:11px;padding:2px 9px}
 .ovbtn:hover{border-color:var(--accent)}
 .ovbtn.active{border-color:var(--accent);background:var(--panel3);box-shadow:0 0 0 1px var(--accent)}
 .browse-head{display:flex;align-items:center;justify-content:space-between;margin:2px 4px 10px}
@@ -1857,8 +1939,14 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
 <div id="topbar-progress"></div>
 <div class="app">
   <div class="sidebar">
-    <nav class="appnav sidenav"><a class="on" href="/">🔎 Runs</a><a href="/studio" title="Co-write a blogpost about a finished run">📝 Studio</a></nav>
+    <nav class="appnav sidenav"><a class="on" href="/">🔎 Runs</a><a href="/studio" title="Co-write a blogpost about a finished run">📝 Studio</a><a href="/proposals" title="Read, edit, and write research proposals">🗒 Proposals</a></nav>
     <button id="overviewBtn" class="ovbtn" title="Status dashboard of all runs">⌂ Overview — all runs</button>
+    <button id="launchBtn" class="ovbtn" title="Start a new agent run from a proposal">🚀 Launch a run</button>
+    <div class="launcher" id="launcher" hidden>
+      <div class="lhead">Launch a new run <button class="lclose" id="launchClose" title="Close">×</button></div>
+      <div class="lsub">Pick a proposal and a mode. Combos that already have a run are disabled.</div>
+      <div id="launchList" class="llist"></div>
+    </div>
     <div class="browse-head"><h1>Browse</h1><button id="refresh" title="Refresh">⟳</button></div>
     <div id="breadcrumb" class="breadcrumb"></div>
     <input id="filter" class="flt" placeholder="filter…" autocomplete="off">
@@ -2675,6 +2763,38 @@ document.getElementById("lensBtn").onclick=()=>lensSetOpen(!state.lensOpen,true)
 document.getElementById("lensClose").onclick=()=>lensSetOpen(false);
 document.getElementById("lensNew").onclick=lensNewChat;
 document.getElementById("overviewBtn").onclick=showOverview;
+
+// ---- launch-a-run dialog ----
+async function openLauncher(){
+  const el=document.getElementById("launcher");
+  if(!el.hidden){el.hidden=true;return;}
+  el.hidden=false;
+  document.getElementById("launchList").innerHTML='<div class="lsub">loading proposals…</div>';
+  const d=await jget("/api/launch/options",true);
+  if(!d){document.getElementById("launchList").innerHTML='<div class="lsub">failed to load proposals</div>';return;}
+  document.getElementById("launchList").innerHTML=d.proposals.map(p=>{
+    const btns=d.modes.map(m=>`<button class="lmode" data-p="${esc(p.name)}" data-m="${m}"`
+      +`${p.existing[m]?' disabled title="this run already exists"':''}>${m}</button>`).join("");
+    return `<div class="lrow"><span class="lname" title="${esc(p.name)}">${esc(p.name)}</span>${btns}</div>`;
+  }).join("")||'<div class="lsub">no proposals found</div>';
+  el.querySelectorAll(".lmode:not([disabled])").forEach(b=>b.onclick=()=>launchRun(b.dataset.p,b.dataset.m));
+}
+async function launchRun(p,m){
+  if(!confirm(`Launch ${p} in ${m} mode?\n\nThis starts a real, long-running (and expensive) agent run in a tmux session.`))return;
+  let r,d;
+  try{
+    r=await fetch("/api/launch",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({proposal:p,mode:m})});
+    d=await r.json();
+  }catch(e){alert("launch failed: "+e.message);return;}
+  if(!r.ok){alert(d.error||"launch failed");return;}
+  document.getElementById("launcher").hidden=true;
+  alert(`Launched in tmux session ${d.session}.\nIt will appear under Active in the overview once it starts writing.`);
+  showOverview();
+}
+document.getElementById("launchBtn").onclick=openLauncher;
+document.getElementById("launchClose").onclick=()=>document.getElementById("launcher").hidden=true;
+
 if(state.agentId)lensSwitchTo(state.agentId);
 lensSetOpen(true,false);   // open the lens iff a run is deep-linked; otherwise it stays closed/disabled
 document.getElementById("lensSend").onclick=sendLens;
@@ -2762,7 +2882,7 @@ def main() -> None:
     actual_port = server.server_address[1]
     url = f"http://{args.host}:{actual_port}"
     print(
-        f"Agent viewer on {url}  ·  blogpost studio on {url}/studio  (Ctrl-C to stop)",
+        f"Agent viewer on {url}  ·  studio on {url}/studio  ·  proposals on {url}/proposals  (Ctrl-C to stop)",
         flush=True,
     )
     if args.open:

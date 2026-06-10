@@ -16,6 +16,7 @@ Access policy). Workspaces persist under ``outputs/06_blogpost_studio/<run>/``.
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -23,8 +24,14 @@ from urllib.parse import parse_qs, urlparse
 
 from src import audit_agent
 from src.agent_viewer import OUTPUTS_DIR, _discover_run_dirs, _run_item
-from src.blogpost_studio import StudioSession, default_work_dir
-from src.theme import PALETTE_CSS
+from src.blogpost_studio import (
+    DOC_NAME,
+    SESSION_NAME,
+    STUDIO_ROOT,
+    StudioSession,
+    default_work_dir,
+)
+from src.theme import EDITOR_CSS, HIGHLIGHT_JS, PALETTE_CSS, PREVIEW_CSS
 
 PREFIX = "/studio"
 
@@ -83,10 +90,11 @@ def list_runs() -> list[dict]:
         except OSError:
             mtime = d.stat().st_mtime if d.exists() else 0.0
         try:
-            draft_mtime = (default_work_dir(d) / "final_writeup.md").stat().st_mtime
+            draft_mtime = (default_work_dir(d) / DOC_NAME).stat().st_mtime
         except OSError:
             draft_mtime = None
         phase = _run_phase(d)
+        session = SESSIONS.get(str(d))
         runs.append(
             {
                 "name": name,
@@ -96,6 +104,7 @@ def list_runs() -> list[dict]:
                 "phase": phase,  # Active | Completed | Failed
                 "selectable": phase == "Completed",
                 "started": draft_mtime is not None,  # a studio draft exists
+                "drafting": bool(session and session.is_running()),
                 "current": CURRENT is not None and CURRENT.run_dir == d,
                 "mtime": max(mtime, draft_mtime or 0.0),
             }
@@ -115,12 +124,8 @@ def list_runs() -> list[dict]:
     return runs
 
 
-def select_run(spec: str) -> dict:
-    """Make ``spec`` (a run-dir path) the active session, creating it if needed.
-
-    Only paths that are actual run dirs under ``outputs/`` are accepted.
-    """
-    global CURRENT
+def _validated_run_dir(spec: str) -> Path:
+    """A Completed run dir under outputs/, or raise ValueError."""
     try:
         rd = Path(spec).resolve()
     except (OSError, ValueError) as exc:
@@ -134,13 +139,74 @@ def select_run(spec: str) -> dict:
         raise ValueError(
             f"{rd.name} is {phase} — only finished (Completed) runs can be opened in the studio"
         )
+    return rd
+
+
+def _session_for(rd: Path) -> StudioSession:
+    """The cached StudioSession for a validated run dir, created if needed."""
     with _SELECT_LOCK:
         session = SESSIONS.get(str(rd))
         if session is None:
             session = StudioSession(rd)
             SESSIONS[str(rd)] = session
-        CURRENT = session
+        return session
+
+
+def select_run(spec: str) -> dict:
+    """Make ``spec`` (a run-dir path) the active session, creating it if needed."""
+    global CURRENT
+    CURRENT = _session_for(_validated_run_dir(spec))
     return state_payload()
+
+
+def reset_all() -> dict:
+    """Delete every studio draft workspace (drafts, figures, conversations).
+
+    Refuses while any session has a turn in flight. Live sessions are reset in
+    place (workspace re-staged); workspaces with no session this process are
+    removed outright."""
+    with _SELECT_LOCK:
+        sessions = list(SESSIONS.values())
+    if any(s.is_running() for s in sessions):
+        raise RuntimeError("an agent is working in some session; stop it first")
+    known = {str(s.work) for s in sessions}
+    deleted = 0
+    if STUDIO_ROOT.is_dir():
+        for d in sorted(STUDIO_ROOT.iterdir()):
+            if not d.is_dir():
+                continue
+            if (d / DOC_NAME).exists() or (d / SESSION_NAME).exists():
+                deleted += 1
+            if str(d) not in known:
+                shutil.rmtree(d, ignore_errors=True)
+    for s in sessions:
+        s.reset()
+    return {"deleted": deleted}
+
+
+def draft_all(dry: bool) -> dict:
+    """Start a parallel ``/draft`` turn for every Completed, non-goal run that
+    has no draft yet. ``dry`` only reports the targets — the UI shows them in
+    the confirmation dialog first, since each /draft is a long, real agent turn.
+    """
+    targets = [
+        r
+        for r in list_runs()
+        if r["selectable"]
+        and r["mode"] != "goal"
+        and not r["started"]
+        and not r["drafting"]
+    ]
+    started = []
+    if not dry:
+        for r in targets:
+            session = _session_for(Path(r["path"]))
+            try:
+                session.start_turn("/draft")
+                started.append(r["name"])
+            except (ValueError, RuntimeError):
+                pass  # raced with another turn; it shows as drafting either way
+    return {"targets": [r["name"] for r in targets], "started": started}
 
 
 def state_payload() -> dict:
@@ -291,6 +357,13 @@ def _post(h, path: str) -> None:
         except (ValueError, RuntimeError) as exc:
             h._json({"error": str(exc)}, code=400)
         return
+    if path == "/api/draft_all":
+        return h._json(draft_all(dry=bool(h._read_body().get("dry"))))
+    if path == "/api/reset_all":
+        try:
+            return h._json(reset_all())
+        except RuntimeError as exc:
+            return h._json({"error": str(exc)}, code=409)
     s = CURRENT
     if s is None:
         return h._json({"error": "no run selected"}, code=409)
@@ -449,9 +522,12 @@ header .spacer{flex:1}
   font-weight:700;margin:10px 4px 3px}
 .dgroup:first-child{margin-top:2px}
 .muted{color:var(--muted);padding:14px;text-align:center;font-size:12.5px}
+.pickerFoot{display:flex;align-items:center;gap:8px;padding:7px 6px 3px;border-top:1px solid var(--border);margin-top:6px}
+.pickerFoot .spacer{flex:1}
 .pickerOpt{display:flex;align-items:center;gap:6px;color:var(--faint);font-size:11px;
-  font-family:var(--mono);padding:7px 9px 3px;cursor:pointer;user-select:none}
+  font-family:var(--mono);cursor:pointer;user-select:none}
 .pickerOpt input{accent-color:var(--accent)}
+.mini2{font-size:11px;padding:3px 9px}
 
 main{flex:1;display:flex;min-height:0}
 body.noselect #chat{display:none}            /* no chat until a run is picked */
@@ -512,48 +588,8 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 .previewpane{overflow:auto}
 #docview.edit .previewpane{display:none}
 #docview.view .editpane{display:none}
-/* The edit pane is a transparent <textarea> stacked exactly on top of a
-   syntax-highlighted <pre>. They MUST share every metric that affects glyph
-   position (font, size, line-height, padding, wrapping) so the real caret lines
-   up with the colored text behind it. */
-.editwrap{position:relative;flex:1;min-width:0;overflow:hidden}
-#editor,#editorHL{margin:0;border:0;position:absolute;inset:0;
-  font-family:var(--mono);font-size:13.5px;line-height:1.75;tab-size:2;
-  white-space:pre-wrap;word-break:break-word;overflow-wrap:break-word;
-  padding:32px max(26px,calc((100% - 720px)/2))}
-/* Both reserve a scrollbar gutter so they wrap at the same width (the textarea's
-   visible scrollbar would otherwise narrow only its text and misalign the layers). */
-#editorHL{overflow-y:scroll;overflow-x:hidden;color:var(--fg);pointer-events:none;z-index:1}
-#editorHL::-webkit-scrollbar{width:0;height:0}
-#editor{overflow-y:scroll;overflow-x:hidden;resize:none;outline:none;z-index:2;background:transparent;
-  color:transparent;-webkit-text-fill-color:transparent;caret-color:var(--accent)}
-#editor::placeholder{color:var(--faint);-webkit-text-fill-color:var(--faint)}
-#editor::selection{background:rgba(122,162,247,.32)}
-/* markdown token colors in the editor */
-.hl-h{color:var(--accent);font-weight:700}
-.hl-h1{color:var(--accent)} .hl-h2{color:var(--accent)} .hl-h3{color:var(--accent2)}
-.hl-h4,.hl-h5,.hl-h6{color:var(--accent2)}
-.hl-b{color:var(--fg);font-weight:700} .hl-i{color:var(--fg);font-style:italic}
-.hl-code{color:var(--user)} .hl-fence{color:var(--user);font-weight:600}
-.hl-link{color:var(--accent2)} .hl-url{color:var(--muted)}
-.hl-quote{color:var(--muted);font-style:italic} .hl-mark{color:var(--tool);font-weight:700}
-.hl-hr{color:var(--faint)}
-#preview{font-size:15px;line-height:1.75;padding:32px max(26px,calc((100% - 720px)/2))}
-#preview>:first-child{margin-top:0}
-#preview h1,#preview h2,#preview h3,#preview h4{line-height:1.3;margin:1.5em 0 .5em;font-weight:700}
-#preview h1{font-size:1.7em;color:var(--accent)}
-#preview h2{font-size:1.36em;color:var(--accent);border-bottom:1px solid var(--border);padding-bottom:.2em}
-#preview h3{font-size:1.12em;color:var(--accent2)}
-#preview h4{color:var(--accent2)}
-#preview pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:12px;overflow:auto}
-#preview code{font-family:var(--mono);font-size:.88em}
-#preview p code,#preview li code{background:var(--panel2);padding:.1em .35em;border-radius:4px}
-#preview table{border-collapse:collapse;font-size:.95em}
-#preview td,#preview th{border:1px solid var(--border);padding:6px 10px}
-#preview blockquote{border-left:3px solid var(--border);margin:.6em 0;padding-left:14px;color:var(--muted)}
-#preview hr{border:0;border-top:1px solid var(--border);margin:1.8em 0}
-.md-img,#preview img{max-width:100%;height:auto;border:1px solid var(--border);border-radius:8px;
-  margin:12px 0;display:block;background:#fff;cursor:zoom-in}
+/*__EDITOR_CSS__*/
+/*__PREVIEW_CSS__*/
 
 /* image lightbox (as in the agent viewer) */
 .lightbox{position:fixed;inset:0;z-index:9999;background:rgba(3,5,10,.88);display:flex;
@@ -570,7 +606,7 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 </head>
 <body>
 <header>
-  <nav class="appnav"><a href="/">🔎 Runs</a><a class="on" href="/studio">📝 Studio</a></nav>
+  <nav class="appnav"><a href="/">🔎 Runs</a><a class="on" href="/studio">📝 Studio</a><a href="/proposals">🗒 Proposals</a></nav>
   <button class="runpick" id="runpick">Select a run ▾</button>
   <span class="spacer"></span>
   <span class="meta" id="cost" title="model spend in this studio conversation"></span>
@@ -579,7 +615,12 @@ details.think .body2{color:#c8bfe7;font-style:italic}
   <input id="pickerSearch" placeholder="Filter runs…" autocomplete="off">
   <div class="phase-tabs" id="pickerTabs"></div>
   <div class="pickerList" id="pickerList"></div>
-  <label class="pickerOpt"><input type="checkbox" id="showGoal"> show goal runs</label>
+  <div class="pickerFoot">
+    <label class="pickerOpt"><input type="checkbox" id="showGoal"> show goal runs</label>
+    <span class="spacer"></span>
+    <button class="mini2" id="draftAllBtn" title="Start /draft for every completed run that has no draft yet, in parallel">✍ Draft missing</button>
+    <button class="mini2 danger" id="delAllBtn" title="Delete every draft, its figures, and its conversation">Delete all drafts</button>
+  </div>
 </div>
 <main>
   <section id="doc">
@@ -641,34 +682,7 @@ function mdToHtml(text){
   return div.innerHTML;
 }
 
-// ---- in-editor markdown syntax highlighting ----
-// We render an escaped, span-wrapped copy of the text behind a transparent
-// textarea. Spans only ADD markup — they never change the text content — so the
-// highlight layer stays glyph-for-glyph aligned with the real caret. Because of
-// that, even an imperfect tokenization can't misalign the cursor.
-function escHL(s){return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
-function inlineHL(line){
-  let s=escHL(line);
-  s=s.replace(/(`+)([^`]+?)\1/g,(m,t,inner)=>'<span class="hl-code">'+t+inner+t+'</span>');
-  s=s.replace(/(\*\*|__)(?=\S)([\s\S]+?\S)\1/g,(m,d,inner)=>'<span class="hl-b">'+d+inner+d+'</span>');
-  s=s.replace(/(?<![\*_\w])([\*_])(?=\S)([^\*_]+?\S)\1(?![\*_\w])/g,(m,d,inner)=>'<span class="hl-i">'+d+inner+d+'</span>');
-  s=s.replace(/(\[)([^\]]*)(\]\()([^)]*)(\))/g,(m,a,txt,b,url,c)=>'<span class="hl-link">'+a+txt+b+'</span><span class="hl-url">'+url+c+'</span>');
-  return s;
-}
-function highlightMarkdown(src){
-  let inFence=false;
-  return (src||"").split("\n").map(line=>{
-    if(/^(\s*)(```|~~~)/.test(line)){ inFence=!inFence; return '<span class="hl-fence">'+escHL(line)+'</span>'; }
-    if(inFence) return '<span class="hl-code">'+escHL(line)+'</span>';
-    const h=/^(\s{0,3})(#{1,6})(\s.*)?$/.exec(line);
-    if(h) return '<span class="hl-h hl-h'+h[2].length+'">'+escHL(line)+'</span>';
-    if(/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) return '<span class="hl-hr">'+escHL(line)+'</span>';
-    if(/^\s{0,3}>/.test(line)) return '<span class="hl-quote">'+inlineHL(line)+'</span>';
-    const li=/^(\s*)([-*+]|\d+[.)])(\s+)(.*)$/.exec(line);
-    if(li) return escHL(li[1])+'<span class="hl-mark">'+escHL(li[2])+'</span>'+li[3]+inlineHL(li[4]);
-    return inlineHL(line);
-  }).join("\n");
-}
+//__HIGHLIGHT_JS__
 function syncHL(){
   if(!hl) return;
   hl.innerHTML=highlightMarkdown(editor.value)+"\n";   // trailing \n keeps last line height in sync
@@ -875,6 +889,27 @@ async function deleteDraft(){
   renderChat([]);          // back to the investigate / draft choice
   refreshControls();
 }
+async function deleteAllDrafts(){
+  if(!confirm("Delete ALL studio drafts, figures, and conversations — for every run? This cannot be undone.")) return;
+  const r=await api(API+"/reset_all");
+  if(!r) return;
+  toast(`deleted ${r.deleted} draft workspace(s)`);
+  freshUi();
+  await loadDoc(true);
+  renderChat([]);
+  refreshControls();
+  allRuns=[]; openPicker();   // refresh badges
+}
+async function draftAllMissing(){
+  const d=await api(API+"/draft_all",{dry:true});
+  if(!d) return;
+  if(!d.targets.length){ toast("every completed run already has a draft"); return; }
+  if(!confirm(`Start /draft for ${d.targets.length} run(s), in parallel?\n\n${d.targets.join("\n")}\n\nEach one is a full agent turn (investigate the run, write the post).`)) return;
+  const r=await api(API+"/draft_all",{});
+  if(!r) return;
+  toast(`started ${r.started.length} draft(s) — they run in the background`);
+  allRuns=[]; openPicker();   // refresh: rows now show “drafting…”
+}
 
 // ---- run picker ----
 let allRuns=[], showGoal=false;   // goal runs are hidden unless toggled on
@@ -908,7 +943,7 @@ function drawRuns(){
     html+=`<button class="runitem${r.current?' cur':''}${sel?'':' disabled'}" data-path="${esc(r.path)}"`
       +`${sel?'':' disabled title="only finished runs can be opened"'}>`
       +`<span class="rn">${esc(r.name)}</span>`
-      +`<span class="rt">${esc(r.mode||"")}${r.started?" · <b>draft</b>":""}</span></button>`;
+      +`<span class="rt">${esc(r.mode||"")}${r.drafting?" · <i>drafting…</i>":r.started?" · <b>draft</b>":""}</span></button>`;
   }
   list.innerHTML=html;
   list.querySelectorAll(".runitem:not(.disabled)").forEach(b=>b.onclick=()=>chooseRun(b.dataset.path));
@@ -967,6 +1002,8 @@ $("#delbtn").onclick=deleteDraft;
 $("#runpick").onclick=()=>$("#picker").classList.contains("show")?closePicker():openPicker();
 $("#pickerSearch").addEventListener("input",drawRuns);
 $("#showGoal").onchange=e=>{showGoal=e.target.checked;drawRuns();};
+$("#draftAllBtn").onclick=draftAllMissing;
+$("#delAllBtn").onclick=deleteAllDrafts;
 document.addEventListener("click",e=>{
   // isConnected guard: a click on a re-rendered element (e.g. a phase tab)
   // bubbles here detached, and closest() would wrongly read it as "outside".
@@ -1011,5 +1048,10 @@ init();
 </html>
 """
 
-# Share the one dark palette with the agent viewer (single source).
-INDEX_HTML = INDEX_HTML.replace("/*__PALETTE__*/", PALETTE_CSS)
+# Shared palette + markdown-editor pieces come from src.theme (single source).
+INDEX_HTML = (
+    INDEX_HTML.replace("/*__PALETTE__*/", PALETTE_CSS)
+    .replace("/*__EDITOR_CSS__*/", EDITOR_CSS)
+    .replace("/*__PREVIEW_CSS__*/", PREVIEW_CSS)
+    .replace("//__HIGHLIGHT_JS__", HIGHLIGHT_JS)
+)
