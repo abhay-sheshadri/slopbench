@@ -87,6 +87,7 @@ WORKSPACE_GITIGNORE = """\
 __pycache__/
 *.pyc
 .cache/
+file_cache_dir/
 huggingface/
 *.safetensors
 *.bin
