@@ -538,6 +538,9 @@ header .spacer{flex:1}
   font-weight:700;margin:10px 4px 3px}
 .dgroup:first-child{margin-top:2px}
 .muted{color:var(--muted);padding:14px;text-align:center;font-size:12.5px}
+.wbadge{color:var(--warn);font-weight:600;animation:wpulse 1.6s ease-in-out infinite}
+.wmini{color:var(--warn);font-size:11px;font-weight:700;animation:wpulse 1.6s ease-in-out infinite}
+@keyframes wpulse{0%,100%{opacity:1}50%{opacity:.45}}
 .pickerFoot{display:flex;align-items:center;gap:8px;padding:7px 6px 3px;border-top:1px solid var(--border);margin-top:6px}
 .pickerFoot .spacer{flex:1}
 .pickerOpt{display:flex;align-items:center;gap:6px;color:var(--faint);font-size:11px;
@@ -669,6 +672,23 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 const $ = s => document.querySelector(s);
 const API = "/studio/api";
 let selected=false, selectedRun=null, running=false, docMtime=-1, editorDirty=false, mode="view", lastTurnsKey="";
+let runpickLabel="Select a run", writingCount=0;
+// The dropdown button always shows how many agents are mid-draft, and the
+// picker rows say which — so parallel /draft work is visible at a glance.
+function renderRunpick(){
+  $("#runpick").innerHTML=esc(runpickLabel)
+    +(writingCount?` <span class="wmini" title="${writingCount} agent(s) writing">✍ ${writingCount}</span>`:"")+" ▾";
+}
+async function pollWriting(){
+  try{
+    const rs=(await (await fetch(API+"/runs")).json()).runs||[];
+    allRuns=rs;
+    writingCount=rs.filter(r=>r.drafting).length;
+    renderRunpick();
+    if($("#picker").classList.contains("show")) drawRuns();
+  }catch(e){}
+}
+setInterval(pollWriting,12000);
 // Every API call names this window's run explicitly — selection is per-window,
 // so several tabs can each drive a different run at the same time.
 const runQ=()=>selectedRun?("run="+encodeURIComponent(selectedRun)):"";
@@ -963,16 +983,15 @@ function drawRuns(){
     html+=`<button class="runitem${r.path===selectedRun?' cur':''}${sel?'':' disabled'}" data-path="${esc(r.path)}"`
       +`${sel?'':' disabled title="only finished runs can be opened"'}>`
       +`<span class="rn">${esc(r.name)}</span>`
-      +`<span class="rt">${esc(r.mode||"")}${r.drafting?" · <i>drafting…</i>":r.started?" · <b>draft</b>":""}</span></button>`;
+      +`<span class="rt">${esc(r.mode||"")}${r.drafting?' · <span class="wbadge">✍ writing…</span>':r.started?" · <b>draft</b>":""}</span></button>`;
   }
   list.innerHTML=html;
   list.querySelectorAll(".runitem:not(.disabled)").forEach(b=>b.onclick=()=>chooseRun(b.dataset.path));
 }
 async function chooseRun(path){
-  const rp=$("#runpick"), prev=rp.textContent;
-  rp.textContent="opening…";   // selecting stages the workspace; can take a moment
+  $("#runpick").textContent="opening…";   // selecting stages the workspace; can take a moment
   const s=await api(API+"/select",{run:path});
-  if(!s){ rp.textContent=prev; return; }
+  if(!s){ renderRunpick(); return; }
   closePicker();
   freshUi();
   applyState(s);
@@ -988,7 +1007,8 @@ function applyState(s){
   // keep ?run= in the URL so a reload (or duplicated tab) reopens this run
   history.replaceState(null,"","/studio"+(selectedRun?"?run="+encodeURIComponent(selectedRun):""));
   document.body.classList.toggle("noselect",!selected);
-  $("#runpick").textContent=selected?(s.run_name+" ▾"):"Select a run ▾";
+  runpickLabel=selected?s.run_name:"Select a run";
+  renderRunpick();
   document.title=selected?("Studio · "+s.run_name):"Blogpost Studio";
   running=!!s.running;
   refreshControls();
@@ -1058,6 +1078,7 @@ async function init(){
   // from server state — so several windows can each work a different run.
   const pre=new URLSearchParams(location.search).get("run");  // before applyState rewrites the URL
   applyState({selected:false});
+  pollWriting();   // writing-count badge on the dropdown from the start
   if(pre) await chooseRun(pre);
   else { await loadDoc(true); bindStream(); openPicker(); }
 }
