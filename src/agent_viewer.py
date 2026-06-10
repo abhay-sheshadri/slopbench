@@ -34,7 +34,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-from src import DEFAULT_MODEL, sandbox
+from src import sandbox
 from src.runner_utils import parse_env_text
 from src.theme import PALETTE_CSS
 
@@ -1113,7 +1113,9 @@ def _run_loop_session_files(sessions: dict) -> list[dict]:
 # but physically cannot modify the run it is auditing. Its answer streams back to
 # the browser via the same session.jsonl parser the rest of the viewer uses.
 LENS_DIR = OUTPUTS_DIR / ".lens"
-LENS_MODEL = os.environ.get("LENS_MODEL", DEFAULT_MODEL)
+# Oversight/lens questions are interactive reading tasks — use Fable (the
+# experiment runners keep their own DEFAULT_MODEL).
+LENS_MODEL = os.environ.get("LENS_MODEL", "anthropic/claude-fable-5")
 LENS_THINKING = os.environ.get("LENS_THINKING", "medium")
 # Max number of Run-Lens summary agents the dashboard's "Generate summaries"
 # fan-out runs at once (also injected as the client-side cap). Each one is a full
@@ -1940,7 +1942,7 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
 <div id="topbar-progress"></div>
 <div class="app">
   <div class="sidebar">
-    <nav class="appnav sidenav"><a class="on" href="/">🔎 Runs</a><a href="/studio" title="Co-write a blogpost about a finished run">📝 Studio</a><a href="/proposals" title="Read, edit, and write research proposals">🗒 Proposals</a></nav>
+    <nav class="appnav sidenav"><a class="on" href="/">🔎 Runs</a><a href="/proposals" title="Read, edit, and write research proposals">🗒 Proposals</a><a href="/studio" title="Co-write a blogpost about a finished run">📝 Studio</a></nav>
     <button id="overviewBtn" class="ovbtn" title="Status dashboard of all runs">⌂ Overview — all runs</button>
     <button id="launchBtn" class="ovbtn" title="Start a new agent run from a proposal">🚀 Launch a run</button>
     <div class="launcher" id="launcher" hidden>

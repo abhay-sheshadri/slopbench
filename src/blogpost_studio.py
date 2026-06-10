@@ -106,38 +106,39 @@ def default_work_dir(run_dir: str | Path) -> Path:
     return STUDIO_ROOT / Path(run_dir).resolve().name
 
 
-class StudioSession:
-    """One human+agent co-writing session over a single completed run.
+class DocAgentSession:
+    """Generic human+agent co-editing session: one sandboxed ``pi`` conversation
+    that edits one document, with chat and document streamed off disk.
 
-    Thread-safety: at most one agent turn runs at a time. :meth:`start_turn`
-    refuses to start a second concurrent turn; the turn runs in a background
-    thread so the web server stays responsive and can stream the transcript and
-    document off disk while the agent works.
+    Subclasses say which document (:attr:`doc_path`), how to build the agent
+    command (:meth:`_argv`), and how slash-commands expand (:meth:`_expand`).
+    Used per-window/per-target: callers keep one session per edited thing, so
+    any number of them can run turns in parallel.
+
+    Thread-safety: at most one agent turn runs at a time per session.
+    :meth:`start_turn` refuses to start a second concurrent turn; the turn runs
+    in a background process so the web server stays responsive and can stream
+    the transcript and document off disk while the agent works.
     """
 
     def __init__(
         self,
-        run_dir: str | Path,
-        work_dir: str | Path | None = None,
+        work_dir: str | Path,
         *,
         model: str = DEFAULT_STUDIO_MODEL,
         thinking: str = DEFAULT_THINKING,
         env_text: str | None = None,
+        system_prompt: str = "",
     ) -> None:
-        self.run_dir = Path(run_dir).resolve()
-        if not audit_agent.is_run_dir(self.run_dir):
-            raise ValueError(
-                f"{self.run_dir} is not a run/project dir (no .pi_transcripts/ found)"
-            )
         if sandbox.available() is None:
             raise RuntimeError("bubblewrap (bwrap) is not installed")
-        self.work = Path(work_dir or default_work_dir(self.run_dir)).resolve()
+        self.work = Path(work_dir).resolve()
         self.model = model
         self.thinking = thinking
         self._env_text = env_text
-        # The collaboration + writing-standards system prompt is constant across
-        # the whole session, so render it once and append it on every turn.
-        self.system_prompt = render("studio_system.md.j2")
+        # The system prompt is constant across the whole session: rendered once,
+        # appended on every turn.
+        self.system_prompt = system_prompt
 
         self._lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
@@ -148,13 +149,21 @@ class StudioSession:
         )
         self._tx_cache: tuple | None = None  # ((mtime, size), parsed transcript)
         self._live_cache: dict | None = None  # incremental live_turns parse state
+        self.work.mkdir(parents=True, exist_ok=True)
 
-        audit_agent.stage_reference_docs(self.work, self.run_dir)
-
-    # ----------------------------------------------------------------- paths --
+    # ------------------------------------------------------- subclass surface --
     @property
     def doc_path(self) -> Path:
-        return self.work / DOC_NAME
+        raise NotImplementedError
+
+    def _argv(self, prompt: str) -> list[str]:
+        raise NotImplementedError
+
+    def _expand(self, message: str) -> str:
+        """Expand canned slash-commands into full prompts (default: none)."""
+        return message
+
+    # ----------------------------------------------------------------- paths --
 
     @property
     def session_path(self) -> Path:
@@ -193,22 +202,12 @@ class StudioSession:
             st = self.doc_path.stat()
         return {"mtime": st.st_mtime, "size": st.st_size}
 
-    def plots(self) -> list[str]:
-        """Figure files (.png/.pdf) the agent has produced under final_plots/."""
-        return audit_agent.list_plots(self.work)
-
-    def reset(self) -> None:
-        """Delete this run's draft: the document, conversation, figures, and
-        anything else the agent created — the workspace is re-staged fresh.
-        Refuses while a turn is running."""
-        with self._lock:
-            if self._proc is not None and self._proc.poll() is None:
-                raise RuntimeError("stop the running turn before deleting the draft")
-            shutil.rmtree(self.work, ignore_errors=True)
-            self._tx_cache = None
-            self._last_rc = None
-            self._turn_log_offset = None
-        audit_agent.stage_reference_docs(self.work, self.run_dir)
+    def _clear_session_state(self) -> None:
+        """Forget the cached conversation state (callers hold no turn)."""
+        self._tx_cache = None
+        self._last_rc = None
+        self._turn_log_offset = None
+        self._live_cache = None
 
     # ------------------------------------------------------------ transcript --
     def transcript(self) -> dict:
@@ -314,8 +313,9 @@ class StudioSession:
             )
         return sandbox.default_env(overrides)
 
-    def _argv(self, prompt: str) -> list[str]:
-        inner = [
+    def _inner_argv(self, prompt: str) -> list[str]:
+        """The pi invocation shared by every doc-agent flavor."""
+        return [
             "pi",
             "-p",
             "--session",
@@ -330,9 +330,6 @@ class StudioSession:
             "json",
             prompt,
         ]
-        return sandbox.build_argv(
-            self.work, inner, extra_ro_dest_binds=((str(self.run_dir), "/source"),)
-        )
 
     def start_turn(self, message: str) -> None:
         """Resume the session with ``message`` as the next user turn (background).
@@ -341,7 +338,7 @@ class StudioSession:
         and :meth:`read_doc` off disk to follow progress. Raises if a turn is
         already running or the message is empty.
         """
-        message = expand_command((message or "").strip())
+        message = self._expand((message or "").strip())
         if not message:
             raise ValueError("empty message")
         with self._lock:
@@ -392,11 +389,78 @@ class StudioSession:
     def state(self) -> dict:
         """Snapshot for the UI header / polling."""
         return {
-            "run_dir": str(self.run_dir),
-            "run_name": self.run_dir.name,
             "work_dir": str(self.work),
             "model": self.model,
             "thinking": self.thinking,
             "running": self.is_running(),
             "last_rc": self._last_rc,
+        }
+
+
+class StudioSession(DocAgentSession):
+    """One human+agent co-writing session over a single completed run.
+
+    The run is mounted read-only at ``/source``; the agent edits
+    ``final_writeup.md`` in a persistent workspace under
+    ``outputs/06_blogpost_studio/<run>/``.
+    """
+
+    def __init__(
+        self,
+        run_dir: str | Path,
+        work_dir: str | Path | None = None,
+        *,
+        model: str = DEFAULT_STUDIO_MODEL,
+        thinking: str = DEFAULT_THINKING,
+        env_text: str | None = None,
+    ) -> None:
+        self.run_dir = Path(run_dir).resolve()
+        if not audit_agent.is_run_dir(self.run_dir):
+            raise ValueError(
+                f"{self.run_dir} is not a run/project dir (no .pi_transcripts/ found)"
+            )
+        super().__init__(
+            work_dir or default_work_dir(self.run_dir),
+            model=model,
+            thinking=thinking,
+            env_text=env_text,
+            # collaboration + writing-standards prompt, constant for the session
+            system_prompt=render("studio_system.md.j2"),
+        )
+        audit_agent.stage_reference_docs(self.work, self.run_dir)
+
+    @property
+    def doc_path(self) -> Path:
+        return self.work / DOC_NAME
+
+    def _expand(self, message: str) -> str:
+        return expand_command(message)
+
+    def _argv(self, prompt: str) -> list[str]:
+        return sandbox.build_argv(
+            self.work,
+            self._inner_argv(prompt),
+            extra_ro_dest_binds=((str(self.run_dir), "/source"),),
+        )
+
+    def plots(self) -> list[str]:
+        """Figure files (.png/.pdf) the agent has produced under final_plots/."""
+        return audit_agent.list_plots(self.work)
+
+    def reset(self) -> None:
+        """Delete this run's draft: the document, conversation, figures, and
+        anything else the agent created — the workspace is re-staged fresh.
+        Refuses while a turn is running."""
+        with self._lock:
+            if self._proc is not None and self._proc.poll() is None:
+                raise RuntimeError("stop the running turn before deleting the draft")
+            shutil.rmtree(self.work, ignore_errors=True)
+            self._clear_session_state()
+        audit_agent.stage_reference_docs(self.work, self.run_dir)
+
+    def state(self) -> dict:
+        return {
+            **super().state(),
+            "run_dir": str(self.run_dir),
+            "run_name": self.run_dir.name,
         }

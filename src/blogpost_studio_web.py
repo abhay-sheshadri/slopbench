@@ -37,11 +37,12 @@ PREFIX = "/studio"
 
 # Each selected run gets its own StudioSession, cached by run-dir path so
 # switching away and back keeps its conversation, document, and any in-flight
-# turn. The HTTP server is threaded; the lock serializes session
-# creation/selection so two concurrent selects can't build two StudioSessions
-# for one run (they would share a workspace + session.jsonl but not a turn lock).
+# turn. There is deliberately no server-side "current run": every request names
+# its run, so each browser window manages its own run independently. The HTTP
+# server is threaded; the lock serializes session creation so two concurrent
+# selects can't build two StudioSessions for one run (they would share a
+# workspace + session.jsonl but not a turn lock).
 SESSIONS: dict[str, StudioSession] = {}
-CURRENT: StudioSession | None = None
 _SELECT_LOCK = threading.Lock()
 
 _IMG_TYPES = {
@@ -105,7 +106,6 @@ def list_runs() -> list[dict]:
                 "selectable": phase == "Completed",
                 "started": draft_mtime is not None,  # a studio draft exists
                 "drafting": bool(session and session.is_running()),
-                "current": CURRENT is not None and CURRENT.run_dir == d,
                 "mtime": max(mtime, draft_mtime or 0.0),
             }
         )
@@ -152,11 +152,18 @@ def _session_for(rd: Path) -> StudioSession:
         return session
 
 
+def _resolve(spec: str | None) -> StudioSession | None:
+    """Session for a request's explicit ``run`` param (created on first touch,
+    so a deep-linked window keeps working across server restarts). None when
+    the request names no run; ValueError when it names a bad one."""
+    if not spec:
+        return None
+    return _session_for(_validated_run_dir(spec))
+
+
 def select_run(spec: str) -> dict:
-    """Make ``spec`` (a run-dir path) the active session, creating it if needed."""
-    global CURRENT
-    CURRENT = _session_for(_validated_run_dir(spec))
-    return state_payload()
+    """Open (stage if needed) a run's session and return its state."""
+    return state_payload(_resolve(spec))
 
 
 def reset_all() -> dict:
@@ -209,12 +216,11 @@ def draft_all(dry: bool) -> dict:
     return {"targets": [r["name"] for r in targets], "started": started}
 
 
-def state_payload() -> dict:
-    s = CURRENT
+def state_payload(s: StudioSession | None) -> dict:
     return {"selected": False} if s is None else {"selected": True, **s.state()}
 
 
-def _workspace_image(rel: str) -> tuple[bytes, str] | None:
+def _workspace_image(s: StudioSession | None, rel: str) -> tuple[bytes, str] | None:
     """Read an image referenced by a RELATIVE path from inside the workspace.
 
     Lets the markdown preview render any figure the document points at — e.g.
@@ -223,7 +229,6 @@ def _workspace_image(rel: str) -> tuple[bytes, str] | None:
     be an image type, so this can't be used to read arbitrary files (transcripts,
     .env, /source, …).
     """
-    s = CURRENT
     rel = (rel or "").lstrip("/")
     if s is None or not rel:
         return None
@@ -242,9 +247,8 @@ def _workspace_image(rel: str) -> tuple[bytes, str] | None:
     return p.read_bytes(), ctype
 
 
-def _stream_payload() -> dict:
+def _stream_payload(s: StudioSession | None) -> dict:
     """The full state pushed to the client: chat + run/doc status."""
-    s = CURRENT
     if s is None:
         return {
             "selected": False,
@@ -274,7 +278,7 @@ def _stream_payload() -> dict:
     }
 
 
-def _cheap_sig() -> tuple:
+def _cheap_sig(s: StudioSession | None) -> tuple:
     """A cheap (no-parse) change key for the SSE loop: a couple of stat() calls.
 
     The transcript can grow to many MB, so re-reading and re-parsing it on every
@@ -282,7 +286,6 @@ def _cheap_sig() -> tuple:
     active run, and the running flag — and only build the full payload (which
     parses the transcript) when one of these actually moved.
     """
-    s = CURRENT
     if s is None:
         return ("",)
 
@@ -297,7 +300,7 @@ def _cheap_sig() -> tuple:
     # keying on it while idle would re-push the payload for stale log churn.
     running = s.is_running()
     log_sig = stat(s.log_path) if running else ()
-    return (str(s.run_dir), *stat(s.session_path), *stat(s.doc_path), *log_sig, running)
+    return (str(s.work), *stat(s.session_path), *stat(s.doc_path), *log_sig, running)
 
 
 # --------------------------------------------------------------------------- #
@@ -330,18 +333,24 @@ def handle(h, method: str) -> bool:
 
 def _get(h, path: str, query: str) -> None:
     if path in ("/", "/index.html"):
-        h._send(200, INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
-    elif path == "/api/runs":
-        h._json({"runs": list_runs()})
-    elif path == "/api/state":
-        h._json(state_payload())
+        return h._send(200, INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
+    if path == "/api/runs":
+        return h._json({"runs": list_runs()})
+    # Everything below acts on the run named by this request (?run=<path>) —
+    # there is no server-side selection, so each window is independent.
+    q = parse_qs(query)
+    try:
+        s = _resolve((q.get("run") or [""])[0])
+    except ValueError as exc:
+        return h._json({"error": str(exc)}, code=400)
+    if path == "/api/state":
+        h._json(state_payload(s))
     elif path == "/api/doc":
-        s = CURRENT
         h._json(s.read_doc() if s else {"content": "", "mtime": 0.0, "size": 0})
     elif path == "/api/stream":
-        _sse(h)
+        _sse(h, s)
     elif path == "/api/file":
-        data = _workspace_image((parse_qs(query).get("path") or [""])[0])
+        data = _workspace_image(s, (q.get("path") or [""])[0])
         if data is None:
             h._send(404, b"not found", "text/plain")
         else:
@@ -351,30 +360,34 @@ def _get(h, path: str, query: str) -> None:
 
 
 def _post(h, path: str) -> None:
+    body = h._read_body()
     if path == "/api/select":
         try:
-            h._json(select_run(h._read_body().get("run") or ""))
+            h._json(select_run(body.get("run") or ""))
         except (ValueError, RuntimeError) as exc:
             h._json({"error": str(exc)}, code=400)
         return
     if path == "/api/draft_all":
-        return h._json(draft_all(dry=bool(h._read_body().get("dry"))))
+        return h._json(draft_all(dry=bool(body.get("dry"))))
     if path == "/api/reset_all":
         try:
             return h._json(reset_all())
         except RuntimeError as exc:
             return h._json({"error": str(exc)}, code=409)
-    s = CURRENT
+    try:
+        s = _resolve(body.get("run") or "")
+    except ValueError as exc:
+        return h._json({"error": str(exc)}, code=400)
     if s is None:
         return h._json({"error": "no run selected"}, code=409)
     if path == "/api/chat":
         try:
-            s.start_turn((h._read_body().get("message") or "").strip())
+            s.start_turn((body.get("message") or "").strip())
         except (ValueError, RuntimeError) as exc:
             return h._json({"error": str(exc)}, code=409)
         h._json({"ok": True})
     elif path == "/api/doc":
-        content = h._read_body().get("content")
+        content = body.get("content")
         if not isinstance(content, str):
             return h._json({"error": "missing content"}, code=400)
         try:
@@ -409,8 +422,8 @@ def _send_image(h, body: bytes, ctype: str) -> None:
         pass
 
 
-def _sse(h) -> None:
-    """SSE: push the full studio payload whenever the cheap signature moves."""
+def _sse(h, s: StudioSession | None) -> None:
+    """SSE: push the run's full studio payload whenever its cheap signature moves."""
     try:
         h.send_response(200)
         h.send_header("Content-Type", "text/event-stream")
@@ -428,7 +441,7 @@ def _sse(h) -> None:
     deadline = time.monotonic() + 12 * 3600
     while time.monotonic() < deadline:
         try:
-            sig = _cheap_sig()
+            sig = _cheap_sig(s)
         except Exception:  # noqa: BLE001 - keep the stream alive
             sig = ("err",)
         try:
@@ -436,8 +449,8 @@ def _sse(h) -> None:
                 last_sig = sig
                 interval = 0.9
                 try:
-                    payload = (
-                        _stream_payload()
+                    payload = _stream_payload(
+                        s
                     )  # parses the transcript (only on change)
                 except Exception as exc:  # noqa: BLE001
                     payload = {"error": f"{type(exc).__name__}: {exc}"}
@@ -609,7 +622,7 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 </head>
 <body>
 <header>
-  <nav class="appnav"><a href="/">🔎 Runs</a><a class="on" href="/studio">📝 Studio</a><a href="/proposals">🗒 Proposals</a></nav>
+  <nav class="appnav"><a href="/">🔎 Runs</a><a href="/proposals">🗒 Proposals</a><a class="on" href="/studio">📝 Studio</a></nav>
   <button class="runpick" id="runpick">Select a run ▾</button>
   <span class="spacer"></span>
   <span class="meta" id="cost" title="model spend in this studio conversation"></span>
@@ -655,7 +668,10 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 <script>
 const $ = s => document.querySelector(s);
 const API = "/studio/api";
-let selected=false, running=false, docMtime=-1, editorDirty=false, mode="view", lastTurnsKey="";
+let selected=false, selectedRun=null, running=false, docMtime=-1, editorDirty=false, mode="view", lastTurnsKey="";
+// Every API call names this window's run explicitly — selection is per-window,
+// so several tabs can each drive a different run at the same time.
+const runQ=()=>selectedRun?("run="+encodeURIComponent(selectedRun)):"";
 let lastTurns=[];                 // last server-rendered turns (without optimistic ones)
 let queue=[], sending=false, sentBase=0;  // outgoing message queue (send while the agent works)
 const autoOpened=new Set();       // details we opened for the live stream (vs. user-opened)
@@ -672,7 +688,7 @@ function rewriteImgs(root){
     const s=img.getAttribute("src")||"";
     if(!s || /^(https?:|data:|\/)/i.test(s)) return;
     const rel=s.replace(/^\.\//,"");
-    img.src=API+"/file?path="+encodeURIComponent(rel)+"&v="+Math.floor(docMtime||0);
+    img.src=API+"/file?path="+encodeURIComponent(rel)+"&v="+Math.floor(docMtime||0)+"&"+runQ();
     img.loading="lazy";
     img.onerror=()=>{img.replaceWith(Object.assign(document.createElement("em"),
       {textContent:"⚠ missing image: "+rel,style:"color:var(--faint)"}));};
@@ -786,7 +802,7 @@ const editor=$("#editor"), preview=$("#preview"), hl=$("#editorHL");
 async function loadDoc(force){
   if(!selected) return;   // keep the "select a run" placeholder; nothing to load
   let d;
-  try{ d=await (await fetch(API+"/doc")).json(); }
+  try{ d=await (await fetch(API+"/doc?"+runQ())).json(); }
   catch(e){ return; }   // transient network error: the stream will retrigger us
   if(d.mtime===docMtime && !force) return;
   docMtime=d.mtime;
@@ -845,9 +861,10 @@ function autosize(){const t=$("#msg");t.style.height="auto";t.style.height=Math.
 // ---- server calls ----
 async function api(url,body){
   let r;
+  body={run:selectedRun||undefined,...(body||{})};   // every POST names this window's run
   try{
     r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},
-      body:body?JSON.stringify(body):undefined});
+      body:JSON.stringify(body)});
   }catch(e){ toast("network error — retry: "+e.message); return null; }
   const d=await r.json().catch(()=>({}));
   if(!r.ok){toast(d.error||"failed");return null;}
@@ -943,7 +960,7 @@ function drawRuns(){
   for(const r of rows){
     if((r.group||"")!==g){ g=r.group||""; html+=`<div class="dgroup">${esc(g||"runs")}</div>`; }
     const sel=r.selectable!==false;
-    html+=`<button class="runitem${r.current?' cur':''}${sel?'':' disabled'}" data-path="${esc(r.path)}"`
+    html+=`<button class="runitem${r.path===selectedRun?' cur':''}${sel?'':' disabled'}" data-path="${esc(r.path)}"`
       +`${sel?'':' disabled title="only finished runs can be opened"'}>`
       +`<span class="rn">${esc(r.name)}</span>`
       +`<span class="rt">${esc(r.mode||"")}${r.drafting?" · <i>drafting…</i>":r.started?" · <b>draft</b>":""}</span></button>`;
@@ -967,6 +984,9 @@ async function chooseRun(path){
 // ---- state + live stream ----
 function applyState(s){
   selected=!!s.selected;
+  selectedRun=selected?(s.run_dir||selectedRun):null;
+  // keep ?run= in the URL so a reload (or duplicated tab) reopens this run
+  history.replaceState(null,"","/studio"+(selectedRun?"?run="+encodeURIComponent(selectedRun):""));
   document.body.classList.toggle("noselect",!selected);
   $("#runpick").textContent=selected?(s.run_name+" ▾"):"Select a run ▾";
   document.title=selected?("Studio · "+s.run_name):"Blogpost Studio";
@@ -978,7 +998,7 @@ function applyState(s){
 let es=null;
 function bindStream(){
   if(es) es.close();
-  es=new EventSource(API+"/stream");
+  es=new EventSource(API+"/stream?"+runQ());
   es.onmessage=ev=>{
     const d=JSON.parse(ev.data);
     if(d.error){toast(d.error);return;}
@@ -1029,21 +1049,17 @@ editor.addEventListener("keydown",e=>{
 });
 addEventListener("beforeunload",()=>{
   if(editorDirty && !running && navigator.sendBeacon)
-    navigator.sendBeacon(API+"/doc",new Blob([JSON.stringify({content:editor.value})],{type:"application/json"}));
+    navigator.sendBeacon(API+"/doc",new Blob([JSON.stringify({run:selectedRun,content:editor.value})],{type:"application/json"}));
 });
 
 async function init(){
   setMode("view");
-  let st={selected:false};
-  try{ st=await (await fetch(API+"/state")).json(); }
-  catch(e){ toast("network error: "+e.message); }
-  applyState(st);
-  await loadDoc(true);
-  bindStream();
-  // Deep link: /studio?run=<path> (e.g. from the agent viewer) selects that run.
-  const pre=new URLSearchParams(location.search).get("run");
-  if(pre && !selected) await chooseRun(pre);
-  else if(!selected) openPicker();
+  // Selection is per-window: this tab's run comes from its URL (?run=), never
+  // from server state — so several windows can each work a different run.
+  const pre=new URLSearchParams(location.search).get("run");  // before applyState rewrites the URL
+  applyState({selected:false});
+  if(pre) await chooseRun(pre);
+  else { await loadDoc(true); bindStream(); openPicker(); }
 }
 init();
 </script>
