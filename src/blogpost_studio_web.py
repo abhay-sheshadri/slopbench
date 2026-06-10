@@ -30,6 +30,7 @@ from src.blogpost_studio import (
     STUDIO_ROOT,
     StudioSession,
     default_work_dir,
+    live_sandbox_workspaces,
 )
 from src.theme import EDITOR_CSS, HIGHLIGHT_JS, PALETTE_CSS, PREVIEW_CSS
 
@@ -75,6 +76,9 @@ def list_runs() -> list[dict]:
     folder runs you've already drafted come first (a draft edit counts as
     activity), then the rest newest-first."""
     runs = []
+    # One /proc scan: catches agents writing for workspaces we hold no session
+    # for (server restarted mid-turn, or the supervisor process died).
+    live_ws = live_sandbox_workspaces()
     for d in _discover_run_dirs(OUTPUTS_DIR):
         name = d.name
         mode = (
@@ -105,7 +109,8 @@ def list_runs() -> list[dict]:
                 "phase": phase,  # Active | Completed | Failed
                 "selectable": phase == "Completed",
                 "started": draft_mtime is not None,  # a studio draft exists
-                "drafting": bool(session and session.is_running()),
+                "drafting": bool(session and session.is_running())
+                or str(default_work_dir(d)) in live_ws,
                 "mtime": max(mtime, draft_mtime or 0.0),
             }
         )
@@ -174,7 +179,10 @@ def reset_all() -> dict:
     removed outright."""
     with _SELECT_LOCK:
         sessions = list(SESSIONS.values())
-    if any(s.is_running() for s in sessions):
+    busy = any(s.is_running() for s in sessions) or any(
+        ws.startswith(str(STUDIO_ROOT)) for ws in live_sandbox_workspaces()
+    )
+    if busy:
         raise RuntimeError("an agent is working in some session; stop it first")
     known = {str(s.work) for s in sessions}
     deleted = 0
@@ -914,7 +922,7 @@ async function pump(){
   if(ok){ running=true; renderChat(lastTurns); refreshControls(); }  // show typing bubble now
   else { sending=false; queue.shift(); renderChat(lastTurns); }  // send failed → drop it
 }
-const stop=()=>fetch(API+"/stop",{method:"POST"}).catch(()=>{});
+const stop=()=>api(API+"/stop",{});   // api() names this window's run
 
 function freshUi(){
   docMtime=-1; lastTurnsKey=""; lastTurns=[]; queue=[]; sending=false; autoOpened.clear();

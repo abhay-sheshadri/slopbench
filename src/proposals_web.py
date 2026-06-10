@@ -55,6 +55,10 @@ def _session(name: str, *, create: bool) -> ProposalSession | None:
 
 
 def list_proposals() -> list[dict]:
+    from src.blogpost_studio import live_sandbox_workspaces
+    from src.proposal_studio import WORK_ROOT
+
+    live_ws = live_sandbox_workspaces()  # catches turns we hold no session for
     items = []
     for p in sorted(PROPOSALS_DIR.glob("*.md")):
         st = p.stat()
@@ -64,7 +68,8 @@ def list_proposals() -> list[dict]:
                 "name": p.stem,
                 "mtime": st.st_mtime,
                 "size": st.st_size,
-                "busy": bool(s and s.is_running()),
+                "busy": bool(s and s.is_running())
+                or str(WORK_ROOT / p.stem) in live_ws,
             }
         )
     return items

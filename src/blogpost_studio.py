@@ -28,8 +28,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
@@ -95,6 +97,37 @@ def expand_command(message: str) -> str:
 # All studio workspaces live here, one dir per run.
 STUDIO_ROOT = ROOT / "outputs" / "06_blogpost_studio"
 
+# Where a running turn's json-stream offset is persisted (see start_turn): lets
+# a restarted server re-adopt an in-flight turn's live stream.
+TURN_OFFSET_NAME = "turn.offset"
+
+
+def live_sandbox_workspaces() -> set[str]:
+    """Workspace paths of every live bwrap sandbox on the host (one /proc scan).
+
+    This is the ground truth for "is an agent working on X?". It deliberately
+    ignores process ancestry: the supervisor (outer) bwrap is sometimes killed
+    (observed: rc=-9 minutes into a turn) while the sandboxed agent keeps
+    running re-parented to init and finishes the job — so neither our Popen
+    handle nor parent/child relationships can be trusted for liveness.
+    """
+    found: set[str] = set()
+    for p in os.listdir("/proc"):
+        if not p.isdigit():
+            continue
+        try:
+            argv = (Path("/proc") / p / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if not argv or not argv[0].endswith(b"bwrap"):
+            continue
+        for i in range(len(argv) - 2):
+            if argv[i] == b"--bind" and argv[i + 2] == b"/workspace":
+                raw = argv[i + 1].decode("utf-8", "replace")
+                found.add(os.path.abspath(raw))  # normalize: binds may be relative
+                break
+    return found
+
 
 def default_work_dir(run_dir: str | Path) -> Path:
     """Persistent studio workspace for a run: ``outputs/06_blogpost_studio/<run>``.
@@ -149,6 +182,7 @@ class DocAgentSession:
         )
         self._tx_cache: tuple | None = None  # ((mtime, size), parsed transcript)
         self._live_cache: dict | None = None  # incremental live_turns parse state
+        self._alive_cache: tuple | None = None  # (monotonic, bool) sandbox liveness
         self.work.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------- subclass surface --
@@ -208,6 +242,8 @@ class DocAgentSession:
         self._last_rc = None
         self._turn_log_offset = None
         self._live_cache = None
+        self._alive_cache = None
+        (self.work / TURN_OFFSET_NAME).unlink(missing_ok=True)
 
     # ------------------------------------------------------------ transcript --
     def transcript(self) -> dict:
@@ -243,7 +279,15 @@ class DocAgentSession:
         currently streaming partial one.
         """
         offset = self._turn_log_offset
-        if offset is None or not self.is_running():
+        if offset is None:
+            # Adopt an in-flight turn we didn't start (server restarted, or the
+            # outer bwrap died): the offset was persisted at turn start.
+            try:
+                offset = int((self.work / TURN_OFFSET_NAME).read_text())
+            except (OSError, ValueError):
+                return []
+            self._turn_log_offset = offset
+        if not self.is_running():
             return []
         # Incremental: the stream is poll-read every SSE tick and can grow to
         # many MB within one turn, so keep a cursor and only parse new bytes.
@@ -299,9 +343,48 @@ class DocAgentSession:
         return [t for t in turns if (t.get("ts") or 0) > after_ts]
 
     # ---------------------------------------------------------------- turns ---
+    def _sandbox_pids(self) -> list[int]:
+        """Host pids of bwrap processes sandboxing THIS workspace."""
+        target = os.path.abspath(str(self.work))
+        pids = []
+        for p in os.listdir("/proc"):
+            if not p.isdigit():
+                continue
+            try:
+                argv = (Path("/proc") / p / "cmdline").read_bytes().split(b"\0")
+            except OSError:
+                continue
+            if not argv or not argv[0].endswith(b"bwrap"):
+                continue
+            for i in range(len(argv) - 2):
+                if (
+                    argv[i] == b"--bind"
+                    and argv[i + 2] == b"/workspace"
+                    and os.path.abspath(argv[i + 1].decode("utf-8", "replace"))
+                    == target
+                ):
+                    pids.append(int(p))
+                    break
+        return pids
+
     def is_running(self) -> bool:
+        """Whether an agent turn is in flight — by ground truth, not ancestry.
+
+        The Popen handle alone is unreliable: the outer bwrap can be killed
+        while the sandboxed agent keeps drafting (re-parented to init), and a
+        server restart loses the handle entirely. So: our child if we have one,
+        else scan /proc for a live sandbox bound to this workspace (cached
+        briefly — the SSE loop polls this every second)."""
         with self._lock:
-            return self._proc is not None and self._proc.poll() is None
+            if self._proc is not None and self._proc.poll() is None:
+                return True
+        now = time.monotonic()
+        cached = self._alive_cache
+        if cached and now - cached[0] < 3.0:
+            return cached[1]
+        alive = bool(self._sandbox_pids())
+        self._alive_cache = (now, alive)
+        return alive
 
     def _env(self) -> dict[str, str]:
         if self._env_text is not None:
@@ -352,17 +435,24 @@ class DocAgentSession:
                 log.write(f"\n\n===== turn: {message[:200]!r} =====\n".encode())
                 log.flush()
                 self._turn_log_offset = self._log.stat().st_size
+                # Persisted so a restarted server can re-adopt the live stream.
+                (self.work / TURN_OFFSET_NAME).write_text(str(self._turn_log_offset))
                 proc = subprocess.Popen(
                     argv,
                     env=self._env(),
                     stdin=subprocess.DEVNULL,
                     stdout=log,
                     stderr=subprocess.STDOUT,
+                    # Detach from our session/group: a Ctrl-C server restart must
+                    # not take down in-flight turns (they're recoverable — the
+                    # transcript, doc, and this json stream all live on disk).
+                    start_new_session=True,
                 )
             except Exception:
                 log.close()
                 raise
             self._proc = proc
+            self._alive_cache = None
         threading.Thread(target=self._reap, args=(proc, log), daemon=True).start()
 
     def _reap(self, proc: subprocess.Popen, log) -> None:
@@ -379,12 +469,24 @@ class DocAgentSession:
                 pass
 
     def stop(self) -> bool:
-        """Kill the running turn, if any. Returns whether something was killed."""
+        """Kill the running turn, if any. Returns whether something was killed.
+
+        Kills both our own child (if alive) and any sandbox for this workspace
+        we no longer parent — adopted/orphaned turns included. SIGKILLing a
+        bwrap takes its whole PID namespace down with it."""
+        killed = False
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
                 self._proc.kill()
-                return True
-        return False
+                killed = True
+        for pid in self._sandbox_pids():
+            try:
+                os.kill(pid, signal.SIGKILL)
+                killed = True
+            except (OSError, ProcessLookupError):
+                pass
+        self._alive_cache = None
+        return killed
 
     def state(self) -> dict:
         """Snapshot for the UI header / polling."""
