@@ -294,15 +294,63 @@ def _mtime(d: Path) -> float:
     return 0.0
 
 
-def _newest_mtime_under(d: Path, *, limit: int = 8000) -> float:
-    """Best-effort newest meaningful run activity timestamp.
+_SKIP_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    "file_cache_dir",
+    ".cache",
+    "site-packages",
+}
+_SKIP_FILES = {".env", HEARTBEAT_FILE, RUNNING_MARKER, "manifest.json"}
+# Recent-activity scans are by far the hottest path (the dashboard polls every
+# few seconds, and a run dir can hold 100k+ files). Cache per run dir; the
+# health thresholds are 90s/20min, so a 15s-stale answer changes nothing.
+_MTIME_CACHE: dict[str, tuple[float, float]] = {}  # dir -> (computed_at, newest)
+_MTIME_TTL = 15.0
+
+
+def _newest_mtime_under(d: Path, *, limit: int = 20000) -> float:
+    """Best-effort newest meaningful run activity timestamp (briefly cached).
 
     Avoid dependency/cache trees; include transcripts, logs, results, writeups,
-    and source files the agent creates. This is for status display only, so it is
-    intentionally bounded and conservative.
+    and source files the agent creates. This is for status display only, so it
+    is intentionally bounded: one shared stat budget across all walks, and the
+    scan stops as soon as it finds a file fresh enough to prove the run is
+    active right now.
     """
+    now = time.time()
+    cached = _MTIME_CACHE.get(str(d))
+    if cached and now - cached[0] < _MTIME_TTL:
+        return cached[1]
+
     newest = _mtime(d)
-    seen = 0
+    budget = limit
+    fresh_cutoff = now - 5.0  # anything this new settles "active" — stop looking
+
+    def walk(root_dir: Path, skip_dirs: set[str]) -> bool:
+        """Fold mtimes under root_dir into ``newest``; True = stop scanning."""
+        nonlocal newest, budget
+        for root, dirs, files in os.walk(root_dir):
+            dirs[:] = [
+                x for x in dirs if x not in skip_dirs and not x.endswith(".dist-info")
+            ]
+            for fn in files:
+                if fn in _SKIP_FILES:
+                    continue
+                try:
+                    mt = os.stat(os.path.join(root, fn)).st_mtime
+                except OSError:
+                    continue
+                if mt > newest:
+                    newest = mt
+                budget -= 1
+                if newest >= fresh_cutoff or budget <= 0:
+                    return True
+        return False
+
     priority_roots = [
         d / ".pi_transcripts",
         d / "planner",
@@ -317,75 +365,27 @@ def _newest_mtime_under(d: Path, *, limit: int = 8000) -> float:
     except OSError:
         phase_dirs = []
     for phase_dir in phase_dirs:
-        cache_dir = phase_dir / "file_cache_dir"
-        try:
-            newest = max(newest, cache_dir.stat().st_mtime)
+        try:  # the shared LLM cache's mtime is a strong liveness signal by itself
+            newest = max(newest, (phase_dir / "file_cache_dir").stat().st_mtime)
         except OSError:
             pass
         priority_roots.extend(
-            [
-                phase_dir / "results",
-                phase_dir / "logs",
-                phase_dir / "plots",
-                phase_dir / "progress",
-            ]
+            phase_dir / sub for sub in ("results", "logs", "plots", "progress")
         )
 
     # Check high-signal output dirs first. Some phase workspaces contain many
     # source/cache files, and the bounded generic walk below can hit its limit
     # before reaching the result file that proves an experiment is still moving.
+    done = newest >= fresh_cutoff
     for root_dir in priority_roots:
-        if not root_dir.is_dir():
-            continue
-        for root, dirs, files in os.walk(root_dir):
-            dirs[:] = [
-                x
-                for x in dirs
-                if x
-                not in {
-                    ".git",
-                    ".venv",
-                    "venv",
-                    "node_modules",
-                    "__pycache__",
-                    "file_cache_dir",
-                    ".cache",
-                    "site-packages",
-                }
-                and not x.endswith(".dist-info")
-            ]
-            for fn in files:
-                if fn in {".env", HEARTBEAT_FILE, RUNNING_MARKER, "manifest.json"}:
-                    continue
-                try:
-                    newest = max(newest, (Path(root) / fn).stat().st_mtime)
-                except OSError:
-                    continue
+        if done:
+            break
+        if root_dir.is_dir():
+            done = walk(root_dir, _SKIP_DIRS)
+    if not done:
+        walk(d, _SKIP_DIRS | {"data"})
 
-    skip = {
-        ".git",
-        ".venv",
-        "venv",
-        "node_modules",
-        "__pycache__",
-        "file_cache_dir",
-        ".cache",
-        "data",
-        "site-packages",
-    }
-    skip_files = {".env", HEARTBEAT_FILE, RUNNING_MARKER, "manifest.json"}
-    for root, dirs, files in os.walk(d):
-        dirs[:] = [x for x in dirs if x not in skip and not x.endswith(".dist-info")]
-        for fn in files:
-            if fn in skip_files:
-                continue
-            try:
-                newest = max(newest, (Path(root) / fn).stat().st_mtime)
-            except OSError:
-                continue
-            seen += 1
-            if seen >= limit:
-                return newest
+    _MTIME_CACHE[str(d)] = (time.time(), newest)
     return newest
 
 
@@ -1747,8 +1747,9 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);}
 ::selection{background:rgba(122,162,247,.3)}
 .sidebar::-webkit-scrollbar,.main::-webkit-scrollbar,pre::-webkit-scrollbar{width:9px;height:9px}
 .sidebar::-webkit-scrollbar-thumb,.main::-webkit-scrollbar-thumb,pre::-webkit-scrollbar-thumb{background:var(--panel3);border-radius:6px}
-.app{display:grid;grid-template-columns:var(--sidebar-w,300px) 6px minmax(0,1fr);height:100vh}
-.app.lens-open{grid-template-columns:var(--sidebar-w,300px) 6px minmax(0,1fr) 6px var(--lens-w,420px)}
+/* 340px default: wide enough for the three nav tabs with real (color emoji) fonts. */
+.app{display:grid;grid-template-columns:var(--sidebar-w,340px) 6px minmax(0,1fr);height:100vh}
+.app.lens-open{grid-template-columns:var(--sidebar-w,340px) 6px minmax(0,1fr) 6px var(--lens-w,420px)}
 .sidebar{background:var(--panel);border-right:1px solid var(--border);overflow-y:auto;padding:12px}
 .resizer{cursor:col-resize;background:var(--border);transition:background .12s}
 .resizer:hover,.resizer.active{background:var(--accent)}
@@ -1756,7 +1757,7 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);}
 #lensResizer{grid-column:4}
 .ovbtn{width:100%;display:flex;align-items:center;justify-content:center;gap:8px;background:var(--panel2);border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:9px 10px;margin-bottom:11px;cursor:pointer;font-size:13px;font-weight:700;letter-spacing:.2px;transition:.12s}
 /* Same compact pill as the studio header so the nav keeps its shape across pages. */
-.sidenav{margin-bottom:11px;width:fit-content}
+.sidenav{margin-bottom:11px;width:fit-content;max-width:100%;flex-wrap:wrap}
 /* launch-a-run dialog */
 .launcher{position:fixed;left:12px;top:130px;z-index:60;width:min(440px,90vw);max-height:70vh;overflow:auto;
   background:var(--panel);border:1px solid var(--border);border-radius:10px;

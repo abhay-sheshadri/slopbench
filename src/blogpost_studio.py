@@ -147,6 +147,7 @@ class StudioSession:
             None  # where the running turn's json stream starts
         )
         self._tx_cache: tuple | None = None  # ((mtime, size), parsed transcript)
+        self._live_cache: dict | None = None  # incremental live_turns parse state
 
         audit_agent.stage_reference_docs(self.work, self.run_dir)
 
@@ -245,27 +246,44 @@ class StudioSession:
         offset = self._turn_log_offset
         if offset is None or not self.is_running():
             return []
-        try:
-            with self._log.open("rb") as f:
-                f.seek(offset)
-                data = f.read()
-        except OSError:
-            return []
-        messages: list[dict] = []
-        partial_line: str | None = None
-        for line in data.decode("utf-8", "replace").splitlines():
-            # Cheap prefix filters: update lines are huge (each repeats the
-            # whole partial message), so only the last one — the current
-            # streaming state — ever gets json-parsed.
-            if line.startswith('{"type":"message_update"'):
-                partial_line = line
-            elif line.startswith('{"type":"message_end"'):
-                try:
-                    msg = json.loads(line).get("message") or {}
-                except json.JSONDecodeError:  # torn write: pi is mid-append
-                    continue
-                messages.append(msg)
-                partial_line = None  # that partial completed; drop it
+        # Incremental: the stream is poll-read every SSE tick and can grow to
+        # many MB within one turn, so keep a cursor and only parse new bytes.
+        # The last (possibly torn, mid-append) line stays buffered until its
+        # newline arrives. Guarded by the lock — two pages may stream at once.
+        with self._lock:
+            cache = self._live_cache
+            if cache is None or cache["start"] != offset:
+                cache = self._live_cache = {
+                    "start": offset,
+                    "pos": offset,
+                    "tail": b"",
+                    "messages": [],
+                    "partial": None,
+                }
+            try:
+                with self._log.open("rb") as f:
+                    f.seek(cache["pos"])
+                    data = f.read()
+            except OSError:
+                return []
+            cache["pos"] += len(data)
+            lines = (cache["tail"] + data).split(b"\n")
+            cache["tail"] = lines.pop()
+            for raw in lines:
+                line = raw.decode("utf-8", "replace")
+                # Cheap prefix filters: update lines are huge (each repeats the
+                # whole partial message), so only the last one — the current
+                # streaming state — ever gets json-parsed.
+                if line.startswith('{"type":"message_update"'):
+                    cache["partial"] = line
+                elif line.startswith('{"type":"message_end"'):
+                    try:
+                        cache["messages"].append(json.loads(line).get("message") or {})
+                    except json.JSONDecodeError:
+                        continue
+                    cache["partial"] = None  # that partial completed; drop it
+            messages = list(cache["messages"])
+            partial_line = cache["partial"]
         if partial_line is not None:
             try:
                 messages.append(json.loads(partial_line).get("message") or {})

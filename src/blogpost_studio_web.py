@@ -420,8 +420,11 @@ def _sse(h) -> None:
         h.wfile.flush()
     except (BrokenPipeError, ConnectionError, OSError):
         return
+    # 0.9s between payloads while things change: mid-turn the agent log moves
+    # every few hundred ms, and rebuilding + shipping the full payload at 0.4s
+    # doubled the work for no visible smoothness gain.
     last_sig = None
-    interval = 0.4
+    interval = 0.9
     deadline = time.monotonic() + 12 * 3600
     while time.monotonic() < deadline:
         try:
@@ -431,7 +434,7 @@ def _sse(h) -> None:
         try:
             if sig != last_sig:
                 last_sig = sig
-                interval = 0.4
+                interval = 0.9
                 try:
                     payload = (
                         _stream_payload()
