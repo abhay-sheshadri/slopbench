@@ -16,16 +16,19 @@ Access policy). Workspaces persist under ``outputs/06_blogpost_studio/<run>/``.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from src import audit_agent
-from src.agent_viewer import OUTPUTS_DIR, _discover_run_dirs, _run_item
+from src.agent_viewer import OUTPUTS_DIR, ROOT, _discover_run_dirs, _run_item
 from src.blogpost_studio import (
     DOC_NAME,
     SESSION_NAME,
@@ -427,6 +430,11 @@ def _post(h, path: str) -> None:
         except RuntimeError as exc:
             return h._json({"error": str(exc)}, code=409)
         h._json({"ok": True, **meta})
+    elif path == "/api/gdoc":
+        try:
+            h._json(export_gdoc(s))
+        except ValueError as exc:
+            return h._json({"error": str(exc)}, code=400)
     elif path == "/api/reset":
         try:
             s.reset()
@@ -439,28 +447,17 @@ def _post(h, path: str) -> None:
         h._send(404, b"not found", "text/plain")
 
 
-def export_docx(s: StudioSession) -> bytes:
-    """The draft as a .docx (pandoc), figures embedded — drag into Google Drive
-    and it converts to a Doc. (One-click Doc-link upload needs Google
-    credentials; slot it in here when they exist.)"""
+def _pandoc(s: StudioSession, args: list[str], out_suffix: str) -> bytes:
+    """Render the draft through pandoc (figures resolved from the workspace)."""
     if not s.doc_path.exists():
         raise ValueError("no draft yet")
-    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as t:
+    with tempfile.NamedTemporaryFile(suffix=out_suffix, delete=False) as t:
         out = t.name
     try:
         r = subprocess.run(
-            [
-                "pandoc",
-                str(s.doc_path),
-                "-f",
-                "gfm",
-                "-t",
-                "docx",
-                "-o",
-                out,
-                "--resource-path",
-                str(s.work),
-            ],
+            ["pandoc", str(s.doc_path), "-f", "gfm", "-o", out]
+            + ["--resource-path", str(s.work)]
+            + args,
             cwd=s.work,
             capture_output=True,
             text=True,
@@ -471,6 +468,47 @@ def export_docx(s: StudioSession) -> bytes:
         return Path(out).read_bytes()
     finally:
         Path(out).unlink(missing_ok=True)
+
+
+def export_docx(s: StudioSession) -> bytes:
+    """The draft as a .docx, figures embedded — drag into Google Drive and it
+    converts to a Doc."""
+    return _pandoc(s, ["-t", "docx"], ".docx")
+
+
+def export_gdoc(s: StudioSession) -> dict:
+    """Create a Google Doc of the draft and return its URL.
+
+    Goes through the user's Apps Script web app (see scripts/gdoc_webapp.gs):
+    pandoc renders the draft to standalone HTML with figures embedded as data
+    URIs, the web app converts that to a native Doc in their Drive and shares
+    it anyone-with-link-can-comment.
+    """
+    from src.runner_utils import parse_env_text
+
+    env_path = ROOT / ".env"
+    env = parse_env_text(env_path.read_text()) if env_path.exists() else {}
+    url = env.get("GDOC_WEBAPP_URL") or os.environ.get("GDOC_WEBAPP_URL")
+    if not url:
+        raise ValueError(
+            "GDOC_WEBAPP_URL is not set — do the 3-minute setup described in "
+            "scripts/gdoc_webapp.gs, then add the web app URL to .env"
+        )
+    html = _pandoc(s, ["-t", "html", "--standalone", "--embed-resources"], ".html")
+    body = json.dumps(
+        {"title": s.run_dir.name.replace("_", " "), "html": html.decode("utf-8")}
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body, headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:  # follows the
+            out = json.loads(resp.read().decode("utf-8"))  # script.google redirect
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Google Doc creation failed: {exc}")
+    if not out.get("url"):
+        raise ValueError(f"web app returned no url: {str(out)[:200]}")
+    return {"url": out["url"]}
 
 
 def _send_image(h, body: bytes, ctype: str) -> None:
@@ -713,7 +751,8 @@ details.think .body2{color:#c8bfe7;font-style:italic}
       <button id="viewtoggle">✎ Edit</button>
       <span class="spacer"></span>
       <span class="meta" id="meta"></span>
-      <button id="exportbtn" title="Download the draft as .docx (figures embedded) — drag into Google Drive to get a Doc">⇩ .docx</button>
+      <button id="gdocbtn" title="Create a Google Doc of this draft in your Drive and open it (needs GDOC_WEBAPP_URL — see scripts/gdoc_webapp.gs)">→ Google Doc</button>
+      <button id="exportbtn" title="Download the draft as .docx (figures embedded)">⇩ .docx</button>
       <button class="danger" id="delbtn" title="Delete this run's draft, figures, and conversation">Delete draft</button>
     </div>
     <div id="docview" class="view">
@@ -941,6 +980,7 @@ function refreshControls(){
   $("#stopbtn").style.display = running ? "" : "none";
   $("#delbtn").disabled = !selected || running;
   $("#exportbtn").disabled = !selected;
+  $("#gdocbtn").disabled = !selected;
   // You can edit the document whenever a run is selected — even while the agent works.
   editor.readOnly = !selected;
 }
@@ -1111,6 +1151,16 @@ $("#send").onclick=send;
 $("#stopbtn").onclick=stop;
 $("#delbtn").onclick=deleteDraft;
 $("#exportbtn").onclick=()=>{ if(selected) location.href=API+"/export?"+runQ(); };
+$("#gdocbtn").onclick=async()=>{
+  if(!selected) return;
+  const b=$("#gdocbtn"), prev=b.textContent;
+  b.disabled=true; b.textContent="creating…";
+  const d=await api(API+"/gdoc",{});
+  b.disabled=false; b.textContent=prev;
+  if(!d) return;
+  window.open(d.url,"_blank");
+  prompt("Google Doc created — link (anyone can comment):", d.url);
+};
 $("#runpick").onclick=()=>$("#picker").classList.contains("show")?closePicker():openPicker();
 $("#pickerSearch").addEventListener("input",drawRuns);
 $("#showGoal").onchange=e=>{showGoal=e.target.checked;drawRuns();};
