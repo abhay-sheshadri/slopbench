@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -357,6 +359,28 @@ def _get(h, path: str, query: str) -> None:
         h._json(s.read_doc() if s else {"content": "", "mtime": 0.0, "size": 0})
     elif path == "/api/stream":
         _sse(h, s)
+    elif path == "/api/export":
+        if s is None:
+            return h._json({"error": "no run selected"}, code=400)
+        try:
+            body = export_docx(s)
+        except ValueError as exc:
+            return h._json({"error": str(exc)}, code=400)
+        try:
+            h.send_response(200)
+            h.send_header(
+                "Content-Type",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+            h.send_header(
+                "Content-Disposition",
+                f'attachment; filename="{s.run_dir.name}_writeup.docx"',
+            )
+            h.send_header("Content-Length", str(len(body)))
+            h.end_headers()
+            h.wfile.write(body)
+        except (BrokenPipeError, ConnectionError, OSError):
+            pass
     elif path == "/api/file":
         data = _workspace_image(s, (q.get("path") or [""])[0])
         if data is None:
@@ -413,6 +437,40 @@ def _post(h, path: str) -> None:
         h._json({"ok": True, "killed": s.stop()})
     else:
         h._send(404, b"not found", "text/plain")
+
+
+def export_docx(s: StudioSession) -> bytes:
+    """The draft as a .docx (pandoc), figures embedded — drag into Google Drive
+    and it converts to a Doc. (One-click Doc-link upload needs Google
+    credentials; slot it in here when they exist.)"""
+    if not s.doc_path.exists():
+        raise ValueError("no draft yet")
+    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as t:
+        out = t.name
+    try:
+        r = subprocess.run(
+            [
+                "pandoc",
+                str(s.doc_path),
+                "-f",
+                "gfm",
+                "-t",
+                "docx",
+                "-o",
+                out,
+                "--resource-path",
+                str(s.work),
+            ],
+            cwd=s.work,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if r.returncode != 0:
+            raise ValueError(f"pandoc failed: {r.stderr[:300]}")
+        return Path(out).read_bytes()
+    finally:
+        Path(out).unlink(missing_ok=True)
 
 
 def _send_image(h, body: bytes, ctype: str) -> None:
@@ -655,6 +713,7 @@ details.think .body2{color:#c8bfe7;font-style:italic}
       <button id="viewtoggle">✎ Edit</button>
       <span class="spacer"></span>
       <span class="meta" id="meta"></span>
+      <button id="exportbtn" title="Download the draft as .docx (figures embedded) — drag into Google Drive to get a Doc">⇩ .docx</button>
       <button class="danger" id="delbtn" title="Delete this run's draft, figures, and conversation">Delete draft</button>
     </div>
     <div id="docview" class="view">
@@ -881,6 +940,7 @@ function refreshControls(){
   $("#send").disabled = $("#msg").disabled = !selected;
   $("#stopbtn").style.display = running ? "" : "none";
   $("#delbtn").disabled = !selected || running;
+  $("#exportbtn").disabled = !selected;
   // You can edit the document whenever a run is selected — even while the agent works.
   editor.readOnly = !selected;
 }
@@ -1050,6 +1110,7 @@ function bindStream(){
 $("#send").onclick=send;
 $("#stopbtn").onclick=stop;
 $("#delbtn").onclick=deleteDraft;
+$("#exportbtn").onclick=()=>{ if(selected) location.href=API+"/export?"+runQ(); };
 $("#runpick").onclick=()=>$("#picker").classList.contains("show")?closePicker():openPicker();
 $("#pickerSearch").addEventListener("input",drawRuns);
 $("#showGoal").onchange=e=>{showGoal=e.target.checked;drawRuns();};

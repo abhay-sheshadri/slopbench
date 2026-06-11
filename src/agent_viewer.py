@@ -29,7 +29,7 @@ import threading
 import time
 import uuid
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
@@ -1482,6 +1482,137 @@ def _lens_signature(data: dict) -> str:
 # Launching new runs from the UI
 # --------------------------------------------------------------------------- #
 RUN_OUTPUT_ROOT = OUTPUTS_DIR / "03_run_agents"
+FEEDBACK_DIR = ROOT / "feedback"
+
+
+def _read_json(p: Path) -> dict | None:
+    try:
+        return json.loads(p.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _proposal_and_mode(run_name: str) -> tuple[str, str]:
+    """Split a run dir name back into (proposal, mode), or raise ValueError."""
+    for m in MODES:
+        if run_name.endswith(f"_{m}"):
+            return run_name[: -len(m) - 1], m
+    raise ValueError(f"{run_name} doesn't end in a known mode ({'/'.join(MODES)})")
+
+
+def _tmux_run(session: str, cmd: str) -> None:
+    """Run cmd in a detached tmux session (created if needed) — survives us."""
+    if (
+        subprocess.run(
+            ["tmux", "has-session", "-t", session], capture_output=True
+        ).returncode
+        != 0
+    ):
+        subprocess.run(
+            ["tmux", "new-session", "-d", "-s", session, "-c", str(ROOT)], check=True
+        )
+    subprocess.run(["tmux", "send-keys", "-t", session, cmd, "Enter"], check=True)
+
+
+def _feedback_dir(run_name: str) -> Path:
+    return FEEDBACK_DIR / run_name
+
+
+def project_info(rel: str) -> dict:
+    """Everything the run-page Project panel shows: state, why-failed, feedback."""
+    base = _safe_disk_path(rel)
+    if base is None or not (base / ".pi_transcripts").exists():
+        raise ValueError("unknown run")
+    item = _run_item(base, rel)
+    info = {
+        "name": base.name,
+        "phase": item.get("phase"),
+        "mode": item.get("mode"),
+        "status": item.get("status"),
+    }
+    hb = _read_json(base / ".pi_transcripts" / HEARTBEAT_FILE) or {}
+    ts = _parse_iso_ts(hb.get("heartbeat_at"))
+    info["heartbeat"] = {
+        "status": hb.get("status"),
+        "age_s": int(time.time() - ts) if ts else None,
+    }
+    st = _read_json(base / "planner" / "RUN_LOOP_STATE.json") or {}
+    info["run_loop"] = {
+        "status": st.get("status"),
+        "segment": st.get("currentSegment"),
+        "stage": st.get("stage"),
+        "error": st.get("error"),
+    }
+    mf = _read_json(base / ".pi_transcripts" / "manifest.json") or {}
+    rcs = [
+        r.get("returncode")
+        for r in mf.get("runs") or []
+        if r.get("returncode") is not None
+    ]
+    info["last_returncode"] = rcs[-1] if rcs else None
+    fdir = _feedback_dir(base.name)
+    info["feedback"] = sorted(
+        (
+            {"file": p.name, "text": p.read_text(errors="replace")}
+            for p in fdir.glob("*.md")
+        ),
+        key=lambda f: f["file"],
+    )
+    return info
+
+
+def save_feedback(rel: str, text: str) -> dict:
+    """Append a timestamped feedback note under feedback/<run_name>/."""
+    base = _safe_disk_path(rel)
+    if base is None or not (base / ".pi_transcripts").exists():
+        raise ValueError("unknown run")
+    if not (text or "").strip():
+        raise ValueError("empty feedback")
+    fdir = _feedback_dir(base.name)
+    fdir.mkdir(parents=True, exist_ok=True)
+    p = fdir / (datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + ".md")
+    p.write_text(text.strip() + "\n", encoding="utf-8")
+    return {"file": p.name, "path": str(p.relative_to(ROOT))}
+
+
+def resume_run(rel: str) -> dict:
+    """Relaunch a dead (failed/killed) run with --resume, detached in tmux."""
+    base = _safe_disk_path(rel)
+    if base is None or not (base / ".pi_transcripts").exists():
+        raise ValueError("unknown run")
+    if _run_item(base, rel).get("phase") == "Active":
+        raise ValueError(
+            "run looks alive (fresh heartbeat) — refusing to double-launch"
+        )
+    proposal, mode = _proposal_and_mode(base.name)
+    session = f"agent_{base.name}"
+    _tmux_run(
+        session,
+        f".venv/bin/python experiments/03_run_agents/run.py "
+        f"--projects {proposal} --modes {mode} --resume",
+    )
+    return {"ok": True, "session": session}
+
+
+def continue_run(rel: str, feedback_text: str) -> dict:
+    """Relaunch a COMPLETED multi_phase run as a continuation: the feedback note
+    becomes the new instructions (run.py --continue-file)."""
+    base = _safe_disk_path(rel)
+    if base is None or not (base / ".pi_transcripts").exists():
+        raise ValueError("unknown run")
+    proposal, mode = _proposal_and_mode(base.name)
+    if mode != "multi_phase":
+        raise ValueError("continuation only supports multi_phase runs")
+    if _run_item(base, rel).get("phase") != "Completed":
+        raise ValueError("only completed runs can be continued")
+    saved = save_feedback(rel, feedback_text)  # the continue-file lives in feedback/
+    session = f"agent_{base.name}"
+    _tmux_run(
+        session,
+        f".venv/bin/python experiments/03_run_agents/run.py "
+        f"--projects {proposal} --modes multi_phase --continue-file {ROOT / saved['path']}",
+    )
+    return {"ok": True, "session": session, "feedback": saved["path"]}
 
 
 def launch_options() -> dict:
@@ -1519,19 +1650,9 @@ def launch_run(proposal: str, mode: str) -> dict:
         == 0
     ):
         raise ValueError(f"tmux session {session} already exists")
-    subprocess.run(
-        ["tmux", "new-session", "-d", "-s", session, "-c", str(ROOT)], check=True
-    )
-    subprocess.run(
-        [
-            "tmux",
-            "send-keys",
-            "-t",
-            session,
-            f".venv/bin/python experiments/03_run_agents/run.py --projects {proposal} --modes {mode}",
-            "Enter",
-        ],
-        check=True,
+    _tmux_run(
+        session,
+        f".venv/bin/python experiments/03_run_agents/run.py --projects {proposal} --modes {mode}",
     )
     return {"ok": True, "session": session}
 
@@ -1666,6 +1787,21 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 except ValueError as exc:
                     self._json({"error": str(exc)}, code=400)
+            elif path in ("/api/feedback", "/api/resume", "/api/continue"):
+                body = self._read_body()
+                fn = {
+                    "/api/feedback": lambda: save_feedback(
+                        body.get("run") or "", body.get("text") or ""
+                    ),
+                    "/api/resume": lambda: resume_run(body.get("run") or ""),
+                    "/api/continue": lambda: continue_run(
+                        body.get("run") or "", body.get("text") or ""
+                    ),
+                }[path]
+                try:
+                    self._json(fn())
+                except ValueError as exc:
+                    self._json({"error": str(exc)}, code=400)
             elif path == "/api/lens/ask":
                 body = self._read_body()
                 self._json(
@@ -1695,6 +1831,12 @@ class Handler(BaseHTTPRequestHandler):
             path = parsed.path
             if path == "/api/launch/options":
                 self._json(launch_options())
+            elif path == "/api/project":
+                rel = (parse_qs(parsed.query).get("run") or [""])[0]
+                try:
+                    self._json(project_info(rel))
+                except ValueError as exc:
+                    self._json({"error": str(exc)}, code=400)
             elif path in ("/", "/index.html"):
                 self._send(200, INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
             elif path == "/api/tree":
@@ -1770,6 +1912,25 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);}
 .lsub{color:var(--muted);font-size:11.5px;margin-bottom:10px}
 .lrow{display:flex;align-items:center;gap:6px;padding:4px 2px;border-top:1px solid var(--border)}
 .lrow:first-child{border-top:0}
+/* project panel (feedback / resume / continue), anchored under the topbar */
+.projpanel{position:fixed;right:14px;top:96px;z-index:60;width:min(480px,92vw);max-height:75vh;overflow:auto;
+  background:var(--panel);border:1px solid var(--border);border-radius:10px;
+  box-shadow:0 16px 48px rgba(0,0,0,.6);padding:12px;display:flex;flex-direction:column;gap:9px}
+.projpanel[hidden]{display:none}
+.pp-name{color:var(--muted);font-family:var(--mono);font-size:11.5px;font-weight:400;margin-left:8px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:55%}
+.pp-status{font-size:12px;color:var(--muted);font-family:var(--mono);line-height:1.7;
+  background:var(--panel2);border:1px solid var(--border);border-radius:7px;padding:8px 10px}
+.pp-status b{color:var(--fg)} .pp-status .bad{color:var(--err)} .pp-status .good{color:var(--ok)}
+#ppText{resize:vertical;background:var(--panel2);color:var(--fg);border:1px solid var(--border);
+  border-radius:7px;padding:8px 10px;font:12.5px/1.5 var(--sans);outline:none}
+#ppText:focus{border-color:var(--accent)}
+.pp-actions{display:flex;align-items:center;gap:8px}
+.pp-actions .spacer{flex:1}
+.pp-fb{display:flex;flex-direction:column;gap:5px}
+.pp-fb .fbitem{font-size:11.5px;color:var(--muted);border-left:2px solid var(--border);padding:2px 8px;
+  white-space:pre-wrap;max-height:110px;overflow:auto}
+.pp-fb .fbitem .fbdate{color:var(--faint);font-family:var(--mono);font-size:10px}
 .lname{flex:1;min-width:0;font-size:12px;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .lmode{font-size:11px;padding:2px 9px}
 .ovbtn:hover{border-color:var(--accent)}
@@ -1962,6 +2123,7 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
       <span class="title" id="title">Select a run</span>
       <span class="costlbl" id="costlbl" style="display:none" title="total model spend on this run"></span>
       <div class="controls">
+        <button class="tbtn" id="projBtn" disabled title="Feedback, resume, and continuation for this run">⚙ Project</button>
         <button class="tbtn" id="tabsToggle" title="Hide / show the phase tabs" style="display:none">▾ phases</button>
         <button class="tbtn" id="toggleAll" title="Expand / collapse all blocks">expand</button>
         <button class="tbtn lens-toggle" id="lensBtn" disabled title="Open a run to ask the read-only oversight agent about it">🔍 Run Lens</button>
@@ -1969,6 +2131,18 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
       </div>
     </div>
     <div id="sesstabs" class="sesstabs"></div>
+    </div>
+    <div class="projpanel" id="projpanel" hidden>
+      <div class="lhead">Project <span class="pp-name" id="ppName"></span><button class="lclose" id="ppClose" title="Close">×</button></div>
+      <div class="pp-status" id="ppStatus"></div>
+      <textarea id="ppText" rows="5" placeholder="Feedback / further instructions for this project…&#10;Saved under feedback/<run>/ — and used as the new instructions if you continue the run."></textarea>
+      <div class="pp-actions">
+        <button class="mini" id="ppSave">Save feedback</button>
+        <span class="spacer"></span>
+        <button class="mini" id="ppResume" hidden title="Relaunch this run with --resume in its tmux session">⟲ Resume run</button>
+        <button class="mini" id="ppContinue" hidden title="Relaunch this completed run with the feedback above as its new instructions">➜ Continue with this feedback</button>
+      </div>
+      <div class="pp-fb" id="ppFb"></div>
     </div>
     <div class="content" id="content"><div class="empty">Click through the folders on the left and pick a run to view its transcript.</div></div>
   </div>
@@ -2176,6 +2350,7 @@ function selectRun(id){
   state.agentId=id;state.sess=0;state._pickDefault=true;location.hash=encodeURIComponent(id);
   renderTree(state.items);   // refresh active highlight
   if(switching)showContentLoading(id);   // instant feedback instead of a frozen-looking pane
+  if(switching){const pp=document.getElementById("projpanel"); if(pp)pp.hidden=true;}  // stale run's panel
   openStream();
   // The Run Lens is bound to a specific run: opening a run makes it available
   // and (on a fresh run) docks it open on the side; switching clears stale state.
@@ -2193,6 +2368,8 @@ function lensSetOpen(open,focus){
   const btn=document.getElementById("lensBtn");
   btn.classList.toggle("active",open);
   btn.disabled=!state.agentId;             // no run selected -> can't open the lens
+  const pb=document.getElementById("projBtn");
+  if(pb) pb.disabled=!state.agentId;       // same gate for the project panel
   if(open){updateLensCtx(); if(focus)document.getElementById("lensInput").focus();}
 }
 const LENS_EMPTY='<div class="lens-empty empty">Ask a read-only agent about this run \u2014 its state, code, or transcripts.</div>';
@@ -2797,6 +2974,64 @@ async function launchRun(p,m){
 }
 document.getElementById("launchBtn").onclick=openLauncher;
 document.getElementById("launchClose").onclick=()=>document.getElementById("launcher").hidden=true;
+
+// ---- project panel: feedback / resume / continue for the open run ----
+async function openProject(){
+  const el=document.getElementById("projpanel");
+  if(!el.hidden){el.hidden=true;return;}
+  if(!state.agentId) return;
+  el.hidden=false;
+  document.getElementById("ppName").textContent=state.agentId.split("/").pop();
+  document.getElementById("ppStatus").textContent="loading…";
+  const d=await jget("/api/project?run="+encodeURIComponent(state.agentId),true);
+  if(!d||d.error){document.getElementById("ppStatus").textContent=(d&&d.error)||"failed to load";return;}
+  const hb=d.heartbeat||{}, rl=d.run_loop||{};
+  const cls=d.phase==="Failed"?"bad":(d.phase==="Active"?"good":"");
+  let rows=[`state: <b class="${cls}">${esc(d.phase||"?")}</b>`];
+  if(hb.status) rows.push(`heartbeat: ${esc(hb.status)}${hb.age_s!=null?` (${hb.age_s<120?hb.age_s+"s":Math.round(hb.age_s/60)+"min"} ago)`:""}`);
+  if(rl.status) rows.push(`run loop: ${esc(rl.status)} — segment ${rl.segment??"?"}, stage ${esc(rl.stage||"?")}`);
+  if(rl.error) rows.push(`<span class="bad">error: ${esc(String(rl.error)).slice(0,300)}</span>`);
+  if(d.last_returncode!=null){
+    const rc=d.last_returncode;
+    rows.push(`last exit: ${rc}${rc<0?` <span class="bad">(killed by signal ${-rc})</span>`:""}`);
+  }
+  document.getElementById("ppStatus").innerHTML=rows.join("<br>");
+  document.getElementById("ppResume").hidden = d.phase!=="Failed";
+  document.getElementById("ppContinue").hidden = !(d.phase==="Completed" && d.mode==="multi_phase");
+  const fb=document.getElementById("ppFb");
+  fb.innerHTML=(d.feedback||[]).map(f=>
+    `<div class="fbitem"><span class="fbdate">${esc(f.file)}</span>\n${esc(f.text)}</div>`).join("")
+    ||'<div class="fbitem" style="border-color:transparent">no feedback saved yet</div>';
+}
+async function ppPost(url,body,confirmMsg){
+  if(confirmMsg && !confirm(confirmMsg)) return null;
+  let r,d;
+  try{
+    r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    d=await r.json();
+  }catch(e){alert("failed: "+e.message);return null;}
+  if(!r.ok){alert(d.error||"failed");return null;}
+  return d;
+}
+document.getElementById("projBtn").onclick=openProject;
+document.getElementById("ppClose").onclick=()=>document.getElementById("projpanel").hidden=true;
+document.getElementById("ppSave").onclick=async()=>{
+  const t=document.getElementById("ppText").value;
+  const d=await ppPost("/api/feedback",{run:state.agentId,text:t});
+  if(d){document.getElementById("ppText").value="";openProject();openProject();}
+};
+document.getElementById("ppResume").onclick=async()=>{
+  const d=await ppPost("/api/resume",{run:state.agentId},
+    "Resume this run (relaunch with --resume in its tmux session)?");
+  if(d) alert(`Resuming in tmux session ${d.session}. It will show Active once the heartbeat returns.`);
+};
+document.getElementById("ppContinue").onclick=async()=>{
+  const t=document.getElementById("ppText").value.trim();
+  if(!t){alert("Write the continuation instructions in the feedback box first.");return;}
+  const d=await ppPost("/api/continue",{run:state.agentId,text:t},
+    "Continue this COMPLETED run with the feedback above as its new instructions?\n\nThis starts a real, long-running (and expensive) agent run.");
+  if(d) alert(`Continuation launched in tmux session ${d.session} (instructions saved to ${d.feedback}).`);
+};
 
 if(state.agentId)lensSwitchTo(state.agentId);
 lensSetOpen(true,false);   // open the lens iff a run is deep-linked; otherwise it stays closed/disabled
