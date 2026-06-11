@@ -274,7 +274,9 @@ details.think .body2{color:#c8bfe7;font-style:italic}
   margin-right:3px;animation:tb 1.2s infinite}
 .tdot:nth-child(2){animation-delay:.15s}.tdot:nth-child(3){animation-delay:.3s}
 @keyframes tb{0%,60%,100%{opacity:.25}30%{opacity:1}}
-.composer{display:flex;gap:8px;padding:10px;border-top:1px solid var(--border)}
+.composer{display:flex;gap:8px;padding:10px;border-top:1px solid var(--border);align-items:flex-end}
+.composer .btncol{display:flex;flex-direction:column;gap:6px;justify-content:flex-end}
+.composer .btncol button{width:100%;white-space:nowrap}
 .composer textarea{flex:1;resize:none;background:var(--panel2);color:var(--fg);
   border:1px solid var(--border);border-radius:8px;padding:8px 10px;font:13px/1.45 var(--sans);outline:none}
 .composer textarea:focus{border-color:var(--accent)}
@@ -334,12 +336,14 @@ details.think .body2{color:#c8bfe7;font-style:italic}
   <section id="chatcol">
     <div class="chathead">Agent <span class="meta" id="cost"></span><span class="spacer"></span>
       <button class="mini2" id="polishbtn" title="Ask the agent to clean up this proposal">✨ Clean up</button>
-      <button class="mini2" id="stopbtn" hidden>■ Stop</button>
     </div>
     <div id="plog"><div class="muted">Chat with an agent that edits this proposal directly — same workflow as the writeup studio.</div></div>
     <div class="composer">
       <textarea id="pmsg" rows="2" placeholder="Ask for edits… (Enter to send)"></textarea>
-      <button class="primary" id="psend">Send</button>
+      <div class="btncol">
+        <button class="danger" id="stopbtn" hidden title="Stop the agent's current turn">■ Stop</button>
+        <button class="primary" id="psend">Send</button>
+      </div>
     </div>
   </section>
 </main>

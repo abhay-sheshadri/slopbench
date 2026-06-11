@@ -849,6 +849,8 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 /* composer */
 #composer{flex:0 0 auto;border-top:1px solid var(--border);padding:10px 12px;background:var(--panel)}
 #composer .row{display:flex;gap:8px;align-items:flex-end}
+#composer .btncol{display:flex;flex-direction:column;gap:6px;justify-content:flex-end}
+#composer .btncol button{width:100%;white-space:nowrap}
 #msg{flex:1;resize:none;background:var(--bg);color:var(--fg);border:1px solid var(--border);
   border-radius:8px;padding:9px 11px;font:14px/1.5 var(--sans);max-height:180px;min-height:42px;outline:none}
 #msg:focus{border-color:var(--accent)}
@@ -930,8 +932,10 @@ details.think .body2{color:#c8bfe7;font-style:italic}
     <div id="composer">
       <div class="row">
         <textarea id="msg" placeholder="Ask for a passage, a fix, a figure… (/draft = write the whole post)"></textarea>
-        <button class="danger" id="stopbtn" style="display:none" title="Stop the agent's current turn">■ Stop</button>
-        <button class="primary" id="send">Send</button>
+        <div class="btncol">
+          <button class="danger" id="stopbtn" style="display:none" title="Stop the agent's current turn">■ Stop</button>
+          <button class="primary" id="send">Send</button>
+        </div>
       </div>
     </div>
   </section>
