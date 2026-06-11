@@ -502,7 +502,7 @@ def _reference_docx() -> Path:
             if item == "word/theme/theme1.xml":
                 data = re.sub(
                     rb'typeface="(Cambria|Calibri Light|Calibri)"',
-                    b'typeface="Arial"',
+                    b'typeface="Helvetica Neue"',
                     data,
                 )
             elif item == "word/styles.xml":
