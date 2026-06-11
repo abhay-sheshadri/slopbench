@@ -658,7 +658,7 @@ def export_gdoc(s: StudioSession) -> dict:
         raise ValueError(f"web app error: {text[:300]}")
     if not out.get("url"):
         raise ValueError(f"web app returned no url: {str(out)[:200]}")
-    return {"url": out["url"]}
+    return {"url": out["url"], "warning": out.get("warning")}
 
 
 def _send_image(h, body: bytes, ctype: str) -> None:
@@ -1314,7 +1314,7 @@ $("#gdocbtn").onclick=async()=>{
   // No popups/dialogs: a plain link appears next to the button — clicking it
   // is a real user gesture, so the new tab opens without popup-blocker fights.
   const a=$("#gdoclink"); a.href=d.url; a.hidden=false;
-  toast("Google Doc ready — click “open Doc ↗”");
+  toast(d.warning ? ("Doc ready (note: "+d.warning+")") : "Google Doc ready — click “open Doc ↗”");
 };
 $("#runpick").onclick=()=>$("#picker").classList.contains("show")?closePicker():openPicker();
 $("#pickerSearch").addEventListener("input",drawRuns);

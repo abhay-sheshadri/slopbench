@@ -13,7 +13,8 @@
  *
  * One-time setup (~3 minutes):
  *   1. Go to https://script.google.com → New project, paste this file.
- *   2. Left sidebar → Services (+) → add "Drive API" (Advanced Drive Service).
+ *   2. Left sidebar → Services (+) → add "Drive API" (Advanced Drive Service)
+ *      AND "Docs API" (used to flip the docs to pageless mode).
  *   3. Deploy → New deployment → type "Web app":
  *        - Execute as: Me
  *        - Who has access: Anyone
@@ -61,6 +62,32 @@ function doPost(e) {
     fileId = file.id;
     // Anyone with the link can comment — easy to ship around for feedback.
     DriveApp.getFileById(fileId).setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.COMMENT);
+  }
+
+  // Pageless mode (idempotent — re-applied on every export).
+  try {
+    Docs.Documents.batchUpdate(
+      {
+        requests: [
+          {
+            updateDocumentStyle: {
+              documentStyle: { documentFormat: { documentMode: "PAGELESS" } },
+              fields: "documentFormat",
+            },
+          },
+        ],
+      },
+      fileId
+    );
+  } catch (err) {
+    // Non-fatal: the doc still exists, just paged. Surface in the response.
+    return ContentService.createTextOutput(
+      JSON.stringify({
+        url: "https://docs.google.com/document/d/" + fileId + "/edit",
+        folder: folder.getUrl(),
+        warning: "pageless failed: " + err,
+      })
+    ).setMimeType(ContentService.MimeType.JSON);
   }
 
   return ContentService.createTextOutput(
