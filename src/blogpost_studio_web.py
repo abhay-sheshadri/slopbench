@@ -761,17 +761,15 @@ header .spacer{flex:1}
 @keyframes tblink{0%,100%{opacity:.25}50%{opacity:1}}
 
 /* run picker */
-.runpick{background:var(--panel2);border:1px solid var(--border);color:var(--muted);
-  font-family:var(--mono);font-size:12px;padding:4px 10px;border-radius:6px;cursor:pointer;
-  max-width:46vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:.12s}
-.runpick:hover{border-color:var(--accent);color:var(--fg)}
-.picker{position:absolute;top:48px;left:100px;z-index:30;width:min(460px,82vw);background:var(--panel);
-  border:1px solid var(--border);border-radius:10px;box-shadow:0 16px 48px rgba(0,0,0,.6);padding:8px;display:none}
-.picker.show{display:block}
+/* runs list: a permanent left sidebar, same pattern as the proposals page */
+.picker{width:300px;flex:0 0 auto;background:var(--panel);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;min-height:0;padding:10px}
+.runlabel{color:var(--muted);font-family:var(--mono);font-size:12px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:40%}
 #pickerSearch{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--border);
   border-radius:7px;padding:7px 10px;font:13px/1.4 var(--sans);margin-bottom:6px;outline:none}
 #pickerSearch:focus{border-color:var(--accent)}
-.pickerList{max-height:52vh;overflow:auto;display:flex;flex-direction:column;gap:1px}
+.pickerList{flex:1;overflow:auto;display:flex;flex-direction:column;gap:1px}
 .runitem{display:flex;align-items:baseline;gap:10px;text-align:left;background:transparent;
   border:1px solid transparent;border-radius:6px;padding:7px 9px;cursor:pointer;width:100%;color:var(--fg)}
 .runitem:hover{background:var(--panel2);border-color:var(--border)}
@@ -882,26 +880,25 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 <body>
 <header>
   <nav class="appnav"><a href="/">🔎 Runs</a><a href="/proposals">🗒 Proposals</a><a class="on" href="/studio">📝 Studio</a></nav>
-  <button class="runpick" id="runpick">Select a run ▾</button>
-  <span class="spacer"></span>
-  <span class="meta" id="cost" title="model spend in this studio conversation"></span>
 </header>
-<div class="picker" id="picker">
-  <input id="pickerSearch" placeholder="Filter runs…" autocomplete="off">
-  <div class="phase-tabs" id="pickerTabs"></div>
-  <div class="pickerList" id="pickerList"></div>
-  <div class="pickerFoot">
-    <label class="pickerOpt"><input type="checkbox" id="showGoal"> show goal runs</label>
-    <span class="spacer"></span>
-    <button class="mini2" id="draftAllBtn" title="Start /draft for every completed run that has no draft yet, in parallel">✍ Draft missing</button>
-    <button class="mini2 danger" id="delAllBtn" title="Delete every draft, its figures, and its conversation">Delete all drafts</button>
-  </div>
-</div>
 <main>
+  <aside class="picker" id="picker">
+    <input id="pickerSearch" placeholder="Filter runs…" autocomplete="off">
+    <div class="phase-tabs" id="pickerTabs"></div>
+    <div class="pickerList" id="pickerList"></div>
+    <div class="pickerFoot">
+      <label class="pickerOpt"><input type="checkbox" id="showGoal"> show goal runs</label>
+      <span class="spacer"></span>
+      <button class="mini2" id="draftAllBtn" title="Start /draft for every completed run that has no draft yet, in parallel">✍ Draft missing</button>
+      <button class="mini2 danger" id="delAllBtn" title="Delete every draft, its figures, and its conversation">Delete all drafts</button>
+    </div>
+  </aside>
   <section id="doc">
     <div class="docbar">
       <button id="viewtoggle">✎ Edit</button>
+      <span class="runlabel" id="runlabel"></span>
       <span class="spacer"></span>
+      <span class="meta" id="cost" title="model spend in this studio conversation"></span>
       <span class="meta" id="meta"></span>
       <a id="gdoclink" target="_blank" hidden title="The Google Doc created from this draft">open Doc ↗</a>
       <button id="gdocbtn" title="Create a Google Doc of this draft in your Drive (needs GDOC_WEBAPP_URL — see scripts/gdoc_webapp.gs)">→ Google Doc</button>
@@ -931,20 +928,10 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 const $ = s => document.querySelector(s);
 const API = "/studio/api";
 let selected=false, selectedRun=null, running=false, docMtime=-1, editorDirty=false, mode="view", lastTurnsKey="";
-let runpickLabel="Select a run", writingCount=0;
-// The dropdown button always shows how many agents are mid-draft, and the
-// picker rows say which — so parallel /draft work is visible at a glance.
-function renderRunpick(){
-  $("#runpick").innerHTML=esc(runpickLabel)
-    +(writingCount?` <span class="wmini" title="${writingCount} agent(s) writing">✍ ${writingCount}</span>`:"")+" ▾";
-}
 async function pollWriting(){
   try{
-    const rs=(await (await fetch(API+"/runs")).json()).runs||[];
-    allRuns=rs;
-    writingCount=rs.filter(r=>r.drafting).length;
-    renderRunpick();
-    if($("#picker").classList.contains("show")) drawRuns();
+    allRuns=(await (await fetch(API+"/runs")).json()).runs||[];
+    drawRuns();   // the runs sidebar is always visible; rows carry ✍ writing badges
   }catch(e){}
 }
 setInterval(pollWriting,12000);
@@ -1199,7 +1186,7 @@ async function deleteAllDrafts(){
   await loadDoc(true);
   renderChat([]);
   refreshControls();
-  allRuns=[]; openPicker();   // refresh badges
+  allRuns=[]; loadRuns();   // refresh badges
 }
 async function draftAllMissing(){
   const d=await api(API+"/draft_all",{dry:true});
@@ -1209,27 +1196,26 @@ async function draftAllMissing(){
   const r=await api(API+"/draft_all",{});
   if(!r) return;
   toast(`started ${r.started.length} draft(s) — they run in the background`);
-  allRuns=[]; openPicker();   // refresh: rows now show “drafting…”
+  allRuns=[]; loadRuns();   // refresh: rows now show “drafting…”
 }
 
 // ---- run picker ----
 let allRuns=[], showGoal=false;   // goal runs are hidden unless toggled on
-async function openPicker(){
-  $("#picker").classList.add("show");
-  $("#pickerSearch").value=""; $("#pickerSearch").focus();
+async function loadRuns(){
   if(!allRuns.length){ $("#pickerTabs").innerHTML=""; $("#pickerList").innerHTML='<div class="muted">loading runs…</div>'; }
   try{ allRuns=(await (await fetch(API+"/runs")).json()).runs||[]; }
   catch(e){ allRuns=[]; toast("network error: "+e.message); }
   drawRuns();
 }
-const closePicker=()=>$("#picker").classList.remove("show");
 let pickerPhase="Completed";   // like the viewer's overview tabs; Completed = openable
 function drawRuns(){
   const q=$("#pickerSearch").value.toLowerCase();
   const pool=allRuns.filter(r=>(showGoal||r.mode!=="goal") && r.name.toLowerCase().includes(q));
   const counts={Completed:0,Active:0,Failed:0};
   pool.forEach(r=>{ if(counts[r.phase]!=null) counts[r.phase]++; });
-  if(!counts[pickerPhase]) pickerPhase = counts.Completed?"Completed":(counts.Active?"Active":"Failed");
+  // fall back to a non-empty tab, preferring Completed; stay put while loading
+  if(!counts[pickerPhase])
+    pickerPhase = counts.Completed?"Completed":(counts.Active?"Active":(counts.Failed?"Failed":pickerPhase));
   $("#pickerTabs").innerHTML=["Completed","Active","Failed"].map(ph=>
     `<button class="phase-tab${ph===pickerPhase?' active':''}" data-ph="${ph}">${ph} <span class="num">${counts[ph]}</span></button>`).join("");
   $("#pickerTabs").querySelectorAll(".phase-tab").forEach(b=>b.onclick=()=>{pickerPhase=b.dataset.ph;drawRuns();});
@@ -1243,17 +1229,16 @@ function drawRuns(){
     const sel=r.selectable!==false;
     html+=`<button class="runitem${r.path===selectedRun?' cur':''}${sel?'':' disabled'}" data-path="${esc(r.path)}"`
       +`${sel?'':' disabled title="only finished runs can be opened"'}>`
-      +`<span class="rn">${esc(r.name)}</span>`
+      +`<span class="rn" title="${esc(r.name)}">${esc(r.name)}</span>`
       +`<span class="rt">${esc(r.mode||"")}${r.drafting?' · <span class="wbadge">✍ writing…</span>':r.started?" · <b>draft</b>":""}</span></button>`;
   }
   list.innerHTML=html;
   list.querySelectorAll(".runitem:not(.disabled)").forEach(b=>b.onclick=()=>chooseRun(b.dataset.path));
 }
 async function chooseRun(path){
-  $("#runpick").textContent="opening…";   // selecting stages the workspace; can take a moment
+  $("#runlabel").textContent="opening…";   // selecting stages the workspace; can take a moment
   const s=await api(API+"/select",{run:path});
-  if(!s){ renderRunpick(); return; }
-  closePicker();
+  if(!s){ $("#runlabel").textContent=""; drawRuns(); return; }
   freshUi();
   applyState(s);
   await loadDoc(true);
@@ -1268,8 +1253,8 @@ function applyState(s){
   // keep ?run= in the URL so a reload (or duplicated tab) reopens this run
   history.replaceState(null,"","/studio"+(selectedRun?"?run="+encodeURIComponent(selectedRun):""));
   document.body.classList.toggle("noselect",!selected);
-  runpickLabel=selected?s.run_name:"Select a run";
-  renderRunpick();
+  $("#runlabel").textContent=selected?s.run_name:"";
+  drawRuns();   // selection highlight in the sidebar
   document.title=selected?("Studio · "+s.run_name):"Blogpost Studio";
   running=!!s.running;
   refreshControls();
@@ -1316,21 +1301,17 @@ $("#gdocbtn").onclick=async()=>{
   const a=$("#gdoclink"); a.href=d.url; a.hidden=false;
   toast(d.warning ? ("Doc ready (note: "+d.warning+")") : "Google Doc ready — click “open Doc ↗”");
 };
-$("#runpick").onclick=()=>$("#picker").classList.contains("show")?closePicker():openPicker();
 $("#pickerSearch").addEventListener("input",drawRuns);
 $("#showGoal").onchange=e=>{showGoal=e.target.checked;drawRuns();};
 $("#draftAllBtn").onclick=draftAllMissing;
 $("#delAllBtn").onclick=deleteAllDrafts;
 document.addEventListener("click",e=>{
-  // isConnected guard: a click on a re-rendered element (e.g. a phase tab)
-  // bubbles here detached, and closest() would wrongly read it as "outside".
-  if(e.target.isConnected && !e.target.closest("#picker") && !e.target.closest("#runpick")) closePicker();
   if(e.target.tagName==="IMG" && e.target.closest("#preview,#log")){
     $("#lightbox img").src=e.target.src; $("#lightbox").hidden=false;
   }
 });
 $("#lightbox").onclick=()=>$("#lightbox").hidden=true;
-document.addEventListener("keydown",e=>{ if(e.key==="Escape") closePicker(); });
+document.addEventListener("keydown",e=>{ if(e.key==="Escape") $("#lightbox").hidden=true; });
 $("#viewtoggle").onclick=toggleMode;
 $("#msg").addEventListener("input",autosize);
 $("#msg").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}});
@@ -1354,7 +1335,8 @@ async function init(){
   applyState({selected:false});
   pollWriting();   // writing-count badge on the dropdown from the start
   if(pre) await chooseRun(pre);
-  else { await loadDoc(true); bindStream(); openPicker(); }
+  else { await loadDoc(true); bindStream(); }
+  loadRuns();   // the sidebar list is always visible
 }
 init();
 </script>
