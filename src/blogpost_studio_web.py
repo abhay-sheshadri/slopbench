@@ -605,6 +605,16 @@ def export_docx(s: StudioSession) -> bytes:
     return _prettify_figures(docx)
 
 
+def _doc_title(run_name: str) -> str:
+    """Google Doc name for a run: "Empirical Emergent Collusion" — title-cased,
+    the default multi_phase suffix dropped, other modes kept as a suffix.
+    Stable per run: this is also the key for update-in-place in Drive."""
+    for mode, suffix in (("_multi_phase", ""), ("_goal", " (goal)")):
+        if run_name.endswith(mode):
+            return run_name[: -len(mode)].replace("_", " ").title() + suffix
+    return run_name.replace("_", " ").title()
+
+
 def export_gdoc(s: StudioSession) -> dict:
     """Create a Google Doc of the draft and return its URL.
 
@@ -627,7 +637,7 @@ def export_gdoc(s: StudioSession) -> dict:
     docx = export_docx(s)
     body = json.dumps(
         {
-            "title": s.run_dir.name.replace("_", " "),
+            "title": _doc_title(s.run_dir.name),
             "docx": base64.b64encode(docx).decode("ascii"),
         }
     ).encode("utf-8")
