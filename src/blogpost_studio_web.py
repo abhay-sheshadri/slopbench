@@ -16,6 +16,7 @@ Access policy). Workspaces persist under ``outputs/06_blogpost_studio/<run>/``.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import re
@@ -26,6 +27,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -449,6 +451,87 @@ def _post(h, path: str) -> None:
         h._send(404, b"not found", "text/plain")
 
 
+# Cached restyled reference.docx (regenerated if deleted; lives in outputs/).
+_REFERENCE_DOCX = STUDIO_ROOT / ".gdoc_reference.docx"
+
+
+def _reference_docx() -> Path:
+    """Pandoc's default reference.docx restyled to read like a native Google
+    Doc once imported: Arial everywhere (instead of Calibri/Cambria theme
+    fonts) and black, non-italic headings (instead of Word-blue) — built by
+    patching the theme + heading styles inside pandoc's own default."""
+    if _REFERENCE_DOCX.exists():
+        return _REFERENCE_DOCX
+    raw = subprocess.run(
+        ["pandoc", "--print-default-data-file", "reference.docx"],
+        capture_output=True,
+        timeout=60,
+    ).stdout
+    src = zipfile.ZipFile(io.BytesIO(raw))
+    buf = io.BytesIO()
+
+    def restyle(block: str) -> str:
+        m = re.search(r'w:styleId="([^"]+)"', block)
+        sid = m.group(1) if m else ""
+        if sid.startswith("Heading") or sid == "Title":
+            # black, upright headings instead of Word-blue italic-ish ones
+            block = re.sub(r"<w:color [^>]*/>", '<w:color w:val="000000"/>', block)
+            block = re.sub(r"<w:i\s*/>", "", block)
+            block = re.sub(r"<w:iCs\s*/>", "", block)
+        elif sid in ("Caption", "ImageCaption", "TableCaption"):
+            # captions as small gray centered subtitles under the figure
+            caption_rpr = (
+                '<w:rPr><w:color w:val="666666"/>'
+                '<w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr>'
+            )
+            if "<w:rPr>" in block:
+                block = re.sub(r"<w:rPr>.*?</w:rPr>", caption_rpr, block, flags=re.S)
+            else:
+                block = block.replace("</w:style>", caption_rpr + "</w:style>")
+            if "<w:jc " not in block and "</w:pPr>" in block:
+                block = block.replace("</w:pPr>", '<w:jc w:val="center"/></w:pPr>', 1)
+        elif sid in ("Figure", "CaptionedFigure"):
+            # center the images themselves
+            if "<w:jc " not in block and "</w:pPr>" in block:
+                block = block.replace("</w:pPr>", '<w:jc w:val="center"/></w:pPr>', 1)
+        return block
+
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as out:
+        for item in src.namelist():
+            data = src.read(item)
+            if item == "word/theme/theme1.xml":
+                data = re.sub(
+                    rb'typeface="(Cambria|Calibri Light|Calibri)"',
+                    b'typeface="Arial"',
+                    data,
+                )
+            elif item == "word/styles.xml":
+                text = re.sub(
+                    r"<w:style .*?</w:style>",
+                    lambda m: restyle(m.group(0)),
+                    data.decode("utf-8"),
+                    flags=re.S,
+                )
+                # Body text at Google Docs' default size (Arial 11), not Word's 12.
+                text = re.sub(
+                    r"(<w:docDefaults>.*?)<w:sz w:val=\"24\"\s*/>(.*?</w:docDefaults>)",
+                    r'\1<w:sz w:val="22"/>\2',
+                    text,
+                    flags=re.S,
+                )
+                text = re.sub(
+                    r"(<w:docDefaults>.*?)<w:szCs w:val=\"24\"\s*/>(.*?</w:docDefaults>)",
+                    r'\1<w:szCs w:val="22"/>\2',
+                    text,
+                    flags=re.S,
+                )
+                data = text.encode("utf-8")
+            out.writestr(item, data)
+    _REFERENCE_DOCX.parent.mkdir(parents=True, exist_ok=True)
+    _REFERENCE_DOCX.write_bytes(buf.getvalue())
+    return _REFERENCE_DOCX
+
+
 def _pandoc(s: StudioSession, args: list[str], out_suffix: str) -> bytes:
     """Render the draft through pandoc (figures resolved from the workspace)."""
     if not s.doc_path.exists():
@@ -472,10 +555,54 @@ def _pandoc(s: StudioSession, args: list[str], out_suffix: str) -> bytes:
         Path(out).unlink(missing_ok=True)
 
 
+def _prettify_figures(docx: bytes) -> bytes:
+    """Center image paragraphs and style 'Fig …' caption lines.
+
+    The drafts' convention is an image paragraph followed by an italic
+    "Fig N. …" line — both plain body paragraphs as far as pandoc is concerned
+    (it only emits real figure/caption styles when the caption is in the image
+    alt text), so this styling has to be applied to the document itself:
+    images centered; caption lines centered, gray, 9pt."""
+    src = zipfile.ZipFile(io.BytesIO(docx))
+    caption_rpr = '<w:color w:val="666666"/><w:sz w:val="18"/><w:szCs w:val="18"/>'
+    center = '<w:jc w:val="center"/>'
+
+    def fix_para(m: "re.Match[str]") -> str:
+        p = m.group(0)
+        text = re.sub(r"<[^>]+>", "", p)
+        is_image = "<w:drawing" in p
+        is_caption = bool(re.match(r"\s*Fig(ure)?\s*\d", text))
+        if not (is_image or is_caption):
+            return p
+        if center not in p:  # jc goes right after the pStyle to keep valid order
+            p = re.sub(r"(<w:pStyle [^>]*/>)", r"\1" + center, p, count=1)
+        if is_caption:
+            p = p.replace("</w:rPr>", caption_rpr + "</w:rPr>")
+            p = p.replace("<w:r><w:t", f"<w:r><w:rPr>{caption_rpr}</w:rPr><w:t")
+        return p
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as out:
+        for item in src.namelist():
+            data = src.read(item)
+            if item == "word/document.xml":
+                data = re.sub(
+                    r"<w:p>.*?</w:p>",
+                    fix_para,
+                    data.decode("utf-8"),
+                    flags=re.S,
+                ).encode("utf-8")
+            out.writestr(item, data)
+    return buf.getvalue()
+
+
 def export_docx(s: StudioSession) -> bytes:
     """The draft as a .docx, figures embedded — drag into Google Drive and it
     converts to a Doc."""
-    return _pandoc(s, ["-t", "docx"], ".docx")
+    docx = _pandoc(
+        s, ["-t", "docx", "--reference-doc", str(_reference_docx())], ".docx"
+    )
+    return _prettify_figures(docx)
 
 
 def export_gdoc(s: StudioSession) -> dict:
