@@ -289,7 +289,7 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 .empty{color:var(--muted);text-align:center;margin-top:14vh;padding:0 24px;line-height:1.6}
 
 .toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--panel3);
-  color:var(--err);border:1px solid var(--border);padding:8px 14px;border-radius:8px;opacity:0;
+  color:var(--fg);border:1px solid var(--border);padding:8px 14px;border-radius:8px;opacity:0;
   transition:opacity .2s;pointer-events:none;z-index:9999;font-size:13px}
 .toast.show{opacity:1}
 @media (max-width:1100px){ #chatcol{width:300px} aside{width:220px} }

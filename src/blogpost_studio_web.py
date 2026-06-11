@@ -874,7 +874,7 @@ details.think .body2{color:#c8bfe7;font-style:italic}
   box-shadow:0 14px 45px rgba(0,0,0,.55)}
 
 .toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--panel3);
-  color:var(--err);border:1px solid var(--border);padding:8px 14px;border-radius:8px;opacity:0;
+  color:var(--fg);border:1px solid var(--border);padding:8px 14px;border-radius:8px;opacity:0;
   transition:opacity .2s;pointer-events:none;z-index:9999;font-size:13px}
 .toast.show{opacity:1}
 </style>

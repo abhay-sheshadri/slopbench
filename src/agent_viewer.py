@@ -1887,12 +1887,19 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <style>
 /*__PALETTE__*/
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);
+  height:100vh;display:flex;flex-direction:column}
+/* same full-width top header as the studio / proposals pages */
+.toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--panel3);
+  color:var(--fg);border:1px solid var(--border);padding:8px 14px;border-radius:8px;opacity:0;
+  transition:opacity .2s;pointer-events:none;z-index:9999;font-size:13px}
+.toast.show{opacity:1}
+.apphead{display:flex;align-items:center;gap:12px;padding:12px;background:var(--panel);
+  border-bottom:1px solid var(--border);flex:0 0 auto}
 ::selection{background:rgba(122,162,247,.3)}
 .sidebar::-webkit-scrollbar,.main::-webkit-scrollbar,pre::-webkit-scrollbar{width:9px;height:9px}
 .sidebar::-webkit-scrollbar-thumb,.main::-webkit-scrollbar-thumb,pre::-webkit-scrollbar-thumb{background:var(--panel3);border-radius:6px}
-/* 340px default: wide enough for the three nav tabs with real (color emoji) fonts. */
-.app{display:grid;grid-template-columns:var(--sidebar-w,340px) 6px minmax(0,1fr);height:100vh}
+.app{display:grid;grid-template-columns:var(--sidebar-w,340px) 6px minmax(0,1fr);flex:1;min-height:0}
 .app.lens-open{grid-template-columns:var(--sidebar-w,340px) 6px minmax(0,1fr) 6px var(--lens-w,420px)}
 .sidebar{background:var(--panel);border-right:1px solid var(--border);overflow-y:auto;padding:12px}
 .resizer{cursor:col-resize;background:var(--border);transition:background .12s}
@@ -1901,9 +1908,8 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);}
 #lensResizer{grid-column:4}
 .ovbtn{width:100%;display:flex;align-items:center;justify-content:center;gap:8px;background:var(--panel2);border:1px solid var(--border);color:var(--fg);border-radius:8px;padding:9px 10px;margin-bottom:11px;cursor:pointer;font-size:13px;font-weight:700;letter-spacing:.2px;transition:.12s}
 /* Same compact pill as the studio header so the nav keeps its shape across pages. */
-.sidenav{margin-bottom:11px;width:fit-content;max-width:100%;flex-wrap:wrap}
 /* launch-a-run dialog */
-.launcher{position:fixed;left:12px;top:130px;z-index:60;width:min(440px,90vw);max-height:70vh;overflow:auto;
+.launcher{position:fixed;left:12px;top:166px;z-index:60;width:min(440px,90vw);max-height:70vh;overflow:auto;
   background:var(--panel);border:1px solid var(--border);border-radius:10px;
   box-shadow:0 16px 48px rgba(0,0,0,.6);padding:12px}
 .lhead{display:flex;align-items:center;font-weight:700;font-size:14px;margin-bottom:2px}
@@ -1913,7 +1919,7 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);}
 .lrow{display:flex;align-items:center;gap:6px;padding:4px 2px;border-top:1px solid var(--border)}
 .lrow:first-child{border-top:0}
 /* project panel (feedback / resume / continue), anchored under the topbar */
-.projpanel{position:fixed;right:14px;top:96px;z-index:60;width:min(480px,92vw);max-height:75vh;overflow:auto;
+.projpanel{position:fixed;right:14px;top:118px;z-index:60;width:min(480px,92vw);max-height:75vh;overflow:auto;
   background:var(--panel);border:1px solid var(--border);border-radius:10px;
   box-shadow:0 16px 48px rgba(0,0,0,.6);padding:12px;display:flex;flex-direction:column;gap:9px}
 .projpanel[hidden]{display:none}
@@ -1999,7 +2005,7 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
 .tabbreak{flex:0 0 100%;height:0;margin:0;padding:0;border:0}
 .lens-toggle.active{border-color:var(--accent);color:var(--fg);background:var(--panel3)}
 /* Run Lens drawer */
-.lens{grid-column:5;min-width:0;height:100vh;overflow:hidden;
+.lens{grid-column:5;min-width:0;height:100%;overflow:hidden;
   background:var(--panel);border-left:1px solid var(--border);display:flex;flex-direction:column}
 .lens[hidden]{display:none}
 .lens-head{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:44px;padding:9px 12px;border-bottom:1px solid var(--border);background:var(--panel2)}
@@ -2101,9 +2107,11 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
 </style></head>
 <body>
 <div id="topbar-progress"></div>
+<header class="apphead">
+  <nav class="appnav"><a class="on" href="/">🔎 Runs</a><a href="/proposals" title="Read, edit, and write research proposals">🗒 Proposals</a><a href="/studio" title="Co-write a blogpost about a finished run">📝 Studio</a></nav>
+</header>
 <div class="app">
   <div class="sidebar">
-    <nav class="appnav sidenav"><a class="on" href="/">🔎 Runs</a><a href="/proposals" title="Read, edit, and write research proposals">🗒 Proposals</a><a href="/studio" title="Co-write a blogpost about a finished run">📝 Studio</a></nav>
     <button id="overviewBtn" class="ovbtn" title="Status dashboard of all runs">⌂ Overview — all runs</button>
     <button id="launchBtn" class="ovbtn" title="Start a new agent run from a proposal">🚀 Launch a run</button>
     <div class="launcher" id="launcher" hidden>
@@ -2944,6 +2952,9 @@ document.getElementById("lensClose").onclick=()=>lensSetOpen(false);
 document.getElementById("lensNew").onclick=lensNewChat;
 document.getElementById("overviewBtn").onclick=showOverview;
 
+function toast(m){const t=document.getElementById("toast");if(!t)return;t.textContent=m;
+  t.classList.add("show");clearTimeout(toast._t);toast._t=setTimeout(()=>t.classList.remove("show"),3800);}
+
 // ---- launch-a-run dialog ----
 async function openLauncher(){
   const el=document.getElementById("launcher");
@@ -2966,10 +2977,10 @@ async function launchRun(p,m){
     r=await fetch("/api/launch",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({proposal:p,mode:m})});
     d=await r.json();
-  }catch(e){alert("launch failed: "+e.message);return;}
-  if(!r.ok){alert(d.error||"launch failed");return;}
+  }catch(e){toast("launch failed: "+e.message);return;}
+  if(!r.ok){toast(d.error||"launch failed");return;}
   document.getElementById("launcher").hidden=true;
-  alert(`Launched in tmux session ${d.session}.\nIt will appear under Active in the overview once it starts writing.`);
+  toast(`Launched in tmux session ${d.session} — it appears under Active once it starts writing`);
   showOverview();
 }
 document.getElementById("launchBtn").onclick=openLauncher;
@@ -3009,8 +3020,8 @@ async function ppPost(url,body,confirmMsg){
   try{
     r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     d=await r.json();
-  }catch(e){alert("failed: "+e.message);return null;}
-  if(!r.ok){alert(d.error||"failed");return null;}
+  }catch(e){toast("failed: "+e.message);return null;}
+  if(!r.ok){toast(d.error||"failed");return null;}
   return d;
 }
 document.getElementById("projBtn").onclick=openProject;
@@ -3023,14 +3034,14 @@ document.getElementById("ppSave").onclick=async()=>{
 document.getElementById("ppResume").onclick=async()=>{
   const d=await ppPost("/api/resume",{run:state.agentId},
     "Resume this run (relaunch with --resume in its tmux session)?");
-  if(d) alert(`Resuming in tmux session ${d.session}. It will show Active once the heartbeat returns.`);
+  if(d) toast(`Resuming in tmux session ${d.session} — Active once the heartbeat returns`);
 };
 document.getElementById("ppContinue").onclick=async()=>{
   const t=document.getElementById("ppText").value.trim();
-  if(!t){alert("Write the continuation instructions in the feedback box first.");return;}
+  if(!t){toast("Write the continuation instructions in the feedback box first");return;}
   const d=await ppPost("/api/continue",{run:state.agentId,text:t},
     "Continue this COMPLETED run with the feedback above as its new instructions?\n\nThis starts a real, long-running (and expensive) agent run.");
-  if(d) alert(`Continuation launched in tmux session ${d.session} (instructions saved to ${d.feedback}).`);
+  if(d) toast(`Continuation launched in tmux session ${d.session} (feedback saved to ${d.feedback})`);
 };
 
 if(state.agentId)lensSwitchTo(state.agentId);
@@ -3068,6 +3079,7 @@ state._pickDefault=!!state.agentId;
 loadDir(startDir).then(()=>{ if(state.agentId){state.view="run";showContentLoading(state.agentId);openStream();} else showOverview(); });
 setInterval(()=>{ refreshDir(); if(state.view==="overview")loadOverview(); },3000);   // dir listing + dashboard refresh; run transcripts arrive via SSE
 </script>
+<div class="toast" id="toast"></div>
 </body></html>
 """
 
