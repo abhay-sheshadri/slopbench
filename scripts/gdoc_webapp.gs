@@ -1,11 +1,15 @@
 /**
- * Google Apps Script web app that turns a posted .docx (base64) into a Google
- * Doc in your Drive and returns its URL. Used by the blogpost studio's
- * "→ Google Doc" button (src/blogpost_studio_web.py, gdoc endpoint).
+ * Google Apps Script web app behind the blogpost studio's "→ Google Doc"
+ * button (src/blogpost_studio_web.py, gdoc endpoint).
  *
+ * Receives a .docx (base64) and maintains ONE Google Doc per project inside a
+ * single "Research Projects" Drive folder:
+ *   - folder missing  -> created
+ *   - doc missing     -> created from the docx (named after the project)
+ *   - doc exists      -> content REPLACED in place (same URL forever, full
+ *                        revision history under File → Version history)
  * The .docx import path is Google's highest-fidelity conversion: embedded
- * figures and formatting survive (the earlier HTML route dropped data-URI
- * images). An `html` field is still accepted as a fallback.
+ * figures and formatting survive (an HTML route drops data-URI images).
  *
  * One-time setup (~3 minutes):
  *   1. Go to https://script.google.com → New project, paste this file.
@@ -20,28 +24,49 @@
  * To update an existing deployment after editing this code: Deploy → Manage
  * deployments → ✎ → Version: "New version" → Deploy (the URL stays the same).
  *
- * The URL is a capability: anyone who has it can create docs in your Drive,
+ * The URL is a capability: anyone who has it can write docs in your Drive,
  * so treat it like a secret (it lives only in .env, which is not committed).
  */
+var FOLDER_NAME = "Research Projects";
+
 function doPost(e) {
   var data = JSON.parse(e.postData.contents);
-  var blob;
-  if (data.docx) {
-    blob = Utilities.newBlob(
-      Utilities.base64Decode(data.docx),
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      (data.title || "writeup") + ".docx"
-    );
-  } else {
-    blob = Utilities.newBlob(data.html, "text/html", (data.title || "writeup") + ".html");
-  }
-  var file = Drive.Files.create(
-    { name: data.title || "writeup", mimeType: "application/vnd.google-apps.document" },
-    blob
+  var title = data.title || "writeup";
+  var blob = Utilities.newBlob(
+    Utilities.base64Decode(data.docx),
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    title + ".docx"
   );
-  // Anyone with the link can comment — easy to ship around for feedback.
-  DriveApp.getFileById(file.id).setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.COMMENT);
+
+  // Find-or-create the shared folder.
+  var folders = DriveApp.getFoldersByName(FOLDER_NAME);
+  var folder = folders.hasNext() ? folders.next() : DriveApp.createFolder(FOLDER_NAME);
+
+  // Find-or-create the project's doc inside it; re-exports replace content
+  // in place so the URL is stable and history is kept.
+  var existing = folder.getFilesByName(title);
+  var fileId;
+  if (existing.hasNext()) {
+    fileId = existing.next().getId();
+    Drive.Files.update({}, fileId, blob);
+  } else {
+    var file = Drive.Files.create(
+      {
+        name: title,
+        mimeType: "application/vnd.google-apps.document",
+        parents: [folder.getId()],
+      },
+      blob
+    );
+    fileId = file.id;
+    // Anyone with the link can comment — easy to ship around for feedback.
+    DriveApp.getFileById(fileId).setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.COMMENT);
+  }
+
   return ContentService.createTextOutput(
-    JSON.stringify({ url: "https://docs.google.com/document/d/" + file.id + "/edit" })
+    JSON.stringify({
+      url: "https://docs.google.com/document/d/" + fileId + "/edit",
+      folder: folder.getUrl(),
+    })
   ).setMimeType(ContentService.MimeType.JSON);
 }
