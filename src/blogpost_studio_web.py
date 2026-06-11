@@ -41,7 +41,16 @@ from src.blogpost_studio import (
     default_work_dir,
     live_sandbox_workspaces,
 )
-from src.theme import EDITOR_CSS, HIGHLIGHT_JS, PALETTE_CSS, PREVIEW_CSS
+from src.theme import (
+    EDITOR_CSS,
+    HIGHLIGHT_JS,
+    PALETTE_CSS,
+    PREVIEW_CSS,
+    PROGRESS_CSS,
+    PROGRESS_JS,
+    RESIZER_CSS,
+    RESIZER_JS,
+)
 
 PREFIX = "/studio"
 
@@ -805,7 +814,9 @@ body.noselect #chat{display:none}            /* no chat until a run is picked */
 body.noselect .docbar{opacity:.4;pointer-events:none}
 
 /* chat (right side) — same turn/role/collapsible language as the agent viewer */
-#chat{width:40%;min-width:360px;display:flex;flex-direction:column;border-left:1px solid var(--border);background:var(--bg)}
+#chat{width:420px;flex:0 0 auto;min-width:0;display:flex;flex-direction:column;border-left:1px solid var(--border);background:var(--bg)}
+/*__RESIZER_CSS__*/
+/*__PROGRESS_CSS__*/
 #log{flex:1;overflow:auto;padding:14px 16px 4px}
 .turn{margin:0 0 12px;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--panel)}
 .turn .role{font-size:10px;text-transform:uppercase;letter-spacing:.6px;padding:6px 13px;font-weight:700;border-bottom:1px solid var(--border)}
@@ -878,6 +889,7 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 </style>
 </head>
 <body>
+<div id="topbar-progress"></div>
 <header>
   <nav class="appnav"><a href="/">🔎 Runs</a><a href="/proposals">🗒 Proposals</a><a class="on" href="/studio">📝 Studio</a></nav>
 </header>
@@ -893,6 +905,7 @@ details.think .body2{color:#c8bfe7;font-style:italic}
       <button class="mini2 danger" id="delAllBtn" title="Delete every draft, its figures, and its conversation">Delete all drafts</button>
     </div>
   </aside>
+  <div class="vresizer" id="rsSide" title="Drag to resize"></div>
   <section id="doc">
     <div class="docbar">
       <button id="viewtoggle">✎ Edit</button>
@@ -911,6 +924,7 @@ details.think .body2{color:#c8bfe7;font-style:italic}
       <div class="pane previewpane"><div id="preview"></div></div>
     </div>
   </section>
+  <div class="vresizer" id="rsChat" title="Drag to resize"></div>
   <section id="chat">
     <div id="log"></div>
     <div id="composer">
@@ -968,6 +982,8 @@ function mdToHtml(text){
 }
 
 //__HIGHLIGHT_JS__
+//__RESIZER_JS__
+//__PROGRESS_JS__
 function syncHL(){
   if(!hl) return;
   hl.innerHTML=highlightMarkdown(editor.value)+"\n";   // trailing \n keeps last line height in sync
@@ -1088,7 +1104,7 @@ async function saveDoc(){
   clearTimeout(saveTimer);
   if(!editorDirty || running) return true;
   updateMeta("saving…");
-  const d=await api(API+"/doc",{content:editor.value});
+  const d=await api(API+"/doc",{content:editor.value},true);
   if(!d){updateMeta();return false;}
   docMtime=d.mtime; editorDirty=false; updateMeta();
   return true;
@@ -1127,13 +1143,15 @@ function refreshControls(){
 function autosize(){const t=$("#msg");t.style.height="auto";t.style.height=Math.min(t.scrollHeight,180)+"px";}
 
 // ---- server calls ----
-async function api(url,body){
+async function api(url,body,quiet){
   let r;
   body={run:selectedRun||undefined,...(body||{})};   // every POST names this window's run
+  if(!quiet)Progress.start();
   try{
     r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify(body)});
   }catch(e){ toast("network error — retry: "+e.message); return null; }
+  finally{ if(!quiet)Progress.done(); }
   const d=await r.json().catch(()=>({}));
   if(!r.ok){toast(d.error||"failed");return null;}
   return d;
@@ -1288,6 +1306,8 @@ function bindStream(){
 $("#send").onclick=send;
 $("#stopbtn").onclick=stop;
 $("#delbtn").onclick=deleteDraft;
+makeResizer($("#rsSide"),$("#picker"),"st.sideW",{min:220,max:520});
+makeResizer($("#rsChat"),$("#chat"),"st.chatW",{min:300,max:800,fromRight:true});
 $("#exportbtn").onclick=()=>{ if(selected) location.href=API+"/export?"+runQ(); };
 $("#gdocbtn").onclick=async()=>{
   if(!selected) return;
@@ -1349,5 +1369,9 @@ INDEX_HTML = (
     INDEX_HTML.replace("/*__PALETTE__*/", PALETTE_CSS)
     .replace("/*__EDITOR_CSS__*/", EDITOR_CSS)
     .replace("/*__PREVIEW_CSS__*/", PREVIEW_CSS)
+    .replace("//__RESIZER_JS__", RESIZER_JS)
+    .replace("//__PROGRESS_JS__", PROGRESS_JS)
+    .replace("/*__PROGRESS_CSS__*/", PROGRESS_CSS)
+    .replace("/*__RESIZER_CSS__*/", RESIZER_CSS)
     .replace("//__HIGHLIGHT_JS__", HIGHLIGHT_JS)
 )

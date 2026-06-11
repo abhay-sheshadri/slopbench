@@ -1899,8 +1899,8 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);
 ::selection{background:rgba(122,162,247,.3)}
 .sidebar::-webkit-scrollbar,.main::-webkit-scrollbar,pre::-webkit-scrollbar{width:9px;height:9px}
 .sidebar::-webkit-scrollbar-thumb,.main::-webkit-scrollbar-thumb,pre::-webkit-scrollbar-thumb{background:var(--panel3);border-radius:6px}
-.app{display:grid;grid-template-columns:var(--sidebar-w,340px) 6px minmax(0,1fr);flex:1;min-height:0}
-.app.lens-open{grid-template-columns:var(--sidebar-w,340px) 6px minmax(0,1fr) 6px var(--lens-w,420px)}
+.app{display:grid;grid-template-columns:var(--sidebar-w,300px) 6px minmax(0,1fr);flex:1;min-height:0}
+.app.lens-open{grid-template-columns:var(--sidebar-w,300px) 6px minmax(0,1fr) 6px var(--lens-w,420px)}
 .sidebar{background:var(--panel);border-right:1px solid var(--border);overflow-y:auto;padding:12px}
 .resizer{cursor:col-resize;background:var(--border);transition:background .12s}
 .resizer:hover,.resizer.active{background:var(--accent)}

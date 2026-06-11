@@ -20,7 +20,16 @@ from urllib.parse import parse_qs, urlparse
 from src.agent_viewer import ROOT
 from src.blogpost_studio_web import _sse  # generic over DocAgentSession
 from src.proposal_studio import ProposalSession
-from src.theme import EDITOR_CSS, HIGHLIGHT_JS, PALETTE_CSS, PREVIEW_CSS
+from src.theme import (
+    EDITOR_CSS,
+    HIGHLIGHT_JS,
+    PALETTE_CSS,
+    PREVIEW_CSS,
+    PROGRESS_CSS,
+    PROGRESS_JS,
+    RESIZER_CSS,
+    RESIZER_JS,
+)
 
 PREFIX = "/proposals"
 PROPOSALS_DIR = ROOT / "proposals"
@@ -212,7 +221,7 @@ header{display:flex;align-items:center;gap:12px;padding:12px;background:var(--pa
 header .spacer{flex:1}
 
 main{flex:1;display:flex;min-height:0}
-aside{width:280px;flex:0 0 auto;background:var(--panel);border-right:1px solid var(--border);
+aside{width:300px;flex:0 0 auto;background:var(--panel);border-right:1px solid var(--border);
   display:flex;flex-direction:column;padding:10px}
 #newbtn{margin-bottom:10px}
 #plist{flex:1;overflow:auto;display:flex;flex-direction:column;gap:1px}
@@ -227,7 +236,7 @@ aside{width:280px;flex:0 0 auto;background:var(--panel);border-right:1px solid v
 
 /* chat with the proposal-editing agent (same workflow as the writeup studio);
    docked on the right, doc in the middle */
-#chatcol{width:360px;flex:0 0 auto;display:flex;flex-direction:column;min-height:0;
+#chatcol{width:420px;flex:0 0 auto;min-width:0;display:flex;flex-direction:column;min-height:0;
   background:var(--panel);border-left:1px solid var(--border)}
 .chathead{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--border);
   font-weight:700;font-size:13px}
@@ -292,10 +301,12 @@ details.think .body2{color:#c8bfe7;font-style:italic}
   color:var(--fg);border:1px solid var(--border);padding:8px 14px;border-radius:8px;opacity:0;
   transition:opacity .2s;pointer-events:none;z-index:9999;font-size:13px}
 .toast.show{opacity:1}
-@media (max-width:1100px){ #chatcol{width:300px} aside{width:220px} }
+/*__RESIZER_CSS__*/
+/*__PROGRESS_CSS__*/
 </style>
 </head>
 <body>
+<div id="topbar-progress"></div>
 <header>
   <nav class="appnav"><a href="/">🔎 Runs</a><a class="on" href="/proposals">🗒 Proposals</a><a href="/studio">📝 Studio</a></nav>
   <span class="spacer"></span>
@@ -305,6 +316,7 @@ details.think .body2{color:#c8bfe7;font-style:italic}
     <button class="primary" id="newbtn">＋ New proposal</button>
     <div id="plist"><div class="muted">loading…</div></div>
   </aside>
+  <div class="vresizer" id="rsSide" title="Drag to resize"></div>
   <section id="doc">
     <div class="docbar">
       <button id="viewtoggle">✎ Edit</button>
@@ -318,6 +330,7 @@ details.think .body2{color:#c8bfe7;font-style:italic}
       <div class="pane previewpane"><div id="preview"><div class="empty">Pick a proposal on the left, or create a new one.</div></div></div>
     </div>
   </section>
+  <div class="vresizer" id="rsChat" title="Drag to resize"></div>
   <section id="chatcol">
     <div class="chathead">Agent <span class="meta" id="cost"></span><span class="spacer"></span>
       <button class="mini2" id="polishbtn" title="Ask the agent to clean up this proposal">✨ Clean up</button>
@@ -346,6 +359,8 @@ function esc(s){return (s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">
 const md=t=>marked.parse(t||"");
 
 //__HIGHLIGHT_JS__
+//__RESIZER_JS__
+//__PROGRESS_JS__
 function syncHL(){
   hl.innerHTML=highlightMarkdown(editor.value)+"\n";   // trailing \n keeps last line height in sync
   hl.scrollTop=editor.scrollTop; hl.scrollLeft=editor.scrollLeft;
@@ -363,12 +378,14 @@ function setMode(m){
   if(m==="view") renderPreview(); else syncHL();
 }
 
-async function api(url,body){
+async function api(url,body,quiet){
   let r;
+  if(!quiet)Progress.start();
   try{
     r=await fetch(url, body===undefined?{}:{method:"POST",
       headers:{"Content-Type":"application/json"},body:JSON.stringify({name:cur||undefined,...body})});
   }catch(e){ toast("network error: "+e.message); return null; }
+  finally{ if(!quiet)Progress.done(); }
   const d=await r.json().catch(()=>({}));
   if(!r.ok){toast(d.error||"failed");return null;}
   return d;
@@ -379,7 +396,7 @@ async function save(){
   clearTimeout(saveTimer);
   if(!cur || !dirty || running) return !running;
   updateMeta("saving…");
-  const d=await api(API+"/doc",{content:editor.value});
+  const d=await api(API+"/doc",{content:editor.value},true);
   if(!d){updateMeta();return false;}
   dirty=false; docMtime=d.mtime; updateMeta();
   return true;
@@ -394,7 +411,7 @@ function onEdit(){
   saveTimer=setTimeout(save,800);
 }
 async function reloadDoc(){
-  const d=await api(API+"/doc?name="+encodeURIComponent(cur));
+  const d=await api(API+"/doc?name="+encodeURIComponent(cur),undefined,true);
   if(!d) return;
   docMtime=d.mtime;
   if(dirty) return;            // never clobber the human's unsaved edits
@@ -554,6 +571,8 @@ async function newProposal(){
 // ---- wiring ----
 $("#viewtoggle").onclick=()=>setMode(mode==="view"?"edit":"view");
 $("#newbtn").onclick=newProposal;
+makeResizer($("#rsSide"),document.querySelector("aside"),"pp.sideW",{min:220,max:520});
+makeResizer($("#rsChat"),$("#chatcol"),"pp.chatW",{min:300,max:800,fromRight:true});
 $("#psend").onclick=()=>sendMsg();
 $("#polishbtn").onclick=()=>sendMsg("/polish");
 $("#stopbtn").onclick=stopAgent;
@@ -599,5 +618,9 @@ INDEX_HTML = (
     INDEX_HTML.replace("/*__PALETTE__*/", PALETTE_CSS)
     .replace("/*__EDITOR_CSS__*/", EDITOR_CSS)
     .replace("/*__PREVIEW_CSS__*/", PREVIEW_CSS)
+    .replace("//__RESIZER_JS__", RESIZER_JS)
+    .replace("//__PROGRESS_JS__", PROGRESS_JS)
+    .replace("/*__PROGRESS_CSS__*/", PROGRESS_CSS)
+    .replace("/*__RESIZER_CSS__*/", RESIZER_CSS)
     .replace("//__HIGHLIGHT_JS__", HIGHLIGHT_JS)
 )

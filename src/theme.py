@@ -118,4 +118,68 @@ function highlightMarkdown(src){
   }).join("\\n");
 }"""
 
-__all__ = ["PALETTE_CSS", "EDITOR_CSS", "PREVIEW_CSS", "HIGHLIGHT_JS"]
+# Thin top progress bar (the run viewer's), shared so every page pulses the
+# same way during user-initiated fetches. Pages add <div id="topbar-progress">,
+# the CSS/JS tokens, and call Progress.start()/done() around fetches.
+PROGRESS_CSS = """#topbar-progress{position:fixed;top:0;left:0;height:3px;width:0;z-index:9999;
+  background:linear-gradient(90deg,var(--accent),var(--accent2));
+  box-shadow:0 0 10px var(--accent),0 0 4px var(--accent);border-radius:0 2px 2px 0;
+  opacity:0;transition:width .2s ease,opacity .35s ease;pointer-events:none}
+#topbar-progress.active{opacity:1}"""
+
+PROGRESS_JS = """// ---- thin top progress bar (shared with the run viewer) ----
+const Progress=(()=>{
+  let val=0,timer=null,active=0;
+  const bar=()=>document.getElementById("topbar-progress");
+  const set=v=>{val=v;const b=bar();if(b)b.style.width=(v*100)+"%";};
+  function start(){
+    if(++active>1)return;
+    const b=bar();if(b)b.classList.add("active");set(0.08);
+    clearInterval(timer);
+    timer=setInterval(()=>{const rem=0.9-val;if(rem>0.01)set(val+rem*0.12);},300);
+  }
+  function done(){
+    if(active>0)active--;
+    if(active>0)return;
+    clearInterval(timer);timer=null;set(1);
+    setTimeout(()=>{const b=bar();if(b)b.classList.remove("active");setTimeout(()=>set(0),360);},200);
+  }
+  return {start,done};
+})();"""
+
+# Draggable column resizers (same look/feel as the run viewer's): a 6px flex
+# handle between columns. Pages insert via the /*__RESIZER_CSS__*/ and
+# //__RESIZER_JS__ tokens, then call makeResizer per handle.
+RESIZER_CSS = """.vresizer{flex:0 0 6px;cursor:col-resize;background:var(--border);transition:background .12s}
+.vresizer:hover,.vresizer.active{background:var(--accent)}"""
+
+RESIZER_JS = """// ---- draggable column resizer (shared) ----
+// makeResizer(handle, target, storageKey, {min, max, fromRight}): drag the
+// handle to resize target's width, persisted in localStorage per page.
+// fromRight = the target is docked on the right of the handle.
+function makeResizer(handle, target, key, opts){
+  const o=Object.assign({min:220,max:720,fromRight:false},opts||{});
+  const saved=parseInt(localStorage.getItem(key)||"",10);
+  if(saved>=o.min&&saved<=o.max) target.style.width=saved+"px";
+  let drag=false;
+  handle.addEventListener("mousedown",e=>{drag=true;handle.classList.add("active");
+    document.body.style.userSelect="none";e.preventDefault();});
+  window.addEventListener("mousemove",e=>{
+    if(!drag)return;
+    const r=target.getBoundingClientRect();
+    const w=Math.min(o.max,Math.max(o.min,o.fromRight?r.right-e.clientX:e.clientX-r.left));
+    target.style.width=w+"px";
+  });
+  window.addEventListener("mouseup",()=>{ if(!drag)return; drag=false; handle.classList.remove("active");
+    document.body.style.userSelect="";
+    localStorage.setItem(key,parseInt(target.style.width,10)||""); });
+}"""
+
+__all__ = [
+    "PALETTE_CSS",
+    "EDITOR_CSS",
+    "PREVIEW_CSS",
+    "HIGHLIGHT_JS",
+    "RESIZER_CSS",
+    "RESIZER_JS",
+]
