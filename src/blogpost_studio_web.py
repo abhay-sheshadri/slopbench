@@ -15,6 +15,7 @@ Access policy). Workspaces persist under ``outputs/06_blogpost_studio/<run>/``.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -481,9 +482,10 @@ def export_gdoc(s: StudioSession) -> dict:
     """Create a Google Doc of the draft and return its URL.
 
     Goes through the user's Apps Script web app (see scripts/gdoc_webapp.gs):
-    pandoc renders the draft to standalone HTML with figures embedded as data
-    URIs, the web app converts that to a native Doc in their Drive and shares
-    it anyone-with-link-can-comment.
+    we send the pandoc .docx (Google's highest-fidelity import path — figures
+    and formatting survive, unlike HTML whose data-URI images get dropped),
+    and the web app converts it to a native Doc in their Drive and shares it
+    anyone-with-link-can-comment.
     """
     from src.runner_utils import parse_env_text
 
@@ -495,9 +497,12 @@ def export_gdoc(s: StudioSession) -> dict:
             "GDOC_WEBAPP_URL is not set — do the 3-minute setup described in "
             "scripts/gdoc_webapp.gs, then add the web app URL to .env"
         )
-    html = _pandoc(s, ["-t", "html", "--standalone", "--embed-resources"], ".html")
+    docx = export_docx(s)
     body = json.dumps(
-        {"title": s.run_dir.name.replace("_", " "), "html": html.decode("utf-8")}
+        {
+            "title": s.run_dir.name.replace("_", " "),
+            "docx": base64.b64encode(docx).decode("ascii"),
+        }
     ).encode("utf-8")
     req = urllib.request.Request(
         url, data=body, headers={"Content-Type": "application/json"}
@@ -711,6 +716,8 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 #delbtn{font-size:12px;padding:4px 13px;background:transparent;border-color:transparent;color:var(--faint)}
 #delbtn:hover:not(:disabled){background:rgba(247,118,142,.12);border-color:rgba(247,118,142,.4);color:var(--err)}
 .docbar .spacer{flex:1}
+#gdoclink{font-size:11.5px;color:var(--accent);text-decoration:none}
+#gdoclink:hover{text-decoration:underline}
 .meta{color:var(--faint);font-size:11px;font-family:var(--mono);font-variant-numeric:tabular-nums}
 .meta .dot{opacity:.5;margin:0 2px}
 #docview{flex:1;display:flex;min-height:0;overflow:hidden}
@@ -759,7 +766,8 @@ details.think .body2{color:#c8bfe7;font-style:italic}
       <button id="viewtoggle">✎ Edit</button>
       <span class="spacer"></span>
       <span class="meta" id="meta"></span>
-      <button id="gdocbtn" title="Create a Google Doc of this draft in your Drive and open it (needs GDOC_WEBAPP_URL — see scripts/gdoc_webapp.gs)">→ Google Doc</button>
+      <a id="gdoclink" target="_blank" hidden title="The Google Doc created from this draft">open Doc ↗</a>
+      <button id="gdocbtn" title="Create a Google Doc of this draft in your Drive (needs GDOC_WEBAPP_URL — see scripts/gdoc_webapp.gs)">→ Google Doc</button>
       <button id="exportbtn" title="Download the draft as .docx (figures embedded)">⇩ .docx</button>
       <button class="danger" id="delbtn" title="Delete this run's draft, figures, and conversation">Delete draft</button>
     </div>
@@ -1166,8 +1174,10 @@ $("#gdocbtn").onclick=async()=>{
   const d=await api(API+"/gdoc",{});
   b.disabled=false; b.textContent=prev;
   if(!d) return;
-  window.open(d.url,"_blank");
-  prompt("Google Doc created — link (anyone can comment):", d.url);
+  // No popups/dialogs: a plain link appears next to the button — clicking it
+  // is a real user gesture, so the new tab opens without popup-blocker fights.
+  const a=$("#gdoclink"); a.href=d.url; a.hidden=false;
+  toast("Google Doc ready — click “open Doc ↗”");
 };
 $("#runpick").onclick=()=>$("#picker").classList.contains("show")?closePicker():openPicker();
 $("#pickerSearch").addEventListener("input",drawRuns);
