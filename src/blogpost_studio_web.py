@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -503,9 +504,16 @@ def export_gdoc(s: StudioSession) -> dict:
     )
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:  # follows the
-            out = json.loads(resp.read().decode("utf-8"))  # script.google redirect
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raw = resp.read().decode("utf-8", "replace")  # script.google redirect
+    except (urllib.error.URLError, TimeoutError) as exc:
         raise ValueError(f"Google Doc creation failed: {exc}")
+    try:
+        out = json.loads(raw)
+    except json.JSONDecodeError:
+        # Apps Script reports failures as an HTML page; surface its actual text
+        # (e.g. "ReferenceError: Drive is not defined" = Drive service not added).
+        text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>|{[^}]*}", " ", raw)).strip()
+        raise ValueError(f"web app error: {text[:300]}")
     if not out.get("url"):
         raise ValueError(f"web app returned no url: {str(out)[:200]}")
     return {"url": out["url"]}
