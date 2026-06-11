@@ -8,14 +8,16 @@ the voice and care, NOT the length — your post should be far shorter than thes
 - **Lead with the simplest true framing of the results.** This is the overriding goal; the
   rest of these instructions serve it. Work out the plainest true statement of what was
   found and build the whole post around it. Choose the simplest framing, metric, and example
-  that is still faithful to the evidence, and add conditions, controls, and caveats only
+  that is still faithful to the evidence, and add comparison conditions and caveats only
   after that core is clear. When in doubt, cut a complication rather than add one.
   - Set up the experiment in plain words before using any of its terminology. A reader who
     has not seen the source papers should be able to follow the post on its own; assume they
     have some context on the project proposal but none on what happened during the research.
   - Anchor the main result to one concrete worked example before generalizing: show a
-    representative case (a real input and the model's output) and the two or three numbers
-    that make the point, then layer on the broader claim and the controls.
+    representative case (a real input and the model's output), then layer on the broader
+    claim and the comparison conditions.
+  - If the proposal frames the project as a response to a specific prior result, open with
+    that context in a sentence — the reader should know what question the headline answers.
   - A reader should be able to restate the main result in two plain sentences using only the
     post. If they cannot, the framing is too abstract or the metrics are underspecified.
   - Don't let the headline outrun the evidence: if the clean result rests on a single case
@@ -25,11 +27,19 @@ the voice and care, NOT the length — your post should be far shorter than thes
 
 - **Structure.**
   - Write a shortform research note, not a paper: roughly 300-800 words, hard cap ~1000.
-    State the headline result in the first one or two sentences, then one short paragraph of
-    setup in plain words (defining the key metric), then the key numbers and the one or two
-    figures that carry the result, then caveats and limitations. No formal
-    Introduction/Methods/Results scaffolding and no appendices; short bold mini-headers or
-    paragraph breaks are fine if they help.
+    Open with a 3-5 bullet TL;DR of the main takeaways (one line each, then a line break),
+    then the headline result in a sentence or two, then one short paragraph of setup in
+    plain words (defining the key metric), then the one or two figures that carry the
+    result, then caveats and limitations. No formal Introduction/Methods/Results
+    scaffolding and no appendices; short bold mini-headers or paragraph breaks are fine if
+    they help.
+  - Headers and bolded lead-ins must state the finding in plain words. No vague taglines
+    or slogans ("Belief is trainable", "Less is more") — a header should mean something
+    concrete to a reader who reads only the headers.
+  - Prose carries takeaways; figures carry numbers. Paragraphs should state what was found
+    and what it means, with at most the one or two headline numbers in text — every other
+    exact number belongs in a figure, its caption, or a table. If a paragraph is
+    accumulating numbers, that's a figure trying to happen.
   - Cut secondary results unless they change the takeaway; one or two sentences may point
     at what else was tried and how it came out.
 
@@ -46,13 +56,27 @@ the voice and care, NOT the length — your post should be far shorter than thes
     term or plain language. Don't give a common word a special private meaning or use one in
     a way a reader could misread — if a term could be read two ways, pin it down or replace
     it. A reader should never have to guess what a word means.
+  - No nonstandard hyphenated coinages ("flat-to-stricter", "risk-gated", "emphasis-matched"):
+    if the compound isn't a standard term, unpack it into plain words.
+
+- **Anticipate the reader's confusions.** Before finishing, list the ways a careful reader
+  could misread the post, and make the text foreclose each one. The recurring offenders:
+  - When a model appears in more than one role (trained as a policy, used as a monitor,
+    serving as a judge), say which role is meant at every mention where it could be
+    misread. "We trained X" must never leave the reader guessing whether X was trained to
+    act or trained to evaluate.
+  - Chain-of-thought is doubly ambiguous: "reviewing with CoT" could mean the monitor
+    thinks out loud, or the policy's CoT is shown to the monitor. Always say whose CoT and
+    who sees it.
+  - Never call a condition just "the control" or "the baseline": say concretely what it is
+    ("the same model before fine-tuning", "the same prompt without the persona framing").
+  - Spell out dataset and setup shorthand on first use ("MBPP-derived" → what was derived,
+    how).
 
 - **Voice and length.**
-  - Be concise; rigorously audit the writeup for hard-to-understand terms and replace them,
-    and avoid being too verbose.
-  - Cut AI filler: throat-clearing, vague hype, hollow contrast ("not just X, but Y"),
-    restating the obvious, or padding. Keep only sentences that carry real content, in the
-    precise, plain voice of a careful researcher.
+  - Be concise. Cut AI filler: throat-clearing, vague hype, hollow contrast ("not just X,
+    but Y"), restating the obvious, or padding. Keep only sentences that carry real
+    content, in the precise, plain voice of a careful researcher.
   - Write a finished product, not a process log. Don't reference the AI agent doing the
     research; the goal is a polished research shortform a careful researcher would post,
     not a summary of the agent's work.
