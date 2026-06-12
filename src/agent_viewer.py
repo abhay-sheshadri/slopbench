@@ -1993,22 +1993,27 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);
 .lrow{display:flex;align-items:center;gap:6px;padding:4px 2px;border-top:1px solid var(--border)}
 .lrow:first-child{border-top:0}
 /* project panel (feedback / resume / continue), anchored under the topbar */
-.projpanel{position:fixed;right:14px;top:118px;z-index:60;width:min(640px,92vw);max-height:82vh;overflow:auto;
-  background:var(--panel);border:1px solid var(--border);border-radius:10px;
-  box-shadow:0 16px 48px rgba(0,0,0,.6);padding:12px;display:flex;flex-direction:column;gap:9px}
+.ppback{position:fixed;inset:0;z-index:59;background:rgba(0,0,0,.55);backdrop-filter:blur(2px)}
+.ppback[hidden]{display:none}
+.projpanel{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:60;width:min(900px,94vw);max-height:88vh;overflow:auto;
+  background:var(--panel);border:1px solid var(--border);border-radius:14px;
+  box-shadow:0 24px 80px rgba(0,0,0,.7);padding:18px 20px;display:flex;flex-direction:column;gap:12px}
 .projpanel[hidden]{display:none}
+.projpanel .lhead{font-size:15px}
+.pp-label{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
 .pp-name{color:var(--muted);font-family:var(--mono);font-size:11.5px;font-weight:400;margin-left:8px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:55%}
 .pp-status{font-size:12px;color:var(--muted);font-family:var(--mono);line-height:1.7;
   background:var(--panel2);border:1px solid var(--border);border-radius:7px;padding:8px 10px}
 .pp-status b{color:var(--fg)} .pp-status .bad{color:var(--err)} .pp-status .good{color:var(--ok)}
-#ppText{resize:vertical;min-height:170px;background:var(--panel2);color:var(--fg);border:1px solid var(--border);
-  border-radius:7px;padding:8px 10px;font:12.5px/1.5 var(--sans);outline:none}
+#ppText{resize:vertical;min-height:38vh;background:var(--panel2);color:var(--fg);border:1px solid var(--border);
+  border-radius:9px;padding:12px 14px;font:13.5px/1.55 var(--sans);outline:none}
 #ppText:focus{border-color:var(--accent)}
-.pp-actions{display:flex;align-items:center;gap:8px}
+.pp-actions{display:flex;align-items:center;gap:10px}
+.pp-actions .mini{font-size:13px;padding:8px 16px;border-radius:8px}
 .pp-actions .spacer{flex:1}
 .pp-fb{display:flex;flex-direction:column;gap:5px}
-.pp-fb .fbitem{font-size:11.5px;color:var(--muted);border-left:2px solid var(--border);padding:2px 8px;
+.pp-fb .fbitem{font-size:12.5px;color:var(--muted);border-left:2px solid var(--border);padding:4px 10px;
   white-space:pre-wrap;max-height:110px;overflow:auto}
 .pp-fb .fbitem .fbdate{color:var(--faint);font-family:var(--mono);font-size:10px}
 .lname{flex:1;min-width:0;font-size:12px;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -2214,9 +2219,11 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
     </div>
     <div id="sesstabs" class="sesstabs"></div>
     </div>
+    <div class="ppback" id="ppBack" hidden></div>
     <div class="projpanel" id="projpanel" hidden>
       <div class="lhead">Project <span class="pp-name" id="ppName"></span><button class="lclose" id="ppClose" title="Close">×</button></div>
       <div class="pp-status" id="ppStatus"></div>
+      <div class="pp-label">Feedback / continuation instructions</div>
       <textarea id="ppText" rows="10" placeholder="Feedback / further instructions for this project…&#10;Saved under feedback/<run>/ — and used as the new instructions if you launch a continuation."></textarea>
       <div class="pp-actions">
         <button class="mini" id="ppSave">Save feedback</button>
@@ -2224,6 +2231,7 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
         <button class="mini" id="ppResume" hidden title="Relaunch this run with --resume in its tmux session">⟲ Resume run</button>
         <button class="mini" id="ppContinue" hidden title="Relaunch this completed run with the feedback above as its new instructions">🚀 Launch continuation</button>
       </div>
+      <div class="pp-label">Saved feedback</div>
       <div class="pp-fb" id="ppFb"></div>
     </div>
     <div class="content" id="content"><div class="empty">Click through the folders on the left and pick a run to view its transcript.</div></div>
@@ -3063,9 +3071,10 @@ document.getElementById("launchClose").onclick=()=>document.getElementById("laun
 // ---- project panel: feedback / resume / continue for the open run ----
 async function openProject(){
   const el=document.getElementById("projpanel");
-  if(!el.hidden){el.hidden=true;return;}
+  const back=document.getElementById("ppBack");
+  if(!el.hidden){el.hidden=true;back.hidden=true;return;}
   if(!state.agentId) return;
-  el.hidden=false;
+  el.hidden=false;back.hidden=false;
   document.getElementById("ppName").textContent=state.agentId.split("/").pop();
   document.getElementById("ppStatus").textContent="loading…";
   const d=await jget("/api/project?run="+encodeURIComponent(state.agentId),true);
@@ -3103,7 +3112,9 @@ async function ppPost(url,body,confirmMsg){
 }
 const ppContinued=new Set();
 document.getElementById("projBtn").onclick=openProject;
-document.getElementById("ppClose").onclick=()=>document.getElementById("projpanel").hidden=true;
+function ppHide(){document.getElementById("projpanel").hidden=true;document.getElementById("ppBack").hidden=true;}
+document.getElementById("ppClose").onclick=ppHide;
+document.getElementById("ppBack").onclick=ppHide;
 document.getElementById("ppSave").onclick=async()=>{
   const t=document.getElementById("ppText").value;
   const d=await ppPost("/api/feedback",{run:state.agentId,text:t});
