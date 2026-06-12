@@ -1993,7 +1993,7 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);
 .lrow{display:flex;align-items:center;gap:6px;padding:4px 2px;border-top:1px solid var(--border)}
 .lrow:first-child{border-top:0}
 /* project panel (feedback / resume / continue), anchored under the topbar */
-.projpanel{position:fixed;right:14px;top:118px;z-index:60;width:min(480px,92vw);max-height:75vh;overflow:auto;
+.projpanel{position:fixed;right:14px;top:118px;z-index:60;width:min(640px,92vw);max-height:82vh;overflow:auto;
   background:var(--panel);border:1px solid var(--border);border-radius:10px;
   box-shadow:0 16px 48px rgba(0,0,0,.6);padding:12px;display:flex;flex-direction:column;gap:9px}
 .projpanel[hidden]{display:none}
@@ -2002,7 +2002,7 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);
 .pp-status{font-size:12px;color:var(--muted);font-family:var(--mono);line-height:1.7;
   background:var(--panel2);border:1px solid var(--border);border-radius:7px;padding:8px 10px}
 .pp-status b{color:var(--fg)} .pp-status .bad{color:var(--err)} .pp-status .good{color:var(--ok)}
-#ppText{resize:vertical;background:var(--panel2);color:var(--fg);border:1px solid var(--border);
+#ppText{resize:vertical;min-height:170px;background:var(--panel2);color:var(--fg);border:1px solid var(--border);
   border-radius:7px;padding:8px 10px;font:12.5px/1.5 var(--sans);outline:none}
 #ppText:focus{border-color:var(--accent)}
 .pp-actions{display:flex;align-items:center;gap:8px}
@@ -2217,12 +2217,12 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
     <div class="projpanel" id="projpanel" hidden>
       <div class="lhead">Project <span class="pp-name" id="ppName"></span><button class="lclose" id="ppClose" title="Close">×</button></div>
       <div class="pp-status" id="ppStatus"></div>
-      <textarea id="ppText" rows="5" placeholder="Feedback / further instructions for this project…&#10;Saved under feedback/<run>/ — and used as the new instructions if you continue the run."></textarea>
+      <textarea id="ppText" rows="10" placeholder="Feedback / further instructions for this project…&#10;Saved under feedback/<run>/ — and used as the new instructions if you launch a continuation."></textarea>
       <div class="pp-actions">
         <button class="mini" id="ppSave">Save feedback</button>
         <span class="spacer"></span>
         <button class="mini" id="ppResume" hidden title="Relaunch this run with --resume in its tmux session">⟲ Resume run</button>
-        <button class="mini" id="ppContinue" hidden title="Relaunch this completed run with the feedback above as its new instructions">➜ Continue with this feedback</button>
+        <button class="mini" id="ppContinue" hidden title="Relaunch this completed run with the feedback above as its new instructions">🚀 Launch continuation</button>
       </div>
       <div class="pp-fb" id="ppFb"></div>
     </div>
@@ -3082,7 +3082,10 @@ async function openProject(){
   }
   document.getElementById("ppStatus").innerHTML=rows.join("<br>");
   document.getElementById("ppResume").hidden = d.phase!=="Failed";
-  document.getElementById("ppContinue").hidden = !(d.phase==="Completed" && d.mode==="multi_phase");
+  // ppContinued: runs continued from this tab. The launch takes a few seconds to
+  // produce a heartbeat, during which the run still reads "Completed" — keep the
+  // button hidden so the launch visibly "took" and can't be double-fired.
+  document.getElementById("ppContinue").hidden = !(d.phase==="Completed" && d.mode==="multi_phase") || ppContinued.has(state.agentId);
   const fb=document.getElementById("ppFb");
   fb.innerHTML=(d.feedback||[]).map(f=>
     `<div class="fbitem"><span class="fbdate">${esc(f.file)}</span>\n${esc(f.text)}</div>`).join("")
@@ -3098,6 +3101,7 @@ async function ppPost(url,body,confirmMsg){
   if(!r.ok){toast(d.error||"failed");return null;}
   return d;
 }
+const ppContinued=new Set();
 document.getElementById("projBtn").onclick=openProject;
 document.getElementById("ppClose").onclick=()=>document.getElementById("projpanel").hidden=true;
 document.getElementById("ppSave").onclick=async()=>{
@@ -3115,7 +3119,13 @@ document.getElementById("ppContinue").onclick=async()=>{
   if(!t){toast("Write the continuation instructions in the feedback box first");return;}
   const d=await ppPost("/api/continue",{run:state.agentId,text:t},
     "Continue this COMPLETED run with the feedback above as its new instructions?\n\nThis starts a real, long-running (and expensive) agent run.");
-  if(d) toast(`Continuation launched in tmux session ${d.session} (feedback saved to ${d.feedback})`);
+  if(d){
+    ppContinued.add(state.agentId);
+    document.getElementById("ppText").value="";
+    document.getElementById("ppContinue").hidden=true;
+    openProject();openProject();   // close + reopen = refetch the panel status
+    toast(`Continuation launched in tmux session ${d.session} (feedback saved to ${d.feedback})`);
+  }
 };
 
 if(state.agentId)lensSwitchTo(state.agentId);
