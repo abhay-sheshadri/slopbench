@@ -706,6 +706,9 @@ _RL_STAGE_RE = re.compile(r"(worker|reviewer|phase_planner)_(\d+)_(\d+)")
 _MP_BOUNDARY_RE = re.compile(
     r"finished reviewing the work done in segment\s*(\d+)\s*,?\s*phase\s*(\d+)", re.I
 )
+# Verbatim from run-loop.ts buildContinueInjectedInstructions(): a /run-loop
+# continue relaunch prepends this to the main planner's review prompt.
+_MP_CONTINUATION_MARKER = "IMPORTANT: Project Continuation"
 _RL_STAGE_ORDER = {"worker": 0, "phase_planner": 1, "main_review": 2}
 _RL_STAGE_LABEL = {
     "worker": "Worker",
@@ -724,24 +727,65 @@ def _turn_text(turn: dict) -> str:
     )
 
 
-def _split_main_planner(turns: list) -> dict:
+def _split_main_planner(turns: list) -> tuple:
     """Slice the one long main-planner thread into per-phase review chunks.
 
     Each review starts at the user message "...finished reviewing the work done
     in segment X, phase Y..."; the revision rounds that follow belong to the
-    same chunk. Returns ``{(seg, phase): [turn, ...]}``.
+    same chunk. A ``/run-loop continue`` relaunch re-opens the last phase's
+    review with an injected continuation prompt (see _MP_CONTINUATION_MARKER);
+    each such re-opening gets its own generation so the UI can show
+    continuations as their own groups instead of silently appending to the
+    original phase's tabs.
+
+    Returns ``(chunks, cont_starts)`` where ``chunks`` is
+    ``{(seg, phase, gen): [turn, ...]}`` (gen=0 is the original review) and
+    ``cont_starts`` is ``{(seg, phase): {gen: first_turn_ts_ms}}`` for gen>=1,
+    used to split the reused phase-planner fork at the same boundaries.
     """
     chunks: dict = {}
+    gens: dict = {}
     cur = None
     for t in turns:
         if t.get("role") == "user":
-            m = _MP_BOUNDARY_RE.search(_turn_text(t))
+            text = _turn_text(t)
+            m = _MP_BOUNDARY_RE.search(text)
             if m:
-                cur = (int(m.group(1)), int(m.group(2)))
+                key = (int(m.group(1)), int(m.group(2)))
+                if _MP_CONTINUATION_MARKER in text:
+                    gens[key] = gens.get(key, 0) + 1
+                cur = (key[0], key[1], gens.get(key, 0))
                 chunks.setdefault(cur, [])
         if cur is not None:
             chunks[cur].append(t)
-    return chunks
+    cont_starts: dict = {}
+    for (seg, phase, gen), chunk in chunks.items():
+        if gen > 0:
+            cont_starts.setdefault((seg, phase), {})[gen] = _session_start_ts(chunk)
+    return chunks, cont_starts
+
+
+def _split_fork_by_continuations(turns: list, starts: dict) -> dict:
+    """Split a phase-planner fork's turns into continuation generations.
+
+    ``/run-loop continue`` reuses the last phase's fork session, so its
+    continuation turns are textually indistinguishable from ordinary revision
+    rounds. The reliable boundary is time: the main planner's continuation
+    injection (whose ts we have in ``starts``: {gen: ts_ms}) always precedes the
+    fork's continuation turns. Turns without a ts stay in the current bucket.
+    """
+    if not starts:
+        return {0: turns}
+    boundaries = sorted((ts, gen) for gen, ts in starts.items() if ts is not None)
+    out: dict = {0: []}
+    cur_gen = 0
+    for t in turns:
+        ts = t.get("ts")
+        if isinstance(ts, (int, float)):
+            while boundaries and ts >= boundaries[0][0]:
+                cur_gen = boundaries.pop(0)[1]
+        out.setdefault(cur_gen, []).append(t)
+    return out
 
 
 def _assemble_run_loop(sub_parsed: list, planner: dict | None) -> list:
@@ -769,7 +813,16 @@ def _assemble_run_loop(sub_parsed: list, planner: dict | None) -> list:
         for key, turns in list(phaseplanners.items()):
             uniq = [t for t in turns if t.get("id") not in mp_ids]
             phaseplanners[key] = uniq or turns  # keep all if dedup left nothing
-    reviews = _split_main_planner(mp_turns)
+    reviews, cont_starts = _split_main_planner(mp_turns)
+
+    # A continuation reuses the last phase's fork, so carve its turns into the
+    # same generations as the main-planner reviews (gen 0 = the original cycle).
+    pp_split: dict = {}
+    for (seg, phase), turns in phaseplanners.items():
+        by_gen = _split_fork_by_continuations(turns, cont_starts.get((seg, phase), {}))
+        for gen, gen_turns in by_gen.items():
+            if gen_turns:
+                pp_split[(seg, phase, gen)] = gen_turns
 
     sessions: list = []
     if planner is not None:
@@ -786,22 +839,30 @@ def _assemble_run_loop(sub_parsed: list, planner: dict | None) -> list:
                 "stage": "planner",
             }
         )
-    for seg, phase in sorted(set(workers) | set(phaseplanners) | set(reviews)):
-        group = f"Segment {seg} \u00b7 Phase {phase}"
+    keys = set(pp_split) | set(reviews) | {(s, p, 0) for (s, p) in workers}
+    for seg, phase, gen in sorted(keys):
+        if gen == 0:
+            group = f"Segment {seg} \u00b7 Phase {phase}"
+            suffix = ""
+        else:
+            group = (
+                f"Continuation {gen} \u00b7 after Segment {seg} \u00b7 Phase {phase}"
+            )
+            suffix = f"_cont{gen}"
         for stage, turns in (
-            ("worker", workers.get((seg, phase))),
-            ("phase_planner", phaseplanners.get((seg, phase))),
-            ("main_review", reviews.get((seg, phase))),
+            ("worker", workers.get((seg, phase)) if gen == 0 else None),
+            ("phase_planner", pp_split.get((seg, phase, gen))),
+            ("main_review", reviews.get((seg, phase, gen))),
         ):
             if not turns:
                 continue
             sessions.append(
                 {
-                    "name": f"{stage}_{seg}_{phase}",
+                    "name": f"{stage}_{seg}_{phase}{suffix}",
                     "label": _RL_STAGE_LABEL[stage],
                     "group": group,
                     "turns": turns,
-                    "_ord": (1, seg, phase, _RL_STAGE_ORDER[stage]),
+                    "_ord": (1, seg, phase, gen * 10 + _RL_STAGE_ORDER[stage]),
                     "ts": _session_start_ts(turns),
                     "seg": seg,
                     "phase": phase,
