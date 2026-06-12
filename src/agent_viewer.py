@@ -866,6 +866,7 @@ def _assemble_run_loop(sub_parsed: list, planner: dict | None) -> list:
                     "ts": _session_start_ts(turns),
                     "seg": seg,
                     "phase": phase,
+                    "cont": gen,
                     "stage": stage,
                 }
             )
@@ -2933,7 +2934,7 @@ function renderTabs(data){
   if(collapsed){   // show only the current selection + an expander, reclaiming the header
     tabs.classList.add("collapsed");
     const s=sessions[state.sess]||sessions[0];
-    const where=(s.seg!=null)?`S${s.seg}·P${s.phase} · `:"";
+    const where=(s.seg!=null)?`S${s.seg}·P${s.phase}${s.cont?` cont ${s.cont}`:""} · `:"";
     const b=E("button");b.className="sesstab active";
     b.innerHTML=`${esc(where)}${esc(s.label||s.name)}<span class="tc">${(s.turns||[]).length}</span>`;
     b.title="Current session — click to show all phase tabs";b.onclick=toggleTabs;
@@ -2951,7 +2952,7 @@ function renderTabs(data){
       if(curGroup!==null){const br=E("span");br.className="tabbreak";tabs.appendChild(br);}
       curGroup=g;
       const gl=E("span");gl.className="tabgroup";
-      gl.textContent=(s.seg!=null)?`S${s.seg}\u00b7P${s.phase}`:g;
+      gl.textContent=(s.seg!=null)?`S${s.seg}\u00b7P${s.phase}${s.cont?` \u21bb cont ${s.cont}`:""}`:g;
       gl.title=g;
       tabs.appendChild(gl);
     }
