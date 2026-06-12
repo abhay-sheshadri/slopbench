@@ -69,6 +69,13 @@ def parse_args() -> argparse.Namespace:
         "contents become the new instructions (the main planner rejects its prior "
         "'all complete' decision and plans the additional work).",
     )
+    parser.add_argument(
+        "--run-loop-args",
+        default="",
+        metavar="ARGS",
+        help="Extra arguments appended to the /run-loop command for multi_phase runs, "
+        'e.g. --run-loop-args "--single-dir" to run all phases in one work/ directory.',
+    )
     return parser.parse_args()
 
 
@@ -111,6 +118,7 @@ def main() -> None:
                     env_contents=env_contents,
                     resume=args.resume,
                     continue_instructions=continue_instructions,
+                    run_loop_args=args.run_loop_args,
                 )
             )
 

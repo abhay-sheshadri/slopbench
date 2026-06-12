@@ -372,6 +372,18 @@ def _newest_mtime_under(d: Path, *, limit: int = 20000) -> float:
         priority_roots.extend(
             phase_dir / sub for sub in ("results", "logs", "plots", "progress")
         )
+    # Single-dir runs (run-loop --single-dir) have no phase_segment_* clones: all
+    # work happens in work/ and the shared cache sits at the run root. Give them
+    # the same priority signals so a live run isn't misread as stale when the
+    # bounded generic walk runs out of stat budget. (The root cache stat also
+    # covers clone-mode runs, whose phase-dir cache is a symlink to it anyway.)
+    try:
+        newest = max(newest, (d / "file_cache_dir").stat().st_mtime)
+    except OSError:
+        pass
+    priority_roots.extend(
+        d / "work" / sub for sub in ("results", "logs", "plots", "progress")
+    )
 
     # Check high-signal output dirs first. Some phase workspaces contain many
     # source/cache files, and the bounded generic walk below can hit its limit
