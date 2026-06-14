@@ -52,11 +52,13 @@ from src import audit_agent  # noqa: E402
 
 # Explicit, independent model choices for the two roles (not tied to the shared
 # project-wide constants, so neither silently shifts if those change):
-#   - author/fix: writing task -> Claude Fable 5.
-#   - reviewer:   red-teaming/judgement task -> Claude Fable 5.
+#   - author/fix: writing task -> Claude Opus 4.6.
+#   - reviewer:   red-teaming/judgement task -> Claude Opus 4.6.
+# (This account has no Fable access — the API 404s "Claude Fable 5 is not
+# available. Please use Opus 4.8.")
 # Override with BLOGPOST_MODEL / REVIEWER_MODEL env vars or --model / --reviewer-model.
-BLOGPOST_MODEL = os.environ.get("BLOGPOST_MODEL", "anthropic/claude-fable-5")
-REVIEWER_MODEL = os.environ.get("REVIEWER_MODEL", "anthropic/claude-fable-5")
+BLOGPOST_MODEL = os.environ.get("BLOGPOST_MODEL", "anthropic/claude-opus-4-6")
+REVIEWER_MODEL = os.environ.get("REVIEWER_MODEL", "anthropic/claude-opus-4-6")
 
 _JINJA = Environment(
     loader=FileSystemLoader(HERE / "prompts"),

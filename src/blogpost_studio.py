@@ -55,10 +55,11 @@ _JINJA = Environment(
     keep_trailing_newline=True,
 )
 
-# Interactive editing wants responsiveness, so default to Claude Fable 5 (same
-# author model as 04_blogpost_gen). Override with --model / BLOGPOST_STUDIO_MODEL.
+# Default to Opus 4.6 (same author model as 04_blogpost_gen). This account has
+# no Fable access — the API 404s "Claude Fable 5 is not available. Please use
+# Opus 4.8." Override with --model / BLOGPOST_STUDIO_MODEL.
 DEFAULT_STUDIO_MODEL = os.environ.get(
-    "BLOGPOST_STUDIO_MODEL", "anthropic/claude-fable-5"
+    "BLOGPOST_STUDIO_MODEL", "anthropic/claude-opus-4-6"
 )
 DEFAULT_THINKING = "high"
 

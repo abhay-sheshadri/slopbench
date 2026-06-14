@@ -498,9 +498,12 @@ def _canonical_phase(
         return "Failed"
     if any(token in raw for token in ("complete", "completed", "done", "success")):
         return "Completed"
-    if health.get("health") == "active":
+    # "quiet" = RUNNING marker + fresh heartbeat but no transcript writes for a
+    # while — typically a worker inside one long tool call (big compute job).
+    # That's alive, not failed; only a dead heartbeat ("stale") means failed.
+    if health.get("health") in {"active", "quiet"}:
         return "Active"
-    if raw or health.get("health") in {"quiet", "stale"}:
+    if raw or health.get("health") == "stale":
         return "Failed"
     return "Completed"
 
@@ -1187,9 +1190,11 @@ def _run_loop_session_files(sessions: dict) -> list[dict]:
 # but physically cannot modify the run it is auditing. Its answer streams back to
 # the browser via the same session.jsonl parser the rest of the viewer uses.
 LENS_DIR = OUTPUTS_DIR / ".lens"
-# Oversight/lens questions are interactive reading tasks — use Fable (the
-# experiment runners keep their own DEFAULT_MODEL).
-LENS_MODEL = os.environ.get("LENS_MODEL", "anthropic/claude-fable-5")
+# Oversight/lens questions are interactive reading tasks. Default to Opus 4.6:
+# this account has no Fable access (the API 404s "Claude Fable 5 is not
+# available. Please use Opus 4.8."), and the experiment runners keep their own
+# DEFAULT_MODEL. Override with LENS_MODEL.
+LENS_MODEL = os.environ.get("LENS_MODEL", "anthropic/claude-opus-4-6")
 LENS_THINKING = os.environ.get("LENS_THINKING", "medium")
 # Max number of Run-Lens summary agents the dashboard's "Generate summaries"
 # fan-out runs at once (also injected as the client-side cap). Each one is a full
@@ -1475,6 +1480,26 @@ def run_image_file(rel: str, image_path: str) -> tuple[bytes, str] | None:
         return None
 
 
+def _session_api_error(text: str) -> str | None:
+    """Last model/API error recorded in a pi session, if any.
+
+    A failed model call (bad/unavailable model, auth, rate limit) is written as
+    an assistant message with empty content and ``stopReason == "error"`` plus an
+    ``errorMessage`` — NOT a non-zero process exit (pi still exits 0). Without
+    this, such a run shows zero turns and looks like a silent "(no output)".
+    """
+    last = None
+    for entry in _iter_jsonl(text):
+        if entry.get("type") != "message":
+            continue
+        msg = entry.get("message") or {}
+        if msg.get("role") == "assistant" and msg.get("stopReason") == "error":
+            em = msg.get("errorMessage")
+            if isinstance(em, str) and em.strip():
+                last = em.strip()
+    return last
+
+
 def lens_transcript(job: str) -> dict:
     """Assistant turns produced so far by a lens job + running/error state."""
     info = _LENS_JOBS.get(job)
@@ -1487,20 +1512,26 @@ def lens_transcript(job: str) -> dict:
     )
     turns = [t for t in parse_session(text)["turns"] if t.get("role") == "assistant"]
     out = {"turns": turns, "running": running, "job": job}
-    if not running and not turns and proc.returncode not in (0, None):
-        err = b""
-        try:
-            err = proc.stderr.read() if proc.stderr else b""
-        except (OSError, ValueError):
-            pass
+    if not running and not turns:
+        # A model/API error (e.g. unavailable model) exits 0 but leaves an
+        # errorMessage in the session — surface that first; it's the real cause.
+        api_err = _session_api_error(text)
         rc = proc.returncode
-        detail = err.decode("utf-8", "replace").strip()[-400:]
-        if not detail and rc is not None and rc < 0:
-            detail = (
-                f"oversight agent was killed (signal {-rc}) — most likely out of memory "
-                f"from too many parallel summaries; lower LENS_SUMMARY_CONCURRENCY"
-            )
-        out["error"] = detail or f"oversight agent exited rc={rc}"
+        if api_err:
+            out["error"] = api_err
+        elif rc not in (0, None):
+            err = b""
+            try:
+                err = proc.stderr.read() if proc.stderr else b""
+            except (OSError, ValueError):
+                pass
+            detail = err.decode("utf-8", "replace").strip()[-400:]
+            if not detail and rc < 0:
+                detail = (
+                    f"oversight agent was killed (signal {-rc}); if this recurs "
+                    f"under heavy summary fan-out, lower LENS_SUMMARY_CONCURRENCY"
+                )
+            out["error"] = detail or f"oversight agent exited rc={rc}"
     return out
 
 
@@ -2074,7 +2105,8 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
 .think .inner .text{color:#c8bfe7;font-style:italic}
 .tag{font-size:10px;padding:1px 6px;border-radius:5px;background:#2a2f3a;color:var(--muted);margin-left:auto}
 .tag.err{background:#3a2330;color:var(--err)} .tag.ok{background:#23311f;color:var(--ok)}
-.sesstabs{display:flex;gap:6px;flex-wrap:wrap;padding:8px 22px 10px;max-width:1000px;margin:0 auto}
+.sesstabs{display:flex;gap:6px;flex-wrap:wrap;padding:8px 22px 10px;max-width:1000px;margin:0 auto;
+  max-height:min(26vh,240px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .sesstab{font-size:12px;border:1px solid var(--border);background:var(--panel2);color:var(--muted);border-radius:7px;padding:4px 10px;cursor:pointer;transition:.12s;display:inline-flex;align-items:center}
 .sesstab:hover{color:var(--fg);border-color:var(--faint)}
 .sesstab.active{border-color:var(--accent);color:var(--fg);background:var(--panel3)}
@@ -2930,7 +2962,9 @@ function toggleTabs(){
   renderTabs(state.data);
 }
 function renderTabs(data){
-  const tabs=document.getElementById("sesstabs");tabs.innerHTML="";
+  const tabs=document.getElementById("sesstabs");
+  const prevScroll=tabs.scrollTop;          // survive the innerHTML rebuild on each poll tick
+  tabs.innerHTML="";
   const sessions=data.sessions||[];
   const tgl=document.getElementById("tabsToggle");
   if(sessions.length<=1){tabs.style.display="none";if(tgl)tgl.style.display="none";return;}
@@ -2970,6 +3004,12 @@ function renderTabs(data){
     b.onclick=()=>selectSession(i);
     tabs.appendChild(b);
   });
+  tabs.scrollTop=prevScroll;
+  // Fresh expansion (no prior scroll): bring the selected phase into view.
+  if(prevScroll===0){
+    const act=tabs.querySelector(".sesstab.active");
+    if(act)act.scrollIntoView({block:"nearest"});
+  }
 }
 
 function applyTranscript(data){
