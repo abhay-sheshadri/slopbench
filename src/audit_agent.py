@@ -21,8 +21,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from src import DEFAULT_GPT_MODEL, sandbox
-from src.runner_utils import parse_env_text
+from src import DEFAULT_GPT_MODEL, oversight, sandbox
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,121 +30,36 @@ DEFAULT_MODEL = DEFAULT_GPT_MODEL
 THINKING_DEFAULT = "high"
 DEFAULT_TIMEOUT = None  # no timeout by default: the agent runs to completion
 
-
-def is_run_dir(path: Path) -> bool:
-    """A slopbench run/project dir is recognised by its ``.pi_transcripts/``."""
-    return (path / ".pi_transcripts").is_dir()
+# Run-dir detection lives in the shared oversight module (re-exported for callers).
+is_run_dir = oversight.is_run_dir
 
 
 # --------------------------------------------------------------------------- #
 # Reference docs staged into the agent's CWD
 # --------------------------------------------------------------------------- #
 def structure_doc() -> str:
-    """RUN_DIR_STRUCTURE.md — the general layout, staged into the CWD."""
-    return """# slopbench run directory structure
+    """RUN_DIR_STRUCTURE.md — the general layout, staged into the CWD.
 
-The source run is mounted READ-ONLY at /source. Read freely there, but write ONLY
-inside your current working directory (/workspace). TRACE_INDEX.md (in your CWD)
-has the concrete paths for this specific run.
-
-## Layout (/source)
-- proposal.md                         the project proposal/spec (may also be under planner/)
-- .pi_transcripts/session.jsonl       the execution agent's full transcript
-                                      (goal mode: the worker; multi_phase: the run-loop orchestrator)
-- .pi_transcripts/planner.session.jsonl   the up-front planner transcript (/init-planner)
-- .pi_transcripts/manifest.json       mode / model / status
-- .pi_transcripts/run_loop_sessions/*.jsonl   (finished multi_phase) folded per-phase sub-agent
-                                      transcripts: worker_<seg>_<phase>.jsonl, reviewer_*, phase_planner_*
-- .home/.pi/agent/sessions/*/*.jsonl  (live multi_phase) the same per-phase sub-agent transcripts
-- planner/OVERALL_PLAN.md             the segment/phase plan (multi_phase)
-- planner/INSTRUCTIONS_*.md           per-phase worker instructions
-- planner/RUN_LOOP_STATE.json         run-loop state: segments, phases, decisions, costUsd
-- writeup/ or writeups/               the run agent's OWN write-ups: write_up.md (rolling summary),
-                                      write_up_<phase>.md, progress_log*.md, continuation_context.md
-- <the agent's own code, data, results, plots>   experiment artifacts (names vary by project)
-
-## The two modes
-- goal mode: a single execution agent (session.jsonl) pursuing a goal; no phases.
-- multi_phase: a planner + a run-loop that decomposes the work into segments/phases. Each phase has
-  worker / reviewer / phase_planner sub-agent sessions and per-phase write-ups
-  (write_up_<phase>.md, progress_log_<phase>.md). RUN_LOOP_STATE.json lists completed phases and the
-  reviewer's decisions. READ EVERY PHASE — results and dead-ends often live only in the phase where
-  they were produced; the rolling write_up.md is the agent's own summary, not ground truth.
-
-## Reading order
-1. /source/proposal.md (and planner/OVERALL_PLAN.md if present)
-2. The rolling /source/writeup(s)/write_up.md — a map, NOT ground truth
-3. Per-phase write-ups (write_up_<phase>.md, progress_log_<phase>.md) across ALL phases
-4. The actual code + the raw result/data files (verify every headline number yourself)
-5. Sample the per-phase sub-agent session transcripts wherever prose is ambiguous
-
-## Reading the transcripts (pi session JSONL, one object per line — use jq, don't cat whole)
-```bash
-# assistant text blocks in a session
-jq -r 'select(.type=="message" and .message.role=="assistant") | .message.content[]? \\
-  | select(.type=="text") | .text' SESSION.jsonl
-# tool calls (name + truncated args)
-jq -rc 'select(.type=="message" and .message.role=="assistant") | .message.content[]? \\
-  | select(.type=="toolCall") | [.name, (.arguments|tostring)[0:200]] | @tsv' SESSION.jsonl
-```
-
-## Running Python (for plots)
-matplotlib / pandas / numpy are on PATH (`python3`). Read data via absolute /source/... paths and write
-figures into ./final_plots/ in your CWD. Never write under /source.
-"""
+    The text is the shared source of truth in :mod:`src.oversight`.
+    """
+    return oversight.run_layout_doc()
 
 
 def trace_index(run_dir: Path) -> str:
-    """TRACE_INDEX.md — concrete /source paths that exist for THIS run."""
-    tdir = run_dir / ".pi_transcripts"
-    lines = [
-        f"# Trace index for {run_dir.name}",
-        "",
-        "Source run is read-only at /source; write only in your CWD (/workspace).",
-        "",
-        "## Source run files that exist (read-only at /source)",
-    ]
-    for label, relp in (
-        ("proposal", "proposal.md"),
-        ("overall plan", "planner/OVERALL_PLAN.md"),
-        ("execution transcript", ".pi_transcripts/session.jsonl"),
-        ("planner transcript", ".pi_transcripts/planner.session.jsonl"),
-        ("manifest", ".pi_transcripts/manifest.json"),
-        ("run-loop state", "planner/RUN_LOOP_STATE.json"),
-    ):
-        if (run_dir / relp).exists():
-            lines.append(f"- {label}: /source/{relp}")
-    if (tdir / "run_loop_sessions").is_dir():
-        lines.append(
-            "- per-phase sub-agent transcripts: /source/.pi_transcripts/run_loop_sessions/*.jsonl"
-        )
-    elif (run_dir / ".home" / ".pi").is_dir():
-        lines.append(
-            "- per-phase sub-agent transcripts: /source/.home/.pi/agent/sessions/*/*.jsonl"
-        )
-    if (run_dir / "planner").is_dir():
-        lines.append("- per-phase instructions: /source/planner/INSTRUCTIONS_*.md")
-    for d in ("writeup", "writeups"):
-        if (run_dir / d).is_dir():
-            lines.append(f"- the run agent's own write-ups: /source/{d}/")
-    lines += [
-        "",
-        "Write your outputs ONLY into your CWD (/workspace) — see the task prompt for"
-        " exactly what to produce.",
-    ]
-    return "\n".join(lines) + "\n"
+    """TRACE_INDEX.md — concrete /source paths that exist for THIS run.
+
+    Built from the shared :func:`src.oversight.key_locations`.
+    """
+    return oversight.trace_index(run_dir)
 
 
 # --------------------------------------------------------------------------- #
 # Run the agent
 # --------------------------------------------------------------------------- #
 def _env(env_text: str | None) -> dict[str, str]:
-    overrides = parse_env_text(env_text) if env_text else {}
-    if not env_text:
-        env_path = ROOT / ".env"
-        if env_path.exists():
-            overrides = parse_env_text(env_path.read_text())
-    return sandbox.default_env(overrides)  # HOME=/workspace/.home (writable CWD)
+    # HOME=/workspace/.home: the writable CWD, so ~/.pi sub-agent sessions land
+    # in the run dir automatically.
+    return oversight.oversight_env(sandbox.HOME, env_text)
 
 
 def list_plots(work_dir: str | Path) -> list[str]:
@@ -200,19 +114,9 @@ def run_pi(
     work.mkdir(parents=True, exist_ok=True)
     (work / "final_plots").mkdir(parents=True, exist_ok=True)
 
-    inner = [
-        "pi",
-        "-p",
-        "--session",
-        f"{sandbox.WORKSPACE}/{session}",
-        "--model",
-        model or DEFAULT_MODEL,
-        "--thinking",
-        thinking,
-        "--mode",
-        "json",
-        prompt,
-    ]
+    inner = oversight.pi_inner_argv(
+        f"{sandbox.WORKSPACE}/{session}", model or DEFAULT_MODEL, thinking, prompt
+    )
     argv = sandbox.build_argv(
         work, inner, extra_ro_dest_binds=((str(run_dir), "/source"),)
     )

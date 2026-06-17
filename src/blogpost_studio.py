@@ -77,7 +77,15 @@ def render(template: str, **ctx: object) -> str:
 # session transcript records the real prompt the agent received.
 COMMANDS = {
     "/draft": "draft.md.j2",  # write the complete post in one turn (the 04 author behavior)
+    "/review": "review.md.j2",  # self-review the finished draft against the instructions
     "/kickoff": "kickoff.md.j2",  # investigate the run, reply "ready"
+}
+
+# After a turn for the keyed /command finishes successfully, the session
+# automatically chains the mapped follow-up /command as the next turn. This is
+# how a /draft is always followed by a self-review pass.
+CHAIN_AFTER = {
+    "/draft": "/review",
 }
 
 
@@ -184,6 +192,9 @@ class DocAgentSession:
         self._tx_cache: tuple | None = None  # ((mtime, size), parsed transcript)
         self._live_cache: dict | None = None  # incremental live_turns parse state
         self._alive_cache: tuple | None = None  # (monotonic, bool) sandbox liveness
+        self._pending_chain: str | None = (
+            None  # follow-up /command to auto-run on success
+        )
         self.work.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------- subclass surface --
@@ -197,6 +208,11 @@ class DocAgentSession:
     def _expand(self, message: str) -> str:
         """Expand canned slash-commands into full prompts (default: none)."""
         return message
+
+    def _next_chain(self, message: str) -> str | None:
+        """The follow-up /command to auto-run after ``message``'s turn succeeds
+        (default: none)."""
+        return None
 
     # ----------------------------------------------------------------- paths --
 
@@ -422,7 +438,9 @@ class DocAgentSession:
         and :meth:`read_doc` off disk to follow progress. Raises if a turn is
         already running or the message is empty.
         """
-        message = self._expand((message or "").strip())
+        raw = (message or "").strip()
+        chain = self._next_chain(raw)
+        message = self._expand(raw)
         if not message:
             raise ValueError("empty message")
         with self._lock:
@@ -430,6 +448,7 @@ class DocAgentSession:
                 raise RuntimeError(
                     "the agent is already working on the previous message"
                 )
+            self._pending_chain = chain  # consumed by _reap on a clean exit
             argv = self._argv(message)
             log = self._log.open("ab")
             try:
@@ -464,10 +483,19 @@ class DocAgentSession:
                 self._last_rc = proc.poll()
                 if self._proc is proc:
                     self._proc = None
+                # Pop the chained follow-up only on a clean exit; a failed or
+                # killed (stopped) turn leaves nothing to review.
+                chain = self._pending_chain if self._last_rc == 0 else None
+                self._pending_chain = None
             try:
                 log.close()
             except OSError:
                 pass
+            if chain:
+                try:
+                    self.start_turn(chain)
+                except Exception:
+                    pass  # raced with a manual turn, or the session is gone
 
     def stop(self) -> bool:
         """Kill the running turn, if any. Returns whether something was killed.
@@ -538,6 +566,10 @@ class StudioSession(DocAgentSession):
 
     def _expand(self, message: str) -> str:
         return expand_command(message)
+
+    def _next_chain(self, message: str) -> str | None:
+        head = message.partition(" ")[0].lower()
+        return CHAIN_AFTER.get(head)
 
     def _argv(self, prompt: str) -> list[str]:
         return sandbox.build_argv(

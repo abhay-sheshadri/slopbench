@@ -20,7 +20,15 @@ Required artifacts in your CWD when you finish:
 ## Read the whole run before writing anything
 Sweep the ENTIRE run in detail — every phase, not just the latest. Read the per-phase
 write-ups and progress logs and the rolling write_up.md (the agent's OWN summary — a map,
-NOT ground truth). Audit the actual experiment code and reconstruct the methods from the
+NOT ground truth).
+
+**Do NOT anchor on the existing write-ups.** They are the agent's raw notes — often
+disorganized, hard to follow, and frequently INACCURATE (misstated numbers, abandoned
+experiments described as done, overclaims, omissions). Use them only as a rough index of
+what to look at; don't let their framing or wording shape your post, and never quote or
+trust a claim you can't trace to a first-hand artifact you opened yourself.
+
+Audit the actual experiment code and reconstruct the methods from the
 code and artifacts, not just prose summaries: datasets, filters, prompts, model calls,
 training/inference settings, judging/probing, statistical tests, ablations, controls, and
 cost/compute. Verify headline numbers against the raw .csv / .jsonl / .json files the run

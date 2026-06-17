@@ -26,13 +26,14 @@ the voice and care, NOT the length — your post should be far shorter than thes
     sample input and output), not just summary statistics about them.
 
 - **Structure.**
-  - Write a shortform research note, not a paper: roughly 300-800 words, hard cap ~1000.
-    Open with a 3-5 bullet TL;DR of the main takeaways (one line each, then a line break),
-    then the headline result in a sentence or two, then one short paragraph of setup in
-    plain words (defining the key metric), then the one or two figures that carry the
-    result, then caveats and limitations. No formal Introduction/Methods/Results
-    scaffolding and no appendices; short bold mini-headers or paragraph breaks are fine if
-    they help.
+  - Write a shortform research note, not a paper: roughly 500-1000 words (just an anchor;
+    exceed it if needed). Open with a 3-5 bullet TL;DR of the main takeaways (one line each,
+    then a line break), then the headline result in a sentence or two, then one short
+    paragraph of setup in plain words (defining the key metric), then each major result in
+    its own short passage (a plain-language mini-header and the one or two figures that carry
+    it) ordered by importance, then caveats and limitations. No formal
+    Introduction/Methods/Results scaffolding and no appendices; short bold mini-headers or
+    paragraph breaks are fine if they help.
   - Headers and bolded lead-ins must state the finding in plain words. No vague taglines
     or slogans ("Belief is trainable", "Less is more") — a header should mean something
     concrete to a reader who reads only the headers.
@@ -40,8 +41,9 @@ the voice and care, NOT the length — your post should be far shorter than thes
     and what it means, with at most the one or two headline numbers in text — every other
     exact number belongs in a figure, its caption, or a table. If a paragraph is
     accumulating numbers, that's a figure trying to happen.
-  - Cut secondary results unless they change the takeaway; one or two sentences may point
-    at what else was tried and how it came out.
+  - Surface every result that is interesting, big, and true, and frame them in an orderly,
+    simple, elegant way. Cut only the genuinely minor or redundant — a result that changes no
+    takeaway can be one sentence pointing at what was tried and how it came out, or dropped.
 
 - **Metrics and terminology.**
   - Define each metric once, in plain language, then reuse one name for it. Don't introduce
@@ -51,9 +53,10 @@ the voice and care, NOT the length — your post should be far shorter than thes
     one figure and a difference in another).
   - Avoid cryptic or non-standard terminology. Communicate in common words or standard ML
     terms, and define any term that isn't standard English or standard ML on first use, then
-    use it consistently. Avoid coinages invented during the research (e.g. "off-manifold",
-    "liveness control", "graft", "projection-z") unless you define them; prefer the standard
-    term or plain language. Don't give a common word a special private meaning or use one in
+    use it consistently. Try really hard NOT to coin any new term at all — almost always you
+    can use a standard ML term or plain English instead, and you should. Avoid coinages
+    invented during the research (e.g. "off-manifold", "liveness control", "graft",
+    "projection-z"); prefer the standard term or plain language. Don't give a common word a special private meaning or use one in
     a way a reader could misread — if a term could be read two ways, pin it down or replace
     it. A reader should never have to guess what a word means.
   - No nonstandard hyphenated coinages ("flat-to-stricter", "risk-gated", "emphasis-matched"):
@@ -91,10 +94,11 @@ the voice and care, NOT the length — your post should be far shorter than thes
   - Clean and legible: AI-generated figures usually have too much text on them. Keep labels
     and legends clean and elegant, and push detail into the caption below. Default to small
     figsizes with big, short text.
-  - Show uncertainty whenever possible: add error bars (or confidence bands) when the data
-    supports them — variation across seeds, prompts, or resamples, or a bootstrap over
-    examples — and say in the caption what they represent (e.g. "95% CI over 5 seeds").
-    Only omit them when there is genuinely no variation to quantify; never invent them.
+  - Every plot should show uncertainty: add error bars (or confidence bands) — variation
+    across seeds, prompts, or resamples, or a bootstrap over examples — and say in the
+    caption what they represent (e.g. "95% CI over 5 seeds"). Only omit them when there is
+    genuinely no variation to quantify, or when they truly make the figure hard to read;
+    never invent them.
   - No clipped or overlapping text: every title, axis label, tick label, legend, and
     annotation must fit fully inside the saved image (use a tight layout /
     `bbox_inches="tight"`, rotate or thin out crowded tick labels). Open the saved .png
@@ -111,4 +115,7 @@ the voice and care, NOT the length — your post should be far shorter than thes
 - **Final pass — read the draft from the outside.**
   - Read it as if you had only seen the proposal and nothing else from the run: would you
     follow it on first read? If not, fix it.
+  - Go term by term and remove all invented lingo — especially multi-hyphen coinages
+    ("flat-to-stricter", "risk-gated", "emphasis-matched") — replacing each with plain
+    language a reader who doesn't know the project would understand.
   - Don't miss important things the research did that the reader should know about.

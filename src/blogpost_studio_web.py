@@ -42,6 +42,7 @@ from src.blogpost_studio import (
     live_sandbox_workspaces,
 )
 from src.theme import (
+    CONTROLS_CSS,
     EDITOR_CSS,
     HIGHLIGHT_JS,
     PALETTE_CSS,
@@ -218,17 +219,14 @@ def reset_all() -> dict:
 
 
 def draft_all(dry: bool) -> dict:
-    """Start a parallel ``/draft`` turn for every Completed, non-goal run that
+    """Start a parallel ``/draft`` turn for every Completed run (any mode) that
     has no draft yet. ``dry`` only reports the targets — the UI shows them in
     the confirmation dialog first, since each /draft is a long, real agent turn.
     """
     targets = [
         r
         for r in list_runs()
-        if r["selectable"]
-        and r["mode"] != "goal"
-        and not r["started"]
-        and not r["drafting"]
+        if r["selectable"] and not r["started"] and not r["drafting"]
     ]
     started = []
     if not dry:
@@ -746,13 +744,7 @@ body{background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);display:fle
 ::-webkit-scrollbar{width:9px;height:9px}
 ::-webkit-scrollbar-thumb{background:var(--panel3);border-radius:6px}
 a{color:var(--accent)}
-button{font:inherit;color:var(--fg);background:var(--panel2);border:1px solid var(--border);
-  border-radius:6px;padding:6px 12px;cursor:pointer;transition:.12s}
-button:hover:not(:disabled){border-color:var(--accent)}
-button:disabled{opacity:.4;cursor:not-allowed}
-button.primary{background:rgba(122,162,247,.14);border-color:rgba(122,162,247,.5)}
-button.primary:hover:not(:disabled){background:rgba(122,162,247,.24)}
-button.danger{background:rgba(247,118,142,.12);border-color:rgba(247,118,142,.4);color:var(--err)}
+/*__CONTROLS_CSS__*/
 
 /* header */
 /* 12px offsets put the nav pill at the exact spot it occupies in the viewer's
@@ -771,14 +763,8 @@ header .spacer{flex:1}
 
 /* run picker */
 /* runs list: a permanent left sidebar, same pattern as the proposals page */
-.picker{width:300px;flex:0 0 auto;background:var(--panel);border-right:1px solid var(--border);
-  display:flex;flex-direction:column;min-height:0;padding:10px}
 .runlabel{color:var(--muted);font-family:var(--mono);font-size:12px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:40%}
-#pickerSearch{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--border);
-  border-radius:7px;padding:7px 10px;font:13px/1.4 var(--sans);margin-bottom:6px;outline:none}
-#pickerSearch:focus{border-color:var(--accent)}
-.pickerList{flex:1;overflow:auto;display:flex;flex-direction:column;gap:1px}
 .runitem{display:flex;align-items:baseline;gap:10px;text-align:left;background:transparent;
   border:1px solid transparent;border-radius:6px;padding:7px 9px;cursor:pointer;width:100%;color:var(--fg)}
 .runitem:hover{background:var(--panel2);border-color:var(--border)}
@@ -802,12 +788,9 @@ header .spacer{flex:1}
 .wbadge{color:var(--warn);font-weight:600;animation:wpulse 1.6s ease-in-out infinite}
 .wmini{color:var(--warn);font-size:11px;font-weight:700;animation:wpulse 1.6s ease-in-out infinite}
 @keyframes wpulse{0%,100%{opacity:1}50%{opacity:.45}}
-.pickerFoot{display:flex;align-items:center;gap:8px;padding:7px 6px 3px;border-top:1px solid var(--border);margin-top:6px}
-.pickerFoot .spacer{flex:1}
 .pickerOpt{display:flex;align-items:center;gap:6px;color:var(--faint);font-size:11px;
   font-family:var(--mono);cursor:pointer;user-select:none}
 .pickerOpt input{accent-color:var(--accent)}
-.mini2{font-size:11px;padding:3px 9px}
 
 main{flex:1;display:flex;min-height:0}
 body.noselect #chat{display:none}            /* no chat until a run is picked */
@@ -883,29 +866,23 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 .lightbox[hidden]{display:none}
 .lightbox img{max-width:95vw;max-height:90vh;object-fit:contain;background:#fff;border-radius:6px;
   box-shadow:0 14px 45px rgba(0,0,0,.55)}
-
-.toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--panel3);
-  color:var(--fg);border:1px solid var(--border);padding:8px 14px;border-radius:8px;opacity:0;
-  transition:opacity .2s;pointer-events:none;z-index:9999;font-size:13px}
-.toast.show{opacity:1}
 </style>
 </head>
 <body>
 <div id="topbar-progress"></div>
 <header>
-  <nav class="appnav"><a href="/">🔎 Runs</a><a href="/proposals">🗒 Proposals</a><a class="on" href="/studio">📝 Studio</a></nav>
+  <nav class="appnav"><a href="/">🔎 Runs</a><a href="/proposals">🗒 Proposals</a><a class="on" href="/studio">📝 Studio</a><a href="/blueteam">🛡 Blue Team</a></nav>
 </header>
 <main>
-  <aside class="picker" id="picker">
-    <input id="pickerSearch" placeholder="Filter runs…" autocomplete="off">
-    <div class="phase-tabs" id="pickerTabs"></div>
-    <div class="pickerList" id="pickerList"></div>
-    <div class="pickerFoot">
-      <label class="pickerOpt"><input type="checkbox" id="showGoal"> show goal runs</label>
-      <span class="spacer"></span>
-      <button class="mini2" id="draftAllBtn" title="Start /draft for every completed run that has no draft yet, in parallel">✍ Draft missing</button>
-      <button class="mini2 danger" id="delAllBtn" title="Delete every draft, its figures, and its conversation">Delete all drafts</button>
+  <aside class="side" id="picker">
+    <div class="sidehead">📝 Runs <span class="spacer"></span></div>
+    <div class="sideacts">
+      <button class="primary mini" id="draftAllBtn" title="Start /draft for every completed run that has no draft yet, in parallel">✍ Draft missing</button>
+      <button class="danger mini" id="delAllBtn" title="Delete every draft, its figures, and its conversation">🗑 Delete all</button>
     </div>
+    <input id="pickerSearch" class="sidesearch" placeholder="Filter runs…" autocomplete="off">
+    <div class="phase-tabs" id="pickerTabs"></div>
+    <div class="pickerList sidelist" id="pickerList"></div>
   </aside>
   <div class="vresizer" id="rsSide" title="Drag to resize"></div>
   <section id="doc">
@@ -1222,7 +1199,7 @@ async function draftAllMissing(){
 }
 
 // ---- run picker ----
-let allRuns=[], showGoal=false;   // goal runs are hidden unless toggled on
+let allRuns=[];   // all runs shown regardless of mode (goal / multi_phase)
 async function loadRuns(){
   if(!allRuns.length){ $("#pickerTabs").innerHTML=""; $("#pickerList").innerHTML='<div class="muted">loading runs…</div>'; }
   try{ allRuns=(await (await fetch(API+"/runs")).json()).runs||[]; }
@@ -1232,7 +1209,7 @@ async function loadRuns(){
 let pickerPhase="Completed";   // like the viewer's overview tabs; Completed = openable
 function drawRuns(){
   const q=$("#pickerSearch").value.toLowerCase();
-  const pool=allRuns.filter(r=>(showGoal||r.mode!=="goal") && r.name.toLowerCase().includes(q));
+  const pool=allRuns.filter(r=>r.name.toLowerCase().includes(q));
   const counts={Completed:0,Active:0,Failed:0};
   pool.forEach(r=>{ if(counts[r.phase]!=null) counts[r.phase]++; });
   // fall back to a non-empty tab, preferring Completed; stay put while loading
@@ -1326,7 +1303,6 @@ $("#gdocbtn").onclick=async()=>{
   toast(d.warning ? ("Doc ready (note: "+d.warning+")") : "Google Doc ready — click “open Doc ↗”");
 };
 $("#pickerSearch").addEventListener("input",drawRuns);
-$("#showGoal").onchange=e=>{showGoal=e.target.checked;drawRuns();};
 $("#draftAllBtn").onclick=draftAllMissing;
 $("#delAllBtn").onclick=deleteAllDrafts;
 document.addEventListener("click",e=>{
@@ -1371,6 +1347,7 @@ init();
 # Shared palette + markdown-editor pieces come from src.theme (single source).
 INDEX_HTML = (
     INDEX_HTML.replace("/*__PALETTE__*/", PALETTE_CSS)
+    .replace("/*__CONTROLS_CSS__*/", CONTROLS_CSS)
     .replace("/*__EDITOR_CSS__*/", EDITOR_CSS)
     .replace("/*__PREVIEW_CSS__*/", PREVIEW_CSS)
     .replace("//__RESIZER_JS__", RESIZER_JS)

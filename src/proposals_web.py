@@ -21,6 +21,8 @@ from src.agent_viewer import ROOT
 from src.blogpost_studio_web import _sse  # generic over DocAgentSession
 from src.proposal_studio import ProposalSession
 from src.theme import (
+    APP_JS,
+    CONTROLS_CSS,
     EDITOR_CSS,
     HIGHLIGHT_JS,
     PALETTE_CSS,
@@ -208,23 +210,13 @@ body{background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);display:fle
 ::-webkit-scrollbar{width:9px;height:9px}
 ::-webkit-scrollbar-thumb{background:var(--panel3);border-radius:6px}
 a{color:var(--accent)}
-button{font:inherit;color:var(--fg);background:var(--panel2);border:1px solid var(--border);
-  border-radius:6px;padding:6px 12px;cursor:pointer;transition:.12s}
-button:hover:not(:disabled){border-color:var(--accent)}
-button:disabled{opacity:.4;cursor:not-allowed}
-button.primary{background:rgba(122,162,247,.14);border-color:rgba(122,162,247,.5)}
-button.primary:hover:not(:disabled){background:rgba(122,162,247,.24)}
-.mini2{font-size:11px;padding:3px 9px}
+/*__CONTROLS_CSS__*/
 
 header{display:flex;align-items:center;gap:12px;padding:12px;background:var(--panel);
   border-bottom:1px solid var(--border);flex:0 0 auto}
 header .spacer{flex:1}
 
 main{flex:1;display:flex;min-height:0}
-aside{width:300px;flex:0 0 auto;background:var(--panel);border-right:1px solid var(--border);
-  display:flex;flex-direction:column;padding:10px}
-#newbtn{margin-bottom:10px}
-#plist{flex:1;overflow:auto;display:flex;flex-direction:column;gap:1px}
 .pitem{display:flex;align-items:baseline;gap:8px;text-align:left;background:transparent;
   border:1px solid transparent;border-radius:6px;padding:7px 9px;cursor:pointer;width:100%;color:var(--fg)}
 .pitem:hover{background:var(--panel2);border-color:var(--border)}
@@ -299,10 +291,6 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 /*__PREVIEW_CSS__*/
 .empty{color:var(--muted);text-align:center;margin-top:14vh;padding:0 24px;line-height:1.6}
 
-.toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--panel3);
-  color:var(--fg);border:1px solid var(--border);padding:8px 14px;border-radius:8px;opacity:0;
-  transition:opacity .2s;pointer-events:none;z-index:9999;font-size:13px}
-.toast.show{opacity:1}
 /*__RESIZER_CSS__*/
 /*__PROGRESS_CSS__*/
 </style>
@@ -310,13 +298,14 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 <body>
 <div id="topbar-progress"></div>
 <header>
-  <nav class="appnav"><a href="/">🔎 Runs</a><a class="on" href="/proposals">🗒 Proposals</a><a href="/studio">📝 Studio</a></nav>
+  <nav class="appnav"><a href="/">🔎 Runs</a><a class="on" href="/proposals">🗒 Proposals</a><a href="/studio">📝 Studio</a><a href="/blueteam">🛡 Blue Team</a></nav>
   <span class="spacer"></span>
 </header>
 <main>
-  <aside>
-    <button class="primary" id="newbtn">＋ New proposal</button>
-    <div id="plist"><div class="muted">loading…</div></div>
+  <aside class="side">
+    <div class="sidehead">🗒 Proposals</div>
+    <div class="sideacts"><button class="primary mini" id="newbtn">＋ New proposal</button></div>
+    <div id="plist" class="sidelist"><div class="muted">loading…</div></div>
   </aside>
   <div class="vresizer" id="rsSide" title="Drag to resize"></div>
   <section id="doc">
@@ -335,7 +324,7 @@ details.think .body2{color:#c8bfe7;font-style:italic}
   <div class="vresizer" id="rsChat" title="Drag to resize"></div>
   <section id="chatcol">
     <div class="chathead">Agent <span class="meta" id="cost"></span><span class="spacer"></span>
-      <button class="mini2" id="polishbtn" title="Ask the agent to clean up this proposal">✨ Clean up</button>
+      <button class="mini" id="polishbtn" title="Ask the agent to clean up this proposal">✨ Clean up</button>
     </div>
     <div id="plog"><div class="muted">Chat with an agent that edits this proposal directly — same workflow as the writeup studio.</div></div>
     <div class="composer">
@@ -355,12 +344,7 @@ const API = "/proposals/api";
 const editor=$("#editor"), preview=$("#preview"), hl=$("#editorHL");
 let cur=null, dirty=false, mode="view", saveTimer, docMtime=0, running=false, es=null, turnsKey="";
 
-marked.setOptions({breaks:true, gfm:true});
-
-function toast(m){const t=$("#toast");t.textContent=m;t.classList.add("show");
-  clearTimeout(toast._t);toast._t=setTimeout(()=>t.classList.remove("show"),3200);}
-function esc(s){return (s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
-const md=t=>marked.parse(t||"");
+//__APP_JS__
 
 //__HIGHLIGHT_JS__
 //__RESIZER_JS__
@@ -620,6 +604,8 @@ init();
 # Shared palette + markdown-editor pieces come from src.theme (single source).
 INDEX_HTML = (
     INDEX_HTML.replace("/*__PALETTE__*/", PALETTE_CSS)
+    .replace("/*__CONTROLS_CSS__*/", CONTROLS_CSS)
+    .replace("//__APP_JS__", APP_JS)
     .replace("/*__EDITOR_CSS__*/", EDITOR_CSS)
     .replace("/*__PREVIEW_CSS__*/", PREVIEW_CSS)
     .replace("//__RESIZER_JS__", RESIZER_JS)

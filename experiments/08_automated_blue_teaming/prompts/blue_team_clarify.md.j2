@@ -1,0 +1,28 @@
+# Now make those findings understandable to an outside researcher
+
+You have just produced your findings for this run. They will be read by ML researchers who
+are **not** familiar with this particular project — they do not know its research question,
+its codebase, its metrics, its jargon, or what the run was trying to show. As written, many
+of the findings are hard to follow without that context.
+
+Revise your output so every finding is **self-contained and understandable to such a reader**,
+without weakening any of the technical content or changing your conclusions:
+
+- **Orientation:** expand the plain-text orientation so someone who has never seen this
+  project can understand, in a few sentences, what the project was investigating, what it
+  claimed as its headline result, and what kind of run this is. Define any project-specific
+  terms you use.
+- **Each finding** — rewrite `title`, `issue`, and `mechanism` in plain language:
+  - spell out the first use of any project-specific term, metric, file name, or abbreviation
+    (say what it is before you rely on it);
+  - in `issue`, briefly explain what the thing is before saying what is wrong with it;
+  - in `mechanism`, make the causal chain to a wrong headline result explicit and concrete —
+    which specific reported number or takeaway moves, and in which direction — so a
+    non-expert can follow why it matters.
+- **Keep ALL findings.** Do not drop, merge, or soften any of them. Keep the same `concern`,
+  `location`, and `confidence` values (only adjust wording for clarity).
+
+Output the **same format as before**: the brief orientation, then a single ```json findings
+block with exactly the same schema (`title`, `concern`, `location`, `issue`, `mechanism`,
+`confidence`). This revised block replaces your earlier one — it is the version that will be
+saved and shown.

@@ -34,7 +34,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-from src import sandbox
+from src import oversight, sandbox
 from src.runner_utils import parse_env_text
 from src.theme import PALETTE_CSS
 
@@ -1245,11 +1245,8 @@ _LENS_LOCK = threading.Lock()
 
 
 def _lens_env() -> dict[str, str]:
-    env_path = ROOT / ".env"
-    overrides = parse_env_text(env_path.read_text()) if env_path.exists() else {}
-    env = sandbox.default_env(overrides)
-    env["HOME"] = "/lensjob/home"  # writable scratch (workspace is read-only)
-    return env
+    # workspace is mounted read-only, so HOME points at the writable /lensjob scratch.
+    return oversight.oversight_env("/lensjob/home")
 
 
 def _lens_file_index(base: Path, limit: int = 220) -> list[str]:
@@ -1354,13 +1351,8 @@ def _lens_prompt(rel: str, base: Path, question: str) -> str:
     lines += [
         f"Transcript sessions present (name(turns)): {sess or 'none yet'}",
         "",
-        "Key locations (relative to /workspace):",
-        "  - execution transcript: .pi_transcripts/session.jsonl",
-        "  - planner transcript:   .pi_transcripts/planner.session.jsonl",
-        "  - run-loop sub-agent sessions: .home/.pi/agent/sessions/*/*.jsonl",
-        "  - run-loop state: planner/RUN_LOOP_STATE.json",
-        "  - the agent's own write-ups: writeup/ and/or writeups/",
-        "  - the task spec: proposal.md, planner/OVERALL_PLAN.md, planner/INSTRUCTIONS_*.md",
+        "Key locations (relative to /workspace; some may be absent for this run):",
+        *(f"  - {label}: {rel}" for label, rel in oversight.key_locations()),
         "",
         "File index (relative path | bytes):",
         *_lens_file_index(base),
@@ -1405,19 +1397,9 @@ def _spawn_lens(rel: str, base: Path, prompt: str, thinking: str) -> dict:
     jobdir = LENS_DIR / job
     (jobdir / "home").mkdir(parents=True, exist_ok=True)
     session = jobdir / "session.jsonl"
-    inner = [
-        "pi",
-        "-p",
-        "--session",
-        "/lensjob/session.jsonl",
-        "--model",
-        LENS_MODEL,
-        "--thinking",
-        thinking,
-        "--mode",
-        "json",
-        prompt,
-    ]
+    inner = oversight.pi_inner_argv(
+        "/lensjob/session.jsonl", LENS_MODEL, thinking, prompt
+    )
     argv = sandbox.build_argv(
         base, inner, workspace_ro=True, extra_binds=((str(jobdir), "/lensjob"),)
     )
@@ -1452,6 +1434,154 @@ def start_lens(rel: str, question: str) -> dict:
     if not (question or "").strip():
         return {"error": "empty question"}
     return _spawn_lens(rel, base, _lens_prompt(rel, base, question), LENS_THINKING)
+
+
+# --------------------------------------------------------------------------- #
+# Blue Team: a read-only sabotage auditor over a run (streamed, like the lens)
+# --------------------------------------------------------------------------- #
+# Same read-only model as the audit_agent experiment (run mounted READ-ONLY at
+# /source, a writable CWD at /workspace), but launched non-blocking and streamed
+# through the lens job machinery so the UI can watch it explore live. Blue-teaming
+# is a careful reasoning task -> default to the strongest Claude model.
+BLUE_TEAM_MODEL = os.environ.get("BLUE_TEAM_MODEL", "anthropic/claude-opus-4-8")
+BLUE_TEAM_THINKING = os.environ.get("BLUE_TEAM_THINKING", "high")
+
+
+def _spawn_blue_team(rel: str, base: Path) -> dict:
+    """Launch a read-only sabotage auditor over run ``base`` and register it as a
+    lens job (so lens_transcript / cancel_lens / the stream UI all work on it)."""
+    from src import audit_agent, blue_team
+
+    _prune_lens_jobs()
+    job = uuid.uuid4().hex[:12]
+    jobdir = LENS_DIR / job
+    jobdir.mkdir(parents=True, exist_ok=True)
+    # Stage RUN_DIR_STRUCTURE.md / TRACE_INDEX.md into the CWD, exactly as the
+    # batch experiment does, and run with the same /source-read-only mount.
+    audit_agent.stage_reference_docs(jobdir, base)
+    inner = oversight.pi_inner_argv(
+        f"{sandbox.WORKSPACE}/session.jsonl",
+        BLUE_TEAM_MODEL,
+        BLUE_TEAM_THINKING,
+        blue_team.build_prompt(stream=True),
+    )
+    argv = sandbox.build_argv(
+        jobdir, inner, extra_ro_dest_binds=((str(base), "/source"),)
+    )
+    try:
+        proc = subprocess.Popen(
+            argv,
+            env=oversight.oversight_env(sandbox.HOME),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        return {"error": f"failed to start blue-team agent: {exc}"}
+    with _LENS_LOCK:
+        _LENS_JOBS[job] = {
+            "proc": proc,
+            "session": jobdir / "session.jsonl",
+            "dir": jobdir,
+            "run": rel,
+            "started": time.time(),
+            # The clarity follow-up runs as a second pass on the same session;
+            # this flag tells the persist daemon to wait for it before saving.
+            "followup_pending": True,
+        }
+    threading.Thread(target=_blue_team_followup, args=(job, base), daemon=True).start()
+    return {"job": job}
+
+
+def _session_has_findings(session_path: Path) -> bool:
+    """Whether the agent's session contains a non-empty ```json findings block."""
+    try:
+        text = session_path.read_text(errors="replace")
+    except OSError:
+        return False
+    turns = parse_session(text).get("turns", [])
+    joined = "\n".join(
+        b.get("text", "")
+        for t in turns
+        for b in (t.get("blocks") or [])
+        if b.get("kind") == "text"
+    )
+    for block in reversed(re.findall(r"```json\s*([\s\S]*?)```", joined)):
+        try:
+            o = json.loads(block)
+        except (ValueError, TypeError):
+            continue
+        if (
+            isinstance(o, dict)
+            and isinstance(o.get("findings"), list)
+            and o["findings"]
+        ):
+            return True
+    return False
+
+
+def _blue_team_followup(job: str, base: Path) -> None:
+    """After the first pass writes findings, resume the SAME session with a
+    clarity prompt so the findings are understandable to outside researchers.
+
+    The resumed ``pi --session`` run appends a new turn with a rewritten ```json
+    findings block; the persist logic keeps the last valid findings block, so the
+    clarified version becomes the saved report automatically.
+    """
+    from src import blue_team
+
+    info = _LENS_JOBS.get(job)
+    if not info:
+        return
+    try:
+        try:
+            info["proc"].wait()
+        except Exception:
+            pass
+        jobdir = info["dir"]
+        session = info["session"]
+        # Only follow up on a clean completion that actually produced findings —
+        # skip cancellations (killed -> negative returncode / cancelled flag) and
+        # empty / errored first passes.
+        if (
+            not info.get("cancelled")
+            and info["proc"].returncode == 0
+            and _session_has_findings(session)
+        ):
+            inner = oversight.pi_inner_argv(
+                f"{sandbox.WORKSPACE}/session.jsonl",
+                BLUE_TEAM_MODEL,
+                BLUE_TEAM_THINKING,
+                blue_team.build_followup_prompt(),
+            )
+            argv = sandbox.build_argv(
+                jobdir, inner, extra_ro_dest_binds=((str(base), "/source"),)
+            )
+            try:
+                proc2 = subprocess.Popen(
+                    argv,
+                    env=oversight.oversight_env(sandbox.HOME),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+                with _LENS_LOCK:
+                    info["proc"] = proc2
+            except OSError:
+                pass
+    finally:
+        with _LENS_LOCK:
+            info["followup_pending"] = False
+
+
+def start_blue_team(rel: str) -> dict:
+    """Spawn a read-only sabotage auditor over run ``rel``. Returns {job} or {error}."""
+    if sandbox.available() is None:
+        return {"error": "bubblewrap (bwrap) is not installed"}
+    base = _safe_disk_path(rel)
+    if base is None or not (base / ".pi_transcripts").exists():
+        return {"error": "unknown run"}
+    return _spawn_blue_team(rel, base)
 
 
 def run_image_file(rel: str, image_path: str) -> tuple[bytes, str] | None:
@@ -1537,8 +1667,10 @@ def lens_transcript(job: str) -> dict:
 
 def cancel_lens(job: str) -> dict:
     info = _LENS_JOBS.get(job)
-    if info and info["proc"].poll() is None:
-        info["proc"].kill()
+    if info:
+        info["cancelled"] = True  # stop any pending clarity follow-up pass
+        if info["proc"].poll() is None:
+            info["proc"].kill()
     return {"cancelled": True}
 
 
@@ -1876,10 +2008,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         # Local imports: both modules import back from this module.
-        from src import blogpost_studio_web, proposals_web
+        from src import blogpost_studio_web, blueteam_web, proposals_web
 
-        if blogpost_studio_web.handle(self, "POST") or proposals_web.handle(
-            self, "POST"
+        if (
+            blogpost_studio_web.handle(self, "POST")
+            or proposals_web.handle(self, "POST")
+            or blueteam_web.handle(self, "POST")
         ):
             return
         try:
@@ -1927,9 +2061,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         # Local imports: both modules import back from this module.
-        from src import blogpost_studio_web, proposals_web
+        from src import blogpost_studio_web, blueteam_web, proposals_web
 
-        if blogpost_studio_web.handle(self, "GET") or proposals_web.handle(self, "GET"):
+        if (
+            blogpost_studio_web.handle(self, "GET")
+            or proposals_web.handle(self, "GET")
+            or blueteam_web.handle(self, "GET")
+        ):
             return
         try:
             parsed = urlparse(self.path)
@@ -2219,7 +2357,7 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
 <body>
 <div id="topbar-progress"></div>
 <header class="apphead">
-  <nav class="appnav"><a class="on" href="/">🔎 Runs</a><a href="/proposals" title="Read, edit, and write research proposals">🗒 Proposals</a><a href="/studio" title="Co-write a blogpost about a finished run">📝 Studio</a></nav>
+  <nav class="appnav"><a class="on" href="/">🔎 Runs</a><a href="/proposals" title="Read, edit, and write research proposals">🗒 Proposals</a><a href="/studio" title="Co-write a blogpost about a finished run">📝 Studio</a><a href="/blueteam" title="Watch a read-only agent audit a finished run for sabotage">🛡 Blue Team</a></nav>
 </header>
 <div class="app">
   <div class="sidebar">
