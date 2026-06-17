@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -1387,14 +1388,38 @@ def _prune_lens_jobs(keep: int = 80) -> None:
         finished.sort(key=lambda x: x[1]["started"])
         for j, info in finished[:-keep] if len(finished) > keep else []:
             _LENS_JOBS.pop(j, None)
-            shutil.rmtree(info["dir"], ignore_errors=True)
+            # Conversation dirs are shared across turns and hold the live chat
+            # session — only ever removed by reset_lens, never by job pruning.
+            if not info.get("convo"):
+                shutil.rmtree(info["dir"], ignore_errors=True)
 
 
-def _spawn_lens(rel: str, base: Path, prompt: str, thinking: str) -> dict:
-    """Launch a read-only ``pi`` over run ``base`` with ``prompt`` and register it."""
+def _lens_convo_dir(rel: str) -> Path:
+    """Stable scratch dir for a run's Run-Lens *conversation*, so its session
+    persists across turns (multi-turn chat) and survives a page refresh."""
+    h = hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16]
+    return LENS_DIR / f"convo_{h}"
+
+
+def _spawn_lens(
+    rel: str,
+    base: Path,
+    prompt: str,
+    thinking: str,
+    *,
+    convo_dir: Path | None = None,
+    base_turns: int = 0,
+) -> dict:
+    """Launch a read-only ``pi`` over run ``base`` with ``prompt`` and register it.
+
+    ``convo_dir`` makes this a turn of a persistent conversation: pi runs against
+    that dir's ``session.jsonl`` (resuming it if it already exists), so the agent
+    keeps the full prior context. ``base_turns`` is how many assistant turns the
+    session already had, so the stream/transcript only surfaces THIS turn's reply.
+    """
     _prune_lens_jobs()
     job = uuid.uuid4().hex[:12]
-    jobdir = LENS_DIR / job
+    jobdir = convo_dir if convo_dir is not None else (LENS_DIR / job)
     (jobdir / "home").mkdir(parents=True, exist_ok=True)
     session = jobdir / "session.jsonl"
     inner = oversight.pi_inner_argv(
@@ -1420,12 +1445,24 @@ def _spawn_lens(rel: str, base: Path, prompt: str, thinking: str) -> dict:
             "dir": jobdir,
             "run": rel,
             "started": time.time(),
+            "base_turns": base_turns,
+            "convo": convo_dir is not None,
         }
     return {"job": job}
 
 
-def start_lens(rel: str, question: str) -> dict:
-    """Spawn a read-only oversight pi over run ``rel``. Returns {job} or {error}."""
+def start_lens(
+    rel: str, question: str, convo: bool = False, fresh: bool = False
+) -> dict:
+    """Spawn a read-only oversight pi over run ``rel``. Returns {job} or {error}.
+
+    With ``convo=True`` (the Run Lens chat) the run keeps ONE persistent session:
+    the first question gets the full run-context prompt, and each follow-up resumes
+    that session with just the new question, so the agent remembers the whole chat.
+    ``fresh=True`` (the chat UI is empty / a new chat) wipes any prior session first
+    so an empty chat never accidentally resumes stale context.
+    With ``convo=False`` (dashboard summaries) each ask is an isolated one-shot.
+    """
     if sandbox.available() is None:
         return {"error": "bubblewrap (bwrap) is not installed"}
     base = _safe_disk_path(rel)
@@ -1433,7 +1470,49 @@ def start_lens(rel: str, question: str) -> dict:
         return {"error": "unknown run"}
     if not (question or "").strip():
         return {"error": "empty question"}
+    if convo:
+        cdir = _lens_convo_dir(rel)
+        if fresh:
+            reset_lens(rel)
+        session = cdir / "session.jsonl"
+        if session.exists():
+            prior = [
+                t
+                for t in parse_session(session.read_text(errors="replace"))["turns"]
+                if t.get("role") == "assistant"
+            ]
+            # Follow-up: resume the session with just the question — the run
+            # context and prior turns are already in it.
+            return _spawn_lens(
+                rel,
+                base,
+                question.strip(),
+                LENS_THINKING,
+                convo_dir=cdir,
+                base_turns=len(prior),
+            )
+        # First turn of a fresh conversation: stage the full run-context prompt.
+        return _spawn_lens(
+            rel, base, _lens_prompt(rel, base, question), LENS_THINKING, convo_dir=cdir
+        )
     return _spawn_lens(rel, base, _lens_prompt(rel, base, question), LENS_THINKING)
+
+
+def reset_lens(rel: str) -> dict:
+    """Clear a run's Run-Lens conversation (the 'New chat' button): kill any live
+    turn for it and delete its persistent session so the next ask starts fresh."""
+    cdir = _lens_convo_dir(rel)
+    with _LENS_LOCK:
+        for j, info in list(_LENS_JOBS.items()):
+            if info.get("dir") == cdir:
+                try:
+                    if info["proc"].poll() is None:
+                        info["proc"].kill()
+                except Exception:
+                    pass
+                _LENS_JOBS.pop(j, None)
+    shutil.rmtree(cdir, ignore_errors=True)
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------- #
@@ -1641,6 +1720,9 @@ def lens_transcript(job: str) -> dict:
         info["session"].read_text(errors="replace") if info["session"].exists() else ""
     )
     turns = [t for t in parse_session(text)["turns"] if t.get("role") == "assistant"]
+    # For a conversation turn the session also holds earlier turns' replies; show
+    # only the ones produced by THIS turn (everything past the prior baseline).
+    turns = turns[info.get("base_turns", 0) :]
     out = {"turns": turns, "running": running, "job": job}
     if not running and not turns:
         # A model/API error (e.g. unavailable model) exits 0 but leaves an
@@ -2044,8 +2126,16 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/lens/ask":
                 body = self._read_body()
                 self._json(
-                    start_lens((body.get("id") or ""), body.get("question") or "")
+                    start_lens(
+                        (body.get("id") or ""),
+                        body.get("question") or "",
+                        convo=bool(body.get("convo")),
+                        fresh=bool(body.get("fresh")),
+                    )
                 )
+            elif path == "/api/lens/reset":
+                body = self._read_body()
+                self._json(reset_lens(body.get("id") or ""))
             elif path == "/api/lens/cancel":
                 body = self._read_body()
                 self._json(cancel_lens(body.get("job") or ""))
@@ -2679,6 +2769,8 @@ function lensSwitchTo(id){   // save the run we were on, detach (but DON'T kill)
 }
 function lensNewChat(){   // start a fresh conversation for the current run
   stopLens(true);
+  const run=state.lensRun||state.agentId;
+  if(run)fetch("/api/lens/reset",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:run})}).catch(()=>{});   // clear the server-side conversation session too
   if(state.lensRun){delete state.lensConvos[state.lensRun];delete state.lensConvoTimes[state.lensRun];lensPersistConvos();}
   const m=document.getElementById("lensMsgs"); if(m)m.innerHTML=LENS_EMPTY;
   lensStatus("");
@@ -2758,10 +2850,12 @@ async function sendLens(){
   const inp=document.getElementById("lensInput");const q=inp.value.trim();
   if(!q){return;} if(!state.agentId){lensStatus("pick a run first");return;}
   state.lensRun=state.agentId;   // the chat being built belongs to the open run
+  const msgsEl=document.getElementById("lensMsgs");
+  const fresh=!msgsEl||!msgsEl.querySelector(".lens-q");   // empty chat -> start a fresh server session (no stale resume)
   stopLens(true); inp.value="";
   const body=lensAddQuestion(q);
   lensBusy(true);lensStatus("starting Run Lens…");
-  let res; try{res=await (await fetch("/api/lens/ask",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:state.agentId,question:q})})).json();}catch(e){res={error:String(e)};}
+  let res; try{res=await (await fetch("/api/lens/ask",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:state.agentId,question:q,convo:true,fresh:fresh})})).json();}catch(e){res={error:String(e)};}
   if(!res||res.error||!res.job){body.innerHTML='<div class="lens-thinking" style="color:var(--err)">'+esc((res&&res.error)||"failed to start")+'</div>';lensSaveConvo();lensBusy(false);lensStatus("error");return;}
   lensStreamJob(res.job,body);
 }
