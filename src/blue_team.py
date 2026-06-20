@@ -52,4 +52,14 @@ def build_skim_rewrite_prompt() -> str:
     return _JINJA.get_template("blue_team_skim_rewrite.md.j2").render()
 
 
-__all__ = ["build_prompt", "build_followup_prompt", "build_skim_rewrite_prompt"]
+def build_finalize_prompt() -> str:
+    """Render the watchdog prompt used when a live audit over-explores."""
+    return _JINJA.get_template("blue_team_finalize.md.j2").render()
+
+
+__all__ = [
+    "build_prompt",
+    "build_followup_prompt",
+    "build_skim_rewrite_prompt",
+    "build_finalize_prompt",
+]

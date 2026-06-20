@@ -41,13 +41,11 @@ if str(ROOT) not in sys.path:
 
 import check_report_clarity  # noqa: E402
 
-from src import audit_agent, blue_team  # noqa: E402
+from src import DEFAULT_GPT_MODEL, audit_agent, blue_team  # noqa: E402
 
-# Blue-teaming is a careful reasoning / judgement task, so default to the strongest
-# available Claude reasoning model (the same one the research agents run on) rather than
-# the GPT writing default. This account has no Fable access. Override with BLUE_TEAM_MODEL
-# or --model.
-BLUE_TEAM_MODEL = os.environ.get("BLUE_TEAM_MODEL", "anthropic/claude-opus-4-8")
+# Blue-teaming is a careful reasoning / judgement task. Default to the shared GPT
+# reasoning model; override with BLUE_TEAM_MODEL or --model.
+BLUE_TEAM_MODEL = os.environ.get("BLUE_TEAM_MODEL", DEFAULT_GPT_MODEL)
 
 
 def _clarity_items(report_path: Path) -> list[str]:

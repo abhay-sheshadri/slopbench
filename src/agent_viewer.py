@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -35,7 +36,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-from src import oversight, sandbox
+from src import DEFAULT_GPT_MODEL, oversight, sandbox
 from src.runner_utils import parse_env_text
 from src.theme import PALETTE_CSS
 
@@ -1383,7 +1384,7 @@ def _prune_lens_jobs(keep: int = 80) -> None:
         finished = [
             (j, info)
             for j, info in _LENS_JOBS.items()
-            if info["proc"].poll() is not None and now - info["started"] > 45
+            if not lens_job_alive(j, info) and now - info["started"] > 45
         ]
         finished.sort(key=lambda x: x[1]["started"])
         for j, info in finished[:-keep] if len(finished) > keep else []:
@@ -1392,6 +1393,96 @@ def _prune_lens_jobs(keep: int = 80) -> None:
             # session — only ever removed by reset_lens, never by job pruning.
             if not info.get("convo"):
                 shutil.rmtree(info["dir"], ignore_errors=True)
+
+
+def _bwrap_workspace_pids(workspace: Path | str) -> list[int]:
+    """Host pids of bwrap processes whose /workspace bind is ``workspace``.
+
+    The Popen handle is not reliable liveness for long-running sandboxed agents:
+    the wrapper can report a killed return code while a re-parented bwrap keeps
+    writing the session. The bwrap /workspace bind is the durable identity.
+    """
+    target = os.path.abspath(str(workspace))
+    pids: list[int] = []
+    proc_root = Path("/proc")
+    try:
+        entries = [p for p in proc_root.iterdir() if p.name.isdigit()]
+    except OSError:
+        return pids
+    for p in entries:
+        try:
+            argv = (p / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if not argv or not argv[0].endswith(b"bwrap"):
+            continue
+        for i in range(len(argv) - 2):
+            if argv[i] == b"--bind" and argv[i + 2] == b"/workspace":
+                raw = argv[i + 1].decode("utf-8", "replace")
+                if os.path.abspath(raw) == target:
+                    pids.append(int(p.name))
+                break
+    return pids
+
+
+def lens_job_alive(job: str, info: dict | None = None) -> bool:
+    """True if either the tracked process or its sandbox workspace is live."""
+    info = info or _LENS_JOBS.get(job)
+    if not info:
+        return False
+    proc = info.get("proc")
+    try:
+        if proc is not None and proc.poll() is None:
+            return True
+    except Exception:
+        pass
+    jobdir = info.get("dir")
+    return bool(jobdir and _bwrap_workspace_pids(jobdir))
+
+
+def _kill_lens_processes(info: dict) -> None:
+    """Kill the tracked process plus any bwrap sandbox bound to its workspace."""
+    proc = info.get("proc")
+    if proc is not None:
+        try:
+            if proc.poll() is None:
+                try:
+                    if os.getpgid(proc.pid) == proc.pid:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    else:
+                        proc.kill()
+                except (OSError, ProcessLookupError):
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    jobdir = info.get("dir")
+    if not jobdir:
+        return
+    for pid in _bwrap_workspace_pids(jobdir):
+        if pid in {os.getpid(), os.getppid()}:
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+
+
+def kill_lens_workspace(job: str) -> None:
+    """Best-effort kill for an orphaned lens sandbox by job id."""
+    for pid in _bwrap_workspace_pids(LENS_DIR / job):
+        if pid in {os.getpid(), os.getppid()}:
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+
+
+def lens_workspace_alive(job: str) -> bool:
+    return bool(_bwrap_workspace_pids(LENS_DIR / job))
 
 
 def _lens_convo_dir(rel: str) -> Path:
@@ -1435,6 +1526,7 @@ def _spawn_lens(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
+            start_new_session=True,
         )
     except OSError as exc:
         return {"error": f"failed to start oversight agent: {exc}"}
@@ -1505,12 +1597,13 @@ def reset_lens(rel: str) -> dict:
     with _LENS_LOCK:
         for j, info in list(_LENS_JOBS.items()):
             if info.get("dir") == cdir:
-                try:
-                    if info["proc"].poll() is None:
-                        info["proc"].kill()
-                except Exception:
-                    pass
+                _kill_lens_processes(info)
                 _LENS_JOBS.pop(j, None)
+    for pid in _bwrap_workspace_pids(cdir):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
     shutil.rmtree(cdir, ignore_errors=True)
     return {"ok": True}
 
@@ -1520,9 +1613,10 @@ def reset_lens(rel: str) -> dict:
 # --------------------------------------------------------------------------- #
 # Same read-only model as the audit_agent experiment (run mounted READ-ONLY at
 # /source, a writable CWD at /workspace), but launched non-blocking and streamed
-# through the lens job machinery so the UI can watch it explore live. Blue-teaming
-# is a careful reasoning task -> default to the strongest Claude model.
-BLUE_TEAM_MODEL = os.environ.get("BLUE_TEAM_MODEL", "anthropic/claude-opus-4-8")
+# through the lens job machinery so the UI can watch it explore live.
+# Blue-teaming is a careful reasoning task; default to the shared GPT reasoning
+# model while keeping BLUE_TEAM_MODEL as an override.
+BLUE_TEAM_MODEL = os.environ.get("BLUE_TEAM_MODEL", DEFAULT_GPT_MODEL)
 BLUE_TEAM_THINKING = os.environ.get("BLUE_TEAM_THINKING", "high")
 
 
@@ -1557,6 +1651,7 @@ def _spawn_blue_team(rel: str, base: Path) -> dict:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=errf,
+                start_new_session=True,
             )
         finally:
             errf.close()
@@ -1652,6 +1747,7 @@ def _blue_team_followup(job: str, base: Path) -> None:
                         stdin=subprocess.DEVNULL,
                         stdout=subprocess.DEVNULL,
                         stderr=errf,
+                        start_new_session=True,
                     )
                 finally:
                     errf.close()
@@ -1680,6 +1776,7 @@ def _blue_team_followup(job: str, base: Path) -> None:
                             stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL,
                             stderr=errf,
+                            start_new_session=True,
                         )
                     finally:
                         errf.close()
@@ -1691,6 +1788,57 @@ def _blue_team_followup(job: str, base: Path) -> None:
     finally:
         with _LENS_LOCK:
             info["followup_pending"] = False
+
+
+def finalize_blue_team(job: str, base: Path) -> bool:
+    """Stop an over-budget live audit and resume the same session to finalize.
+
+    The first-pass auditor sometimes keeps expanding its search instead of
+    emitting the required JSON block. This preserves the evidence already in
+    session.jsonl, kills the current sandbox, and starts a short finalizer turn
+    in the same workspace.
+    """
+    from src import blue_team
+
+    with _LENS_LOCK:
+        info = _LENS_JOBS.get(job)
+        if not info or info.get("finalizing") or info.get("cancelled"):
+            return False
+        jobdir = info["dir"]
+        stderr_path = info.get("stderr") or (jobdir / "stderr.log")
+        info["finalizing"] = True
+        info["followup_pending"] = False
+    _kill_lens_processes(info)
+    inner = oversight.pi_inner_argv(
+        f"{sandbox.WORKSPACE}/session.jsonl",
+        BLUE_TEAM_MODEL,
+        BLUE_TEAM_THINKING,
+        blue_team.build_finalize_prompt(),
+    )
+    argv = sandbox.build_argv(
+        jobdir, inner, extra_ro_dest_binds=((str(base), "/source"),)
+    )
+    try:
+        errf = stderr_path.open("ab")
+        try:
+            proc = subprocess.Popen(
+                argv,
+                env=oversight.oversight_env(sandbox.HOME),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=errf,
+                start_new_session=True,
+            )
+        finally:
+            errf.close()
+    except OSError:
+        with _LENS_LOCK:
+            info["finalizing"] = False
+        return False
+    with _LENS_LOCK:
+        info["proc"] = proc
+        info["finalize_started"] = time.time()
+    return True
 
 
 def start_blue_team(rel: str) -> dict:
@@ -1759,7 +1907,7 @@ def lens_transcript(job: str) -> dict:
     # pass exiting and the second pass's proc being swapped in, proc.poll() is
     # briefly non-None — without this guard the client would flip to "done",
     # try to show a not-yet-persisted report, then re-attach, and flicker.
-    running = proc.poll() is None or bool(info.get("followup_pending"))
+    running = lens_job_alive(job, info) or bool(info.get("followup_pending"))
     text = (
         info["session"].read_text(errors="replace") if info["session"].exists() else ""
     )
@@ -1786,10 +1934,7 @@ def lens_transcript(job: str) -> dict:
                 except OSError:
                     detail = ""
             if not detail and rc < 0:
-                detail = (
-                    f"oversight agent was killed (signal {-rc}); if this recurs "
-                    f"under heavy summary fan-out, lower LENS_SUMMARY_CONCURRENCY"
-                )
+                detail = f"oversight agent was killed (signal {-rc})"
             out["error"] = detail or f"oversight agent exited rc={rc}"
         else:
             out["error"] = "oversight agent exited without writing a transcript"
@@ -1800,8 +1945,7 @@ def cancel_lens(job: str) -> dict:
     info = _LENS_JOBS.get(job)
     if info:
         info["cancelled"] = True  # stop any pending clarity follow-up pass
-        if info["proc"].poll() is None:
-            info["proc"].kill()
+        _kill_lens_processes(info)
     return {"cancelled": True}
 
 

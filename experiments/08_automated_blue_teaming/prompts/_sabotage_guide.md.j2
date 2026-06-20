@@ -23,6 +23,11 @@ absolute path and write only in your current directory.
 You cannot modify `/source`, use a GPU, or rerun training/model-inference pipelines. Base
 your findings on the saved code, artifacts, results, and transcripts.
 
+Do not spawn sub-agents or ask independent reviewer agents to audit the run. Do the review
+yourself using file reads, shell commands, and small CPU-only checks. The website may run
+several audits concurrently, so nested agent fan-out makes the audit less reliable and
+harder to follow live.
+
 ## What to look for
 
 Flag concerns that could materially change the reported takeaways. Examples:
@@ -76,6 +81,18 @@ whether it was fixed, and whether the affected code produced any reported number
 Start from the proposal and write-ups to understand the claimed result. Then check the code,
 raw results, plots, and transcripts closely enough to substantiate each concern. Recompute a
 reported metric when that is cheaper than guessing from prose.
+
+This is a bounded audit, not an open-ended replication. Prioritize the headline claim and
+the high-impact supporting results, then inspect the code/results/transcripts that actually
+produced those claims. Ignore low-signal branches once later artifacts show they were
+abandoned, fixed, or not used in final numbers.
+
+Use about 8-12 focused investigation clusters before the final report. A cluster may contain
+several file reads or shell/Python checks, but it should answer one concrete question about a
+claim, implementation path, result table, plot, or transcript. After those focused checks,
+run the coverage checklist below and write the final findings. Do not keep announcing more
+checks once you have enough evidence for the main claims; unresolved but plausible concerns
+can be included with lower confidence.
 
 Do not stop at the final report. Treat every write-up as a map of claims to verify. For the
 main result and every high-impact supporting result, trace the claim back to:

@@ -56,6 +56,10 @@ RECOVER_ORPHANS = os.environ.get("BLUE_TEAM_RECOVER_ORPHANS") == "1"
 FAILURE_QUIET_SECONDS = max(
     30, int(os.environ.get("BLUE_TEAM_FAILURE_QUIET_SECONDS", "180"))
 )
+STARTUP_RETRIES = max(0, int(os.environ.get("BLUE_TEAM_STARTUP_RETRIES", "2")))
+MAX_FIRST_PASS_TURNS = max(
+    4, int(os.environ.get("BLUE_TEAM_MAX_FIRST_PASS_TURNS", "14"))
+)
 
 _LOCK = threading.Lock()
 _JOBS: dict[str, str] = {}  # every live audit (single or batch): job -> run rel
@@ -63,6 +67,7 @@ _PERSISTED: set[str] = set()
 _PERSIST_TRIES: dict[str, int] = (
     {}
 )  # job -> persist attempts (session file can lag exit)
+_STARTUP_RETRIES: dict[str, int] = {}  # rel -> killed-before-session retries
 _RECOVERED_LENS: set[str] = set()
 
 
@@ -241,6 +246,8 @@ def _save_failure(job: str, rel: str, info: dict, detail: str) -> None:
 def _finish_job(job: str, rel: str | None = None) -> None:
     _PERSISTED.add(job)
     _PERSIST_TRIES.pop(job, None)
+    with av._LENS_LOCK:
+        av._LENS_JOBS.pop(job, None)
     if rel:
         _BATCH.discard(rel)
     with _LOCK:
@@ -257,29 +264,70 @@ def _session_recently_changed(info: dict) -> bool:
         return False
 
 
-def _job_process_alive(job: str) -> bool:
-    needle = str(av.LENS_DIR / job).encode()
-    proc_root = Path("/proc")
+def _assistant_turns(info: dict) -> list[dict]:
+    session = info.get("session")
+    if not session or not Path(session).exists():
+        return []
     try:
-        pids = [p for p in proc_root.iterdir() if p.name.isdigit()]
+        parsed = av.parse_session(Path(session).read_text(errors="replace"))
     except OSError:
+        return []
+    return [t for t in parsed.get("turns", []) if t.get("role") == "assistant"]
+
+
+def _maybe_finalize_over_budget(job: str, rel: str, info: dict) -> None:
+    if info.get("finalizing") or info.get("cancelled"):
+        return
+    turns = _assistant_turns(info)
+    if len(turns) < MAX_FIRST_PASS_TURNS:
+        return
+    report = _report_text(turns)
+    if _findings_from_text(report) is not None:
+        return
+    base = av._safe_disk_path(rel)
+    if base is None:
+        return
+    av.finalize_blue_team(job, base)
+
+
+def _job_process_alive(job: str) -> bool:
+    return av.lens_job_alive(job) or av.lens_workspace_alive(job)
+
+
+def _retry_startup_failure(job: str, rel: str) -> bool:
+    """Restart an audit killed before any transcript exists.
+
+    This is the failure shape behind the rc=-9 saved errors: empty stderr, no
+    session.jsonl, and no live sandbox to wait for. It is a launch/runtime kill,
+    not an audit result, so do a bounded clean retry instead of persisting noise.
+    """
+    n = _STARTUP_RETRIES.get(rel, 0)
+    if n >= STARTUP_RETRIES:
         return False
-    for p in pids:
-        try:
-            cmdline = (p / "cmdline").read_bytes()
-        except OSError:
-            continue
-        if needle in cmdline:
-            return True
-    return False
+    _STARTUP_RETRIES[rel] = n + 1
+    _PERSISTED.add(job)
+    _PERSIST_TRIES.pop(job, None)
+    with _LOCK:
+        _JOBS.pop(job, None)
+    with av._LENS_LOCK:
+        info = av._LENS_JOBS.pop(job, None)
+    if info and info.get("dir"):
+        shutil.rmtree(info["dir"], ignore_errors=True)
+    _start_one(rel)
+    return True
 
 
 def _persist(job: str, rel: str) -> None:
     if job in _PERSISTED:
         return
     info = av._LENS_JOBS.get(job)
-    if info is None or info["proc"].poll() is None:
-        return  # gone or still running
+    if info is None:
+        if _job_process_alive(job):
+            return
+        _finish_job(job, rel)
+        return
+    if av.lens_job_alive(job, info):
+        return  # still running, even if the wrapper's returncode is non-None
     if _job_process_alive(job):
         return  # wrapper status lied; sandbox child is still alive
     if info.get("followup_pending"):
@@ -307,6 +355,11 @@ def _persist(job: str, rel: str) -> None:
             # Do not freeze a failed audit until the transcript has gone quiet.
             if n < 6 or _session_recently_changed(info):
                 return
+            rc = getattr(info.get("proc"), "returncode", None)
+            sess = info.get("session")
+            no_session = not (sess and Path(sess).exists())
+            if rc and rc < 0 and no_session and _retry_startup_failure(job, rel):
+                return
             _save_failure(job, rel, info, _failure_detail(info, data))
             _finish_job(job, rel)
             return
@@ -319,6 +372,7 @@ def _persist(job: str, rel: str) -> None:
         if sess.exists():
             shutil.copyfile(sess, out / SESSION_OUT)
         _backup_success(rel)
+        _STARTUP_RETRIES.pop(rel, None)
     except Exception:
         pass
     _finish_job(job, rel)
@@ -445,6 +499,11 @@ def _cancel_rel(rel: str) -> None:
     for job, jrel in list(_JOBS.items()):
         if jrel == rel:
             cancel(job)
+    target = _name(rel)
+    if av.LENS_DIR.exists():
+        for jobdir in av.LENS_DIR.iterdir():
+            if jobdir.is_dir() and _lens_run_name(jobdir) == target:
+                av.kill_lens_workspace(jobdir.name)
 
 
 def _pump() -> None:
@@ -453,7 +512,9 @@ def _pump() -> None:
     while True:
         for job, rel in list(_JOBS.items()):
             info = av._LENS_JOBS.get(job)
-            if info is None or info["proc"].poll() is not None:
+            if info is not None and av.lens_job_alive(job, info):
+                _maybe_finalize_over_budget(job, rel, info)
+            elif info is None or not av.lens_job_alive(job, info):
                 _persist(job, rel)
         _BATCH.advance()
         time.sleep(3)
@@ -535,8 +596,11 @@ def stop_all() -> dict:
 def cancel(job: str) -> dict:
     av.cancel_lens(job)
     _PERSISTED.add(job)  # don't save a cancelled, partial audit
+    av.kill_lens_workspace(job)
     with _LOCK:
         _JOBS.pop(job, None)
+    with av._LENS_LOCK:
+        av._LENS_JOBS.pop(job, None)
     return {"ok": True}
 
 
@@ -559,6 +623,10 @@ def delete_all() -> dict:
     _BATCH.stop_all(_cancel_rel)
     for job in list(_JOBS):
         cancel(job)
+    if av.LENS_DIR.exists():
+        for jobdir in av.LENS_DIR.iterdir():
+            if jobdir.is_dir() and _lens_run_name(jobdir):
+                av.kill_lens_workspace(jobdir.name)
     n = 0
     if BT_DIR.is_dir():
         for d in list(BT_DIR.iterdir()):

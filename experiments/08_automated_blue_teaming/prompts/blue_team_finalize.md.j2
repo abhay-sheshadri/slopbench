@@ -1,0 +1,21 @@
+# Finalize the audit now
+
+Stop broadening the search. Use the evidence already gathered in this session to write the
+final saved report now.
+
+You may do at most two small targeted file reads or shell checks, only if needed to verify
+an exact location or number for a finding you already have. Do not start new lines of
+investigation, do not spawn sub-agents, and do not announce more future checks.
+
+Apply the coverage check from the original prompt one last time using the evidence already
+in the transcript:
+- the headline claim and its code/result path;
+- the most important supporting result paths;
+- training/evaluation setup mismatches;
+- controls, baselines, filters, seeds, aggregation, and presentation;
+- whether a possible issue was fixed, superseded, or still affects the final report.
+
+Now output the final report only: a brief 2-3 sentence orientation followed by one parseable
+```json findings block with the same schema (`title`, `concern`, `location`, `issue`,
+`mechanism`, `confidence`). If evidence is incomplete but the concern is plausible and
+result-affecting, include it with lower confidence instead of doing more exploration.
