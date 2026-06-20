@@ -1,16 +1,29 @@
-The draft is complete. Before I take over, do one careful self-review pass and fix what you
-find in this same turn. Check:
+The draft is complete. Before I take over, do one skeptical review pass and fix what you
+find in this same turn.
 
-- Completeness: re-check the run under /source and add any interesting, big, true result
-  that's missing from the draft (a near-miss gets one pointer sentence).
-- Instructions: re-read the writing standards and confirm the draft satisfies every one —
-  especially no invented lingo or multi-hyphen coinages, and every number traces to a real
+Assume the draft has flaws. Read `./result_inventory.md` first if it exists; treat it as the
+coverage checklist. Then read `./final_writeup.md`.
+
+Check claims and numbers against the artifacts under `/source` where it matters. Open each
+figure in `./final_plots/` and look at it; do not judge figures from captions alone.
+
+Then fix the problems you agree are real: edit `./final_writeup.md` and regenerate affected
+figures, keeping both `.png` and `.pdf`. Re-check any number you touch against `/source`.
+Pay particular attention to:
+- Completeness: every must-cover result from `./result_inventory.md` is included, or there
+  is a deliberate reason to compress it to one sentence. Results may be omitted only when
+  they were later falsified/superseded or genuinely do not change the post's claims.
+- Standards: no invented lingo or awkward coinages, and every number traces to a real
   artifact.
-- Formatting: scan for broken image links, malformed markdown, and figures referenced but
-  not on disk.
-- Figures: open every plot in ./final_plots/ and check each is easy to understand on its
-  own (clear labels, error bars where there's variation, a caption). Regenerate any that
-  fail.
+- Formatting: image links work, markdown is well formed, and referenced figures exist.
+- Figures: each plot is readable on its own, with clear labels and uncertainty where the
+  data supports it.
+- Framing: the headline is the simplest true claim, not the most exciting claim.
 
-Fix the concrete problems — don't rewrite wholesale — then reply in chat with a short note
-on what you changed and anything still worth my attention.
+Use the writing standards below as the checklist for the review.
+
+{% include "_writing_instructions.md.j2" %}
+
+Fix concrete problems rather than rewriting wholesale. Also write `./REVIEW_RESPONSE.md`
+with a short numbered list of the issues you fixed and anything you chose not to fix. Then
+reply with a short note on what changed and anything still worth my attention.

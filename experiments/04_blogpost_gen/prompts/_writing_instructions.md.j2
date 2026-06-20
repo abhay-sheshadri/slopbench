@@ -1,121 +1,88 @@
-## Writing instructions
+## Writing standards
 
-These reference write-ups show the quality and the plain, careful voice to aim for (match
-the voice and care, NOT the length — your post should be far shorter than these):
+These reference posts show the target voice and level of care. Match the clarity, not the
+length; this post should be much shorter.
 - https://www.lesswrong.com/posts/ghESoA8mo3fv9Yx3E/why-do-some-language-models-fake-alignment-while-others-don
 - https://www.lesswrong.com/posts/LqDjxSceFz8tjMe2j/auditbench-evaluating-alignment-auditing-techniques-on
 
-- **Lead with the simplest true framing of the results.** This is the overriding goal; the
-  rest of these instructions serve it. Work out the plainest true statement of what was
-  found and build the whole post around it. Choose the simplest framing, metric, and example
-  that is still faithful to the evidence, and add comparison conditions and caveats only
-  after that core is clear. When in doubt, cut a complication rather than add one.
-  - Set up the experiment in plain words before using any of its terminology. A reader who
-    has not seen the source papers should be able to follow the post on its own; assume they
-    have some context on the project proposal but none on what happened during the research.
-  - Anchor the main result to one concrete worked example before generalizing: show a
-    representative case (a real input and the model's output), then layer on the broader
-    claim and the comparison conditions.
-  - If the proposal frames the project as a response to a specific prior result, open with
-    that context in a sentence — the reader should know what question the headline answers.
-  - A reader should be able to restate the main result in two plain sentences using only the
-    post. If they cannot, the framing is too abstract or the metrics are underspecified.
-  - Don't let the headline outrun the evidence: if the clean result rests on a single case
-    or condition, say so in the abstract and framing, not only in a buried caveat.
-  - Show the concrete artifacts a reader most wants to see (a representative example, a
-    sample input and output), not just summary statistics about them.
+### Core framing
+- Lead with the simplest true statement of what the run found. Choose one framing, one
+  primary metric, and one representative example that are faithful to the evidence; add
+  comparison conditions and caveats after the core result is clear.
+- Explain the setup in plain words before using project-specific terminology. Assume the
+  reader has seen the proposal but not the run, its code, or its source papers.
+- Anchor the main result in a concrete artifact before generalizing: a representative
+  input/output pair, transcript excerpt, dataset example, or plot.
+- Do not let the headline outrun the evidence. If the result rests on a narrow condition,
+  a single probe, or a permissive setup, say that near the top.
 
-- **Structure.**
-  - Write a shortform research note, not a paper: roughly 500-1000 words (just an anchor;
-    exceed it if needed). Open with a 3-5 bullet TL;DR of the main takeaways (one line each,
-    then a line break), then the headline result in a sentence or two, then one short
-    paragraph of setup in plain words (defining the key metric), then each major result in
-    its own short passage (a plain-language mini-header and the one or two figures that carry
-    it) ordered by importance, then caveats and limitations. No formal
-    Introduction/Methods/Results scaffolding and no appendices; short bold mini-headers or
-    paragraph breaks are fine if they help.
-  - Headers and bolded lead-ins must state the finding in plain words. No vague taglines
-    or slogans ("Belief is trainable", "Less is more") — a header should mean something
-    concrete to a reader who reads only the headers.
-  - Prose carries takeaways; figures carry numbers. Paragraphs should state what was found
-    and what it means, with at most the one or two headline numbers in text — every other
-    exact number belongs in a figure, its caption, or a table. If a paragraph is
-    accumulating numbers, that's a figure trying to happen.
-  - Surface every result that is interesting, big, and true, and frame them in an orderly,
-    simple, elegant way. Cut only the genuinely minor or redundant — a result that changes no
-    takeaway can be one sentence pointing at what was tried and how it came out, or dropped.
+### Structure
+- Write a detailed research note, not a paper. Most multi-phase empirical runs need roughly
+  1,500-2,800 words to cover the real result, the strongest caveat, and the important
+  negative findings. Use less only when the run is genuinely simple.
+- Open with a 3-5 bullet TL;DR, then the headline result, then a short setup paragraph, then
+  the major results ordered by importance, then caveats and limitations.
+- Avoid formal Introduction/Methods/Results scaffolding unless it genuinely improves the
+  piece. Short bold mini-headers are fine.
+- Headers should state findings, not slogans. A reader who skims only the headers should
+  learn concrete claims.
+- Let prose carry takeaways and figures carry most numbers. If a paragraph accumulates
+  exact values, make or revise a figure/table instead.
+- Include results that are interesting, large, and true, including validated negative or
+  bounded results. Minor or redundant results can be compressed to one sentence or omitted
+  if they do not change the takeaway.
 
-- **Metrics and terminology.**
-  - Define each metric once, in plain language, then reuse one name for it. Don't introduce
-    several near-synonymous names for the same underlying quantity; if a quantity is measured
-    under different conditions, keep the metric name fixed and vary only the condition.
-  - Express an effect one consistent way (e.g. percentage points everywhere, not a ratio in
-    one figure and a difference in another).
-  - Avoid cryptic or non-standard terminology. Communicate in common words or standard ML
-    terms, and define any term that isn't standard English or standard ML on first use, then
-    use it consistently. Try really hard NOT to coin any new term at all — almost always you
-    can use a standard ML term or plain English instead, and you should. Avoid coinages
-    invented during the research (e.g. "off-manifold", "liveness control", "graft",
-    "projection-z"); prefer the standard term or plain language. Don't give a common word a special private meaning or use one in
-    a way a reader could misread — if a term could be read two ways, pin it down or replace
-    it. A reader should never have to guess what a word means.
-  - No nonstandard hyphenated coinages ("flat-to-stricter", "risk-gated", "emphasis-matched"):
-    if the compound isn't a standard term, unpack it into plain words.
+### Evidence and terminology
+- Define each metric once in plain language, then use one name for it throughout.
+- Express effects consistently, such as percentage points everywhere rather than mixing
+  ratios, absolute differences, and relative changes.
+- Use common words or standard ML terms. Avoid private run terminology and invented
+  coinages; replace them with plain descriptions.
+- Do not use nonstandard hyphenated compounds like "flat-to-stricter", "risk-gated", or
+  "emphasis-matched". Also replace tempting phrases like "context-gated",
+  "prompt-channel artifact", "position-gated", "matched-arm", and "over-state". Unpack the
+  idea instead.
+- Be explicit when a model appears in multiple roles. Say whether it is acting as the
+  policy, monitor, judge, or training target whenever ambiguity is possible.
+- Be explicit about chain-of-thought: whose reasoning it is, and who can see it.
+- Do not write "the control" or "the baseline" by itself. Say what the condition is, such as
+  "the same model before fine-tuning" or "the same prompt without the persona framing".
+- Spell out dataset and setup shorthand on first use.
 
-- **Anticipate the reader's confusions.** Before finishing, list the ways a careful reader
-  could misread the post, and make the text foreclose each one. The recurring offenders:
-  - When a model appears in more than one role (trained as a policy, used as a monitor,
-    serving as a judge), say which role is meant at every mention where it could be
-    misread. "We trained X" must never leave the reader guessing whether X was trained to
-    act or trained to evaluate.
-  - Chain-of-thought is doubly ambiguous: "reviewing with CoT" could mean the monitor
-    thinks out loud, or the policy's CoT is shown to the monitor. Always say whose CoT and
-    who sees it.
-  - Never call a condition just "the control" or "the baseline": say concretely what it is
-    ("the same model before fine-tuning", "the same prompt without the persona framing").
-  - Spell out dataset and setup shorthand on first use ("MBPP-derived" → what was derived,
-    how).
+### Voice
+- Write a finished research note, not a process log. Do not narrate the AI agent's workflow
+  unless it is directly relevant to interpreting the result.
+- Cut filler: throat-clearing, vague hype, hollow contrast ("not just X, but Y"), restating
+  the obvious, and sentences that do not carry information.
+- Use the plain voice of a careful researcher. Prefer concrete claims, concrete caveats,
+  and concrete examples.
 
-- **Voice and length.**
-  - Be concise. Cut AI filler: throat-clearing, vague hype, hollow contrast ("not just X,
-    but Y"), restating the obvious, or padding. Keep only sentences that carry real
-    content, in the precise, plain voice of a careful researcher.
-  - Write a finished product, not a process log. Don't reference the AI agent doing the
-    research; the goal is a polished research shortform a careful researcher would post,
-    not a summary of the agent's work.
+### Prior work
+- Cite prior work when you mention it. Use only citations that appear in the proposal or
+  that you verified from run artifacts; do not invent references.
+- A short References section at the end is fine.
 
-- **Citing prior work.**
-  - When you mention prior work, cite it (author/title + link); only use citations that
-    appear in the proposal or that you verified against an artifact in the run — never
-    fabricate a reference. A short "References" list at the end is fine.
+### Figures
+- Prefer one plot per figure.
+- Keep plots clean and legible. Use short labels, put detail in the caption, and place the
+  legend below the plot area.
+- Show uncertainty by default: error bars, confidence bands, variation across seeds/prompts/
+  resamples, or a bootstrap over examples. Say in the caption what uncertainty represents.
+  Omit uncertainty only when there is no meaningful variation to quantify, when it would
+  require inventing data, or when it would seriously harm the plot's readability or aesthetic.
+- Review every saved `.png` for visual defects before finalizing it. Titles, axis labels,
+  tick labels, legends, and annotations should not be clipped, overlapping, cramped, or
+  confusing.
+- Use plain-English labels in figures. Replace run-internal names such as `cfg3`, `exp_v2`,
+  `kto_sft`, `m1`, `m2`, `acc`, or `pp1` with the thing they mean. Define unavoidable
+  abbreviations in the caption.
+- Save every cited figure in `./final_plots/` as both `.png` and `.pdf`, and reference the
+  `.png` with a relative path, for example:
+  `![Fig 1: headline result](final_plots/fig1_headline.png)`.
 
-- **Figures.**
-  - One plot per figure: try not to have multiple subplots in a plot.
-  - Clean and legible: AI-generated figures usually have too much text on them. Keep labels
-    and legends clean and elegant, and push detail into the caption below. Default to small
-    figsizes with big, short text.
-  - Every plot should show uncertainty: add error bars (or confidence bands) — variation
-    across seeds, prompts, or resamples, or a bootstrap over examples — and say in the
-    caption what they represent (e.g. "95% CI over 5 seeds"). Only omit them when there is
-    genuinely no variation to quantify, or when they truly make the figure hard to read;
-    never invent them.
-  - No clipped or overlapping text: every title, axis label, tick label, legend, and
-    annotation must fit fully inside the saved image (use a tight layout /
-    `bbox_inches="tight"`, rotate or thin out crowded tick labels). Open the saved .png
-    with your Read tool and check it before citing it.
-  - No cryptic shorthand anywhere a reader looks (legends, axis labels, titles, tick labels):
-    spell out every series, line, or bar fully (short but complete), and replace run-internal
-    names (e.g. `cfg3`, `exp_v2`, `kto_sft`, `m1`/`m2`, `acc`, `pp1`) with the plain-English
-    thing they stand for ("KTO adversarial training", "accuracy"). If an abbreviation is
-    truly unavoidable, define it in the caption. A reader who has never seen the run should
-    understand the figure without guessing.
-  - Save each cited figure to ./final_plots/ as BOTH .png and .pdf, and reference it with a
-    relative path, e.g. `![Fig 1: headline](final_plots/fig1_headline.png)`.
-
-- **Final pass — read the draft from the outside.**
-  - Read it as if you had only seen the proposal and nothing else from the run: would you
-    follow it on first read? If not, fix it.
-  - Go term by term and remove all invented lingo — especially multi-hyphen coinages
-    ("flat-to-stricter", "risk-gated", "emphasis-matched") — replacing each with plain
-    language a reader who doesn't know the project would understand.
-  - Don't miss important things the research did that the reader should know about.
+### Final pass
+- Read the draft as if you had only seen the proposal. If the main result, metric, or setup
+  would be hard to restate on first read, revise.
+- Remove invented lingo and ambiguous shorthand.
+- Check that the important results from the run are represented, with the strength of
+  evidence made clear.

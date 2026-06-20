@@ -3,8 +3,8 @@
 A two-pane page (chat + live markdown editor/preview) for co-writing a blogpost
 about one completed run with an oversight ``pi`` agent: the run is mounted
 read-only at /source, the agent edits ``final_writeup.md`` in a persistent
-workspace, and the human steers in chat (or sends ``/draft`` to get the whole
-post in one turn) and edits the prose directly. The engine lives in
+workspace, and the human steers in chat (or sends ``/draft`` to run the full
+automatic writeup pipeline) and edits the prose directly. The engine lives in
 :mod:`src.blogpost_studio`; this module is the HTTP routes + embedded UI.
 
 There is no standalone server: :func:`handle` is called by the agent viewer's
@@ -29,19 +29,21 @@ import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs
 
-from src import audit_agent
+from src import audit_agent, web_common
 from src.agent_viewer import OUTPUTS_DIR, ROOT, _discover_run_dirs, _run_item
 from src.blogpost_studio import (
     DOC_NAME,
     SESSION_NAME,
     STUDIO_ROOT,
+    TURN_STATUS_NAME,
     StudioSession,
     default_work_dir,
     live_sandbox_workspaces,
 )
 from src.theme import (
+    API_JS,
     CONTROLS_CSS,
     EDITOR_CSS,
     HIGHLIGHT_JS,
@@ -65,6 +67,65 @@ PREFIX = "/studio"
 SESSIONS: dict[str, StudioSession] = {}
 _SELECT_LOCK = threading.Lock()
 
+# "Automatic writeup" runs many real agent turns; cap how many run at once instead
+# of launching all of them simultaneously (heavy on cost, rate limits, and disk).
+# Same BatchRunner the blue team uses (see src.web_common).
+DRAFT_CAP = max(1, int(os.environ.get("STUDIO_DRAFT_CONCURRENCY", "5")))
+_RESET_BEFORE_DRAFT: set[str] = set()
+_RESET_BEFORE_DRAFT_LOCK = threading.Lock()
+
+
+def _start_draft(rel: str) -> None:
+    # Use _resolve so the session is created under the SAME canonical (resolved)
+    # key the UI uses when the run is opened — otherwise a symlinked outputs dir
+    # could spawn two sessions for one run, or hide it from stop-all.
+    try:
+        s = _resolve(rel)
+    except (ValueError, OSError):
+        return
+    if s is None:
+        return
+    key = str(s.run_dir.resolve())
+    with _RESET_BEFORE_DRAFT_LOCK:
+        reset_first = key in _RESET_BEFORE_DRAFT
+        _RESET_BEFORE_DRAFT.discard(key)
+    if reset_first:
+        try:
+            s.reset()
+        except RuntimeError:
+            return
+    try:
+        s.start_turn("/draft")
+    except (ValueError, RuntimeError):
+        pass  # already drafting / raced with another turn
+
+
+def _stop_draft(rel: str) -> None:
+    try:
+        s = _resolve(rel)
+    except (ValueError, OSError):
+        return
+    if s is not None:
+        s.stop()
+
+
+def _live_drafts() -> int:
+    with _SELECT_LOCK:
+        return sum(1 for s in SESSIONS.values() if s.is_running())
+
+
+_BATCH = web_common.BatchRunner(DRAFT_CAP, _start_draft, _live_drafts)
+
+
+def _draft_pump() -> None:
+    """Keep the automatic writeup queue flowing as runs finish."""
+    while True:
+        _BATCH.advance()
+        time.sleep(3)
+
+
+threading.Thread(target=_draft_pump, daemon=True).start()
+
 _IMG_TYPES = {
     ".png": "image/png",
     ".pdf": "application/pdf",
@@ -86,6 +147,23 @@ def _run_phase(d: Path) -> str:
         return "Failed"
 
 
+def _batch_running_members() -> int:
+    members = _BATCH.members()
+    if not members:
+        return 0
+    with _SELECT_LOCK:
+        return sum(
+            1
+            for rel in members
+            if (s := SESSIONS.get(str(Path(rel).resolve()))) is not None
+            and s.is_running()
+        )
+
+
+def batch_status() -> dict:
+    return _BATCH.status(_batch_running_members())
+
+
 def list_runs() -> list[dict]:
     """Every run available to write about, tagged with its phase and folder.
 
@@ -98,6 +176,7 @@ def list_runs() -> list[dict]:
     # One /proc scan: catches agents writing for workspaces we hold no session
     # for (server restarted mid-turn, or the supervisor process died).
     live_ws = live_sandbox_workspaces()
+    queued = _BATCH.queued()
     for d in _discover_run_dirs(OUTPUTS_DIR):
         name = d.name
         mode = (
@@ -113,10 +192,17 @@ def list_runs() -> list[dict]:
             mtime = (d / ".pi_transcripts" / "session.jsonl").stat().st_mtime
         except OSError:
             mtime = d.stat().st_mtime if d.exists() else 0.0
+        work = default_work_dir(d)
         try:
-            draft_mtime = (default_work_dir(d) / DOC_NAME).stat().st_mtime
+            draft_mtime = (work / DOC_NAME).stat().st_mtime
         except OSError:
             draft_mtime = None
+        turn_status = _workspace_turn_status(work, str(work.resolve()) in live_ws)
+        draft_error = bool(
+            turn_status
+            and turn_status.get("state") in {"failed", "unknown"}
+            and str(work.resolve()) not in live_ws
+        )
         phase = _run_phase(d)
         session = SESSIONS.get(str(d))
         runs.append(
@@ -129,7 +215,10 @@ def list_runs() -> list[dict]:
                 "selectable": phase == "Completed",
                 "started": draft_mtime is not None,  # a studio draft exists
                 "drafting": bool(session and session.is_running())
-                or str(default_work_dir(d)) in live_ws,
+                or str(work.resolve()) in live_ws,
+                "draft_error": draft_error,
+                "draft_error_message": (turn_status or {}).get("error"),
+                "queued": str(d) in queued,
                 "mtime": max(mtime, draft_mtime or 0.0),
             }
         )
@@ -140,12 +229,31 @@ def list_runs() -> list[dict]:
         key=lambda r: (
             -latest[r["group"]],  # most recently active folder first
             r["group"],  # keep folders contiguous (the picker shows section labels)
-            not r["started"],  # drafts in progress on top within a folder
+            not r["started"],  # writeups in progress on top within a folder
             -r["mtime"],
             r["name"],
         )
     )
     return runs
+
+
+def _workspace_turn_status(work: Path, live: bool) -> dict | None:
+    try:
+        status = json.loads((work / TURN_STATUS_NAME).read_text())
+    except (OSError, ValueError, TypeError):
+        return None
+    if not isinstance(status, dict):
+        return None
+    if status.get("state") == "running" and not live:
+        return {
+            **status,
+            "state": "unknown",
+            "error": (
+                "The previous agent turn is no longer running, but this server "
+                "did not observe its exit. Check the transcript and studio_agent.log."
+            ),
+        }
+    return status
 
 
 def _validated_run_dir(spec: str) -> Path:
@@ -191,18 +299,27 @@ def select_run(spec: str) -> dict:
 
 
 def reset_all() -> dict:
-    """Delete every studio draft workspace (drafts, figures, conversations).
+    """Delete every studio writeup workspace (drafts, figures, conversations).
 
-    Refuses while any session has a turn in flight. Live sessions are reset in
-    place (workspace re-staged); workspaces with no session this process are
-    removed outright."""
+    Standardized with the blue team's delete-all: this always works — it stops
+    any in-flight writeups (and clears the batch queue) rather than refusing, then
+    wipes. Live sessions are reset in place (workspace re-staged); workspaces
+    with no session this process are removed outright."""
+    _BATCH.stop_all(_stop_draft)
+    with _RESET_BEFORE_DRAFT_LOCK:
+        _RESET_BEFORE_DRAFT.clear()
+    for r in list_runs():
+        if r.get("drafting"):
+            _stop_draft(r["path"])
     with _SELECT_LOCK:
         sessions = list(SESSIONS.values())
-    busy = any(s.is_running() for s in sessions) or any(
-        ws.startswith(str(STUDIO_ROOT)) for ws in live_sandbox_workspaces()
-    )
-    if busy:
-        raise RuntimeError("an agent is working in some session; stop it first")
+    for s in sessions:
+        s.stop()
+    # stop() SIGKILLs; wait briefly for the reaper to clear each turn so reset()
+    # (which refuses while a turn runs) succeeds.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and any(s.is_running() for s in sessions):
+        time.sleep(0.1)
     known = {str(s.work) for s in sessions}
     deleted = 0
     if STUDIO_ROOT.is_dir():
@@ -214,30 +331,44 @@ def reset_all() -> dict:
             if str(d) not in known:
                 shutil.rmtree(d, ignore_errors=True)
     for s in sessions:
-        s.reset()
+        try:
+            s.reset()
+        except RuntimeError:
+            shutil.rmtree(s.work, ignore_errors=True)  # last resort if still busy
     return {"deleted": deleted}
 
 
-def draft_all(dry: bool) -> dict:
-    """Start a parallel ``/draft`` turn for every Completed run (any mode) that
-    has no draft yet. ``dry`` only reports the targets — the UI shows them in
-    the confirmation dialog first, since each /draft is a long, real agent turn.
-    """
+def run_all(dry: bool) -> dict:
+    """Queue a fresh automatic ``/draft`` pipeline for every available Completed
+    run, up to DRAFT_CAP at a time (the rest start as slots free — see the
+    pump). Existing studio workspaces are reset before their queued pipeline
+    starts, matching the blue team's "Run all overwrites saved results" model.
+    ``dry`` only reports the targets so the UI can confirm before spending real
+    agents."""
     targets = [
         r
         for r in list_runs()
-        if r["selectable"] and not r["started"] and not r["drafting"]
+        if r["selectable"] and not r["drafting"] and not r["queued"]
     ]
-    started = []
-    if not dry:
-        for r in targets:
-            session = _session_for(Path(r["path"]))
-            try:
-                session.start_turn("/draft")
-                started.append(r["name"])
-            except (ValueError, RuntimeError):
-                pass  # raced with another turn; it shows as drafting either way
-    return {"targets": [r["name"] for r in targets], "started": started}
+    names = [r["name"] for r in targets]
+    if dry:
+        return {"targets": names, "started": []}
+    paths = [r["path"] for r in targets]
+    with _RESET_BEFORE_DRAFT_LOCK:
+        _RESET_BEFORE_DRAFT.update(str(Path(p).resolve()) for p in paths)
+    _BATCH.start_all(paths)
+    return {"targets": names, "started": names}
+
+
+def stop_all_drafts() -> dict:
+    """Stop the whole automatic writeup batch (queued + in-flight)."""
+    result = _BATCH.stop_all(_stop_draft)
+    for r in list_runs():
+        if r.get("drafting"):
+            _stop_draft(r["path"])
+    with _RESET_BEFORE_DRAFT_LOCK:
+        _RESET_BEFORE_DRAFT.clear()
+    return result
 
 
 def state_payload(s: StudioSession | None) -> dict:
@@ -278,6 +409,7 @@ def _stream_payload(s: StudioSession | None) -> dict:
             "selected": False,
             "turns": [],
             "running": False,
+            "turn_status": None,
             "doc": {"mtime": 0.0, "size": 0},
         }
     parsed = s.transcript()
@@ -295,6 +427,7 @@ def _stream_payload(s: StudioSession | None) -> dict:
         "turns": turns,
         "cost": parsed.get("cost", 0.0),
         "running": running,
+        "turn_status": s.turn_status(),
         "doc": {
             "mtime": dst.st_mtime if dst else 0.0,
             "size": dst.st_size if dst else 0,
@@ -324,42 +457,29 @@ def _cheap_sig(s: StudioSession | None) -> tuple:
     # keying on it while idle would re-push the payload for stale log churn.
     running = s.is_running()
     log_sig = stat(s.log_path) if running else ()
-    return (str(s.work), *stat(s.session_path), *stat(s.doc_path), *log_sig, running)
+    return (
+        str(s.work),
+        *stat(s.session_path),
+        *stat(s.doc_path),
+        *stat(s.work / TURN_STATUS_NAME),
+        *log_sig,
+        running,
+    )
 
 
 # --------------------------------------------------------------------------- #
 # Request handling (called from the agent viewer's Handler)
 # --------------------------------------------------------------------------- #
 def handle(h, method: str) -> bool:
-    """Serve one request if its path is under /studio. Returns whether it was ours.
-
-    ``h`` is the viewer's ``BaseHTTPRequestHandler`` instance; its ``_send`` /
-    ``_json`` / ``_read_body`` helpers are reused here.
-    """
-    parsed = urlparse(h.path)
-    if parsed.path != PREFIX and not parsed.path.startswith(PREFIX + "/"):
-        return False
-    path = parsed.path[len(PREFIX) :] or "/"
-    try:
-        if method == "GET":
-            _get(h, path, parsed.query)
-        else:
-            _post(h, path)
-    except (BrokenPipeError, ConnectionError, OSError):
-        pass
-    except Exception as exc:  # noqa: BLE001 - never let a handler kill the server
-        try:
-            h._json({"error": f"{type(exc).__name__}: {exc}"}, code=500)
-        except Exception:
-            pass
-    return True
+    """Serve one request if its path is under /studio (shared dispatch)."""
+    return web_common.serve(h, method, PREFIX, _get, _post)
 
 
 def _get(h, path: str, query: str) -> None:
     if path in ("/", "/index.html"):
         return h._send(200, INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
     if path == "/api/runs":
-        return h._json({"runs": list_runs()})
+        return h._json({"runs": list_runs(), **batch_status()})
     # Everything below acts on the run named by this request (?run=<path>) —
     # there is no server-side selection, so each window is independent.
     q = parse_qs(query)
@@ -413,13 +533,12 @@ def _post(h, path: str) -> None:
         except (ValueError, RuntimeError) as exc:
             h._json({"error": str(exc)}, code=400)
         return
-    if path == "/api/draft_all":
-        return h._json(draft_all(dry=bool(body.get("dry"))))
+    if path in ("/api/run_all", "/api/draft_all"):
+        return h._json(run_all(dry=bool(body.get("dry"))))
+    if path == "/api/stop_all":
+        return h._json(stop_all_drafts())
     if path == "/api/reset_all":
-        try:
-            return h._json(reset_all())
-        except RuntimeError as exc:
-            return h._json({"error": str(exc)}, code=409)
+        return web_common.reply(h, reset_all())
     try:
         s = _resolve(body.get("run") or "")
     except ValueError as exc:
@@ -785,8 +904,8 @@ header .spacer{flex:1}
   font-weight:700;margin:10px 4px 3px}
 .dgroup:first-child{margin-top:2px}
 .muted{color:var(--muted);padding:14px;text-align:center;font-size:12.5px}
-.wbadge{color:var(--warn);font-weight:600;animation:wpulse 1.6s ease-in-out infinite}
-.wmini{color:var(--warn);font-size:11px;font-weight:700;animation:wpulse 1.6s ease-in-out infinite}
+.wbadge{animation:wpulse 1.6s ease-in-out infinite}
+.wmini{animation:wpulse 1.6s ease-in-out infinite}
 @keyframes wpulse{0%,100%{opacity:1}50%{opacity:.45}}
 .pickerOpt{display:flex;align-items:center;gap:6px;color:var(--faint);font-size:11px;
   font-family:var(--mono);cursor:pointer;user-select:none}
@@ -828,6 +947,8 @@ details.aux .body2{padding:0 11px 10px;white-space:pre-wrap;font-family:var(--mo
 details.think .body2{color:#c8bfe7;font-style:italic}
 .empty{color:var(--muted);text-align:center;margin-top:16vh;padding:0 24px;line-height:1.6}
 .empty button{margin-top:14px}
+.errbox{color:var(--err);background:rgba(247,118,142,.08);border:1px solid rgba(247,118,142,.35);
+  border-radius:8px;padding:10px 12px;margin:8px 0;font-size:12.5px;white-space:pre-wrap}
 
 /* composer */
 #composer{flex:0 0 auto;border-top:1px solid var(--border);padding:10px 12px;background:var(--panel)}
@@ -877,9 +998,11 @@ details.think .body2{color:#c8bfe7;font-style:italic}
   <aside class="side" id="picker">
     <div class="sidehead">📝 Runs <span class="spacer"></span></div>
     <div class="sideacts">
-      <button class="primary mini" id="draftAllBtn" title="Start /draft for every completed run that has no draft yet, in parallel">✍ Draft missing</button>
-      <button class="danger mini" id="delAllBtn" title="Delete every draft, its figures, and its conversation">🗑 Delete all</button>
+      <button class="primary mini" id="runAllBtn" title="Run a fresh automatic writeup pipeline for every completed run (a few at a time)">▶ Run all</button>
+      <button class="danger mini" id="delAllBtn" title="Delete every writeup, its figures, and its conversation">🗑 Delete all</button>
+      <button class="danger mini" id="stopAllBtn" hidden title="Stop all running and queued writeups">■ Stop all</button>
     </div>
+    <div id="batchBanner"></div>
     <input id="pickerSearch" class="sidesearch" placeholder="Filter runs…" autocomplete="off">
     <div class="phase-tabs" id="pickerTabs"></div>
     <div class="pickerList sidelist" id="pickerList"></div>
@@ -908,7 +1031,7 @@ details.think .body2{color:#c8bfe7;font-style:italic}
     <div id="log"></div>
     <div id="composer">
       <div class="row">
-        <textarea id="msg" placeholder="Ask for a passage, a fix, a figure… (/draft = write the whole post)"></textarea>
+        <textarea id="msg" placeholder="Ask for a passage, a fix, a figure… (/draft = automatic writeup)"></textarea>
         <div class="btncol">
           <button class="danger" id="stopbtn" style="display:none" title="Stop the agent's current turn">■ Stop</button>
           <button class="primary" id="send">Send</button>
@@ -923,9 +1046,11 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 const $ = s => document.querySelector(s);
 const API = "/studio/api";
 let selected=false, selectedRun=null, running=false, docMtime=-1, editorDirty=false, mode="view", lastTurnsKey="";
+let batch=false, batchActive=0, batchQueued=0;
 async function pollWriting(){
   try{
-    allRuns=(await (await fetch(API+"/runs")).json()).runs||[];
+    const d=await (await fetch(API+"/runs")).json();
+    allRuns=d.runs||[]; batch=!!d.batch; batchActive=d.active||0; batchQueued=d.queued||0;
     drawRuns();   // the runs sidebar is always visible; rows carry ✍ writing badges
   }catch(e){}
 }
@@ -934,6 +1059,7 @@ setInterval(pollWriting,12000);
 // so several tabs can each drive a different run at the same time.
 const runQ=()=>selectedRun?("run="+encodeURIComponent(selectedRun)):"";
 let lastTurns=[];                 // last server-rendered turns (without optimistic ones)
+let turnStatus=null;
 let queue=[], sending=false, sentBase=0;  // outgoing message queue (send while the agent works)
 const autoOpened=new Set();       // details we opened for the live stream (vs. user-opened)
 
@@ -1016,18 +1142,18 @@ function renderChat(turns){
     : turns;
   // Key on content size too: a live thinking/text block grows without the
   // turn or block count changing, and the re-render must still happen.
+  const visibleErr = turnStatus && !running && (turnStatus.state==="failed" || turnStatus.state==="unknown");
   const key=JSON.stringify(display.map(t=>[t.role,t.blocks.length,!!t.live,
-    t.blocks.reduce((n,b)=>n+(b.text||"").length+((b.result&&b.result.text)||"").length,0)]))+"|"+queue.join("\x01")+"|"+(running?1:0);
+    t.blocks.reduce((n,b)=>n+(b.text||"").length+((b.result&&b.result.text)||"").length,0)]))+"|"+queue.join("\x01")+"|"+(running?1:0)+"|"+JSON.stringify(turnStatus||null);
   if(key===lastTurnsKey) return; // avoid clobbering scroll/details when nothing changed
   lastTurnsKey=key;
   const log=$("#log");
   const atBottom=log.scrollHeight-log.scrollTop-log.clientHeight<80;
   if(!display.length && !running){
-    log.innerHTML=`<div class="empty">No conversation yet.<br>Investigate first and write together, `
-      +`or have the agent draft the whole post on its own and take over from there.`
-      +`<br><button class="primary" id="kick">Investigate this run</button> `
-      +`<button class="primary" id="draftnow">Draft the full post</button></div>`;
-    $("#kick").onclick=()=>sendCommand("/kickoff");
+    log.innerHTML=(visibleErr?`<div class="errbox">${esc(turnStatus.error||"The last agent turn failed.")}</div>`:"")
+      +`<div class="empty">No writeup yet.<br>`
+      +`Run the automatic pipeline: inventory, compose, review, and polish.`
+      +`<br><button class="primary" id="draftnow">Automatic writeup</button></div>`;
     $("#draftnow").onclick=()=>sendCommand("/draft");
     return;
   }
@@ -1042,6 +1168,8 @@ function renderChat(turns){
   });
   if(running)  // after the turn in flight, before queued msgs
     parts.splice(turns.length,0,typingHtml(turns.length>0&&turns[turns.length-1].role==="assistant"));
+  if(visibleErr)
+    parts.push(`<div class="errbox">${esc(turnStatus.error||"The last agent turn failed.")}</div>`);
   // innerHTML replacement resets every <details>; restore what the user had,
   // and auto-open a NEWLY appeared live block so its stream is visible.
   const known=new Set(), openSet=new Set();
@@ -1124,19 +1252,9 @@ function refreshControls(){
 function autosize(){const t=$("#msg");t.style.height="auto";t.style.height=Math.min(t.scrollHeight,180)+"px";}
 
 // ---- server calls ----
-async function api(url,body,quiet){
-  let r;
-  body={run:selectedRun||undefined,...(body||{})};   // every POST names this window's run
-  if(!quiet)Progress.start();
-  try{
-    r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify(body)});
-  }catch(e){ toast("network error — retry: "+e.message); return null; }
-  finally{ if(!quiet)Progress.done(); }
-  const d=await r.json().catch(()=>({}));
-  if(!r.ok){toast(d.error||"failed");return null;}
-  return d;
-}
+// every POST names this window's run (shared api() injects it via window.apiBody)
+window.apiBody=(b)=>({run:selectedRun||undefined,...(b||{})});
+//__API_JS__
 function send(){
   if(!selected) return;
   const text=$("#msg").value.trim();
@@ -1165,20 +1283,20 @@ const stop=()=>api(API+"/stop",{});   // api() names this window's run
 
 function freshUi(){
   docMtime=-1; lastTurnsKey=""; lastTurns=[]; queue=[]; sending=false; autoOpened.clear();
-  editorDirty=false;
+  editorDirty=false; turnStatus=null;
 }
 async function deleteDraft(){
   if(!selected || running) return;
   if(!confirm("Delete this run's draft, figures, and conversation? This cannot be undone.")) return;
-  if(!await api(API+"/reset")) return;
+  if(!await api(API+"/reset",{})) return;
   freshUi();
   await loadDoc(true);
   renderChat([]);          // back to the investigate / draft choice
   refreshControls();
 }
 async function deleteAllDrafts(){
-  if(!confirm("Delete ALL studio drafts, figures, and conversations — for every run? This cannot be undone.")) return;
-  const r=await api(API+"/reset_all");
+  if(!confirm("Delete ALL studio writeups? This also stops any writeups currently running or queued.")) return;
+  const r=await api(API+"/reset_all",{});
   if(!r) return;
   toast(`deleted ${r.deleted} draft workspace(s)`);
   freshUi();
@@ -1187,27 +1305,39 @@ async function deleteAllDrafts(){
   refreshControls();
   allRuns=[]; loadRuns();   // refresh badges
 }
-async function draftAllMissing(){
-  const d=await api(API+"/draft_all",{dry:true});
+async function runAllWriteups(){
+  const d=await api(API+"/run_all",{dry:true});
   if(!d) return;
-  if(!d.targets.length){ toast("every completed run already has a draft"); return; }
-  if(!confirm(`Start /draft for ${d.targets.length} run(s), in parallel?\n\n${d.targets.join("\n")}\n\nEach one is a full agent turn (investigate the run, write the post).`)) return;
-  const r=await api(API+"/draft_all",{});
+  if(!d.targets.length){ toast("no completed runs are available to write"); return; }
+  if(!confirm(`Run a fresh automatic writeup for all ${d.targets.length} available completed run(s)? This overwrites existing studio writeups and uses real model calls. They run a few at a time in the background, cycling through inventory, compose, review, and polish.\n\n${d.targets.join("\n")}`)) return;
+  const r=await api(API+"/run_all",{});
   if(!r) return;
-  toast(`started ${r.started.length} draft(s) — they run in the background`);
+  toast(`queued ${r.started.length} writeup(s)`);
   allRuns=[]; loadRuns();   // refresh: rows now show “drafting…”
+}
+async function stopAllDrafts(){
+  if(!confirm("Stop all running and queued writeups?")) return;
+  await api(API+"/stop_all",{});
+  toast("stopping writeups…");
+  allRuns=[]; loadRuns();
 }
 
 // ---- run picker ----
 let allRuns=[];   // all runs shown regardless of mode (goal / multi_phase)
 async function loadRuns(){
   if(!allRuns.length){ $("#pickerTabs").innerHTML=""; $("#pickerList").innerHTML='<div class="muted">loading runs…</div>'; }
-  try{ allRuns=(await (await fetch(API+"/runs")).json()).runs||[]; }
-  catch(e){ allRuns=[]; toast("network error: "+e.message); }
+  try{
+    const d=await (await fetch(API+"/runs")).json();
+    allRuns=d.runs||[]; batch=!!d.batch; batchActive=d.active||0; batchQueued=d.queued||0;
+  }catch(e){ allRuns=[]; batch=false; batchActive=0; batchQueued=0; toast("network error: "+e.message); }
   drawRuns();
 }
 let pickerPhase="Completed";   // like the viewer's overview tabs; Completed = openable
 function drawRuns(){
+  $("#stopAllBtn").hidden=!batch;
+  $("#runAllBtn").disabled=batch;
+  $("#batchBanner").innerHTML = batch
+    ? `<div class="banner"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span> Writing all — ${batchActive} running · ${batchQueued} queued <span class="bhint">(click any run to watch)</span></div>` : "";
   const q=$("#pickerSearch").value.toLowerCase();
   const pool=allRuns.filter(r=>r.name.toLowerCase().includes(q));
   const counts={Completed:0,Active:0,Failed:0};
@@ -1229,7 +1359,7 @@ function drawRuns(){
     html+=`<button class="runitem${r.path===selectedRun?' cur':''}${sel?'':' disabled'}" data-path="${esc(r.path)}"`
       +`${sel?'':' disabled title="only finished runs can be opened"'}>`
       +`<span class="rn" title="${esc(r.name)}">${esc(r.name)}</span>`
-      +`<span class="rt">${esc(r.mode||"")}${r.drafting?' · <span class="wbadge">✍ writing…</span>':r.started?" · <b>draft</b>":""}</span></button>`;
+      +`<span class="rt">${esc(r.mode||"")}${r.drafting?' · <span class="status-badge running wbadge">✍ writing…</span>':r.queued?' · <span class="status-badge queued wmini">queued</span>':r.draft_error?' · <span class="status-badge error" title="'+esc(r.draft_error_message||"last writeup turn failed")+'">issue</span>':r.started?' · <span class="status-badge done">writeup</span>':""}</span></button>`;
   }
   list.innerHTML=html;
   list.querySelectorAll(".runitem:not(.disabled)").forEach(b=>b.onclick=()=>chooseRun(b.dataset.path));
@@ -1242,7 +1372,7 @@ async function chooseRun(path){
   applyState(s);
   await loadDoc(true);
   bindStream();
-  // A fresh run shows the empty-state choice: investigate first, or /draft it all.
+  // A fresh run shows the automatic writeup action; /draft runs the full chain.
 }
 
 // ---- state + live stream ----
@@ -1256,6 +1386,7 @@ function applyState(s){
   drawRuns();   // selection highlight in the sidebar
   document.title=selected?("Studio · "+s.run_name):"Blogpost Studio";
   running=!!s.running;
+  turnStatus=s.turn_status||null;
   refreshControls();
   if(!selected){ queue=[]; sending=false; renderChat([]); $("#cost").textContent="";
     preview.innerHTML='<div class="empty">Select a run to begin co-writing.</div>'; editor.value=""; syncHL(); updateMeta(); }
@@ -1269,6 +1400,7 @@ function bindStream(){
     if(d.error){toast(d.error);return;}
     if(!d.selected){ if(selected) applyState({selected:false}); return; }
     const was=running; running=d.running;
+    turnStatus=d.turn_status||null;
     renderChat(d.turns);   // may shift the queue / clear `sending` if our msg was recorded
     if(d.doc && d.doc.mtime!==docMtime) loadDoc(false);
     $("#cost").textContent = d.cost>0.005 ? "$"+d.cost.toFixed(2) : "";
@@ -1303,7 +1435,8 @@ $("#gdocbtn").onclick=async()=>{
   toast(d.warning ? ("Doc ready (note: "+d.warning+")") : "Google Doc ready — click “open Doc ↗”");
 };
 $("#pickerSearch").addEventListener("input",drawRuns);
-$("#draftAllBtn").onclick=draftAllMissing;
+$("#runAllBtn").onclick=runAllWriteups;
+$("#stopAllBtn").onclick=stopAllDrafts;
 $("#delAllBtn").onclick=deleteAllDrafts;
 document.addEventListener("click",e=>{
   if(e.target.tagName==="IMG" && e.target.closest("#preview,#log")){
@@ -1352,6 +1485,7 @@ INDEX_HTML = (
     .replace("/*__PREVIEW_CSS__*/", PREVIEW_CSS)
     .replace("//__RESIZER_JS__", RESIZER_JS)
     .replace("//__PROGRESS_JS__", PROGRESS_JS)
+    .replace("//__API_JS__", API_JS)
     .replace("/*__PROGRESS_CSS__*/", PROGRESS_CSS)
     .replace("/*__RESIZER_CSS__*/", RESIZER_CSS)
     .replace("//__HIGHLIGHT_JS__", HIGHLIGHT_JS)

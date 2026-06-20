@@ -5,7 +5,7 @@ batch author -> reviewer -> fix pipeline). Instead of running the author to
 completion in one shot, a :class:`StudioSession` drives the *same* agent
 primitive one turn at a time, resuming a single ``pi`` session, so a human can
 chat with it on the side and jointly write ``final_writeup.md`` piece by piece
-(or have it write the whole draft in one turn via the ``/draft`` chat command).
+(or have it run the automatic writeup pipeline via the ``/draft`` chat command).
 
 It reuses the audit-agent infrastructure directly:
 
@@ -36,7 +36,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-from src import audit_agent, sandbox
+from src import DEFAULT_MODEL, audit_agent, sandbox
 from src.agent_viewer import parse_session
 from src.runner_utils import parse_env_text
 
@@ -55,12 +55,9 @@ _JINJA = Environment(
     keep_trailing_newline=True,
 )
 
-# Default to Opus 4.6 (same author model as 04_blogpost_gen). This account has
-# no Fable access — the API 404s "Claude Fable 5 is not available. Please use
-# Opus 4.8." Override with --model / BLOGPOST_STUDIO_MODEL.
-DEFAULT_STUDIO_MODEL = os.environ.get(
-    "BLOGPOST_STUDIO_MODEL", "anthropic/claude-opus-4-6"
-)
+# Blog writing is a judgment-heavy synthesis task; default to the shared Claude
+# model unless explicitly overridden.
+DEFAULT_STUDIO_MODEL = os.environ.get("BLOGPOST_STUDIO_MODEL", DEFAULT_MODEL)
 DEFAULT_THINKING = "high"
 
 DOC_NAME = "final_writeup.md"
@@ -76,8 +73,10 @@ def render(template: str, **ctx: object) -> str:
 # full prompt template. Expansion happens server-side, in start_turn, so the
 # session transcript records the real prompt the agent received.
 COMMANDS = {
-    "/draft": "draft.md.j2",  # write the complete post in one turn (the 04 author behavior)
-    "/review": "review.md.j2",  # self-review the finished draft against the instructions
+    "/draft": "draft.md.j2",  # inventory first; chained into /compose below
+    "/compose": "compose.md.j2",  # write the complete post from the inventory
+    "/review": "review.md.j2",  # skeptical self-review + concrete fixes
+    "/polish": "polish.md.j2",  # final anti-slop pass after review
     "/kickoff": "kickoff.md.j2",  # investigate the run, reply "ready"
 }
 
@@ -85,7 +84,9 @@ COMMANDS = {
 # automatically chains the mapped follow-up /command as the next turn. This is
 # how a /draft is always followed by a self-review pass.
 CHAIN_AFTER = {
-    "/draft": "/review",
+    "/draft": "/compose",
+    "/compose": "/review",
+    "/review": "/polish",
 }
 
 
@@ -109,6 +110,7 @@ STUDIO_ROOT = ROOT / "outputs" / "06_blogpost_studio"
 # Where a running turn's json-stream offset is persisted (see start_turn): lets
 # a restarted server re-adopt an in-flight turn's live stream.
 TURN_OFFSET_NAME = "turn.offset"
+TURN_STATUS_NAME = "turn_status.json"
 
 
 def live_sandbox_workspaces() -> set[str]:
@@ -261,6 +263,33 @@ class DocAgentSession:
         self._live_cache = None
         self._alive_cache = None
         (self.work / TURN_OFFSET_NAME).unlink(missing_ok=True)
+        (self.work / TURN_STATUS_NAME).unlink(missing_ok=True)
+
+    def _write_turn_status(self, **data: object) -> None:
+        payload = {"time": time.time(), **data}
+        try:
+            (self.work / TURN_STATUS_NAME).write_text(json.dumps(payload, indent=2))
+        except OSError:
+            pass
+
+    def turn_status(self) -> dict | None:
+        try:
+            status = json.loads((self.work / TURN_STATUS_NAME).read_text())
+        except (OSError, ValueError, TypeError):
+            return None
+        if not isinstance(status, dict):
+            return None
+        running = self.is_running()
+        if status.get("state") == "running" and not running:
+            status = {
+                **status,
+                "state": "unknown",
+                "error": (
+                    "The previous agent turn is no longer running, but this server "
+                    "did not observe its exit. Check the transcript and studio_agent.log."
+                ),
+            }
+        return status
 
     # ------------------------------------------------------------ transcript --
     def transcript(self) -> dict:
@@ -457,6 +486,11 @@ class DocAgentSession:
                 self._turn_log_offset = self._log.stat().st_size
                 # Persisted so a restarted server can re-adopt the live stream.
                 (self.work / TURN_OFFSET_NAME).write_text(str(self._turn_log_offset))
+                self._write_turn_status(
+                    state="running",
+                    message=raw[:240],
+                    started=time.time(),
+                )
                 proc = subprocess.Popen(
                     argv,
                     env=self._env(),
@@ -468,7 +502,18 @@ class DocAgentSession:
                     # transcript, doc, and this json stream all live on disk).
                     start_new_session=True,
                 )
-            except Exception:
+                self._write_turn_status(
+                    state="running",
+                    message=raw[:240],
+                    started=time.time(),
+                    pid=proc.pid,
+                )
+            except Exception as exc:
+                self._write_turn_status(
+                    state="failed",
+                    message=raw[:240],
+                    error=f"failed to start agent turn: {exc}",
+                )
                 log.close()
                 raise
             self._proc = proc
@@ -487,6 +532,19 @@ class DocAgentSession:
                 # killed (stopped) turn leaves nothing to review.
                 chain = self._pending_chain if self._last_rc == 0 else None
                 self._pending_chain = None
+                if self._last_rc == 0:
+                    self._write_turn_status(
+                        state="completed",
+                        rc=self._last_rc,
+                        finished=time.time(),
+                    )
+                else:
+                    self._write_turn_status(
+                        state="failed",
+                        rc=self._last_rc,
+                        finished=time.time(),
+                        error=f"agent turn exited rc={self._last_rc}",
+                    )
             try:
                 log.close()
             except OSError:
@@ -525,6 +583,7 @@ class DocAgentSession:
             "thinking": self.thinking,
             "running": self.is_running(),
             "last_rc": self._last_rc,
+            "turn_status": self.turn_status(),
         }
 
 

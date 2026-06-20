@@ -1535,6 +1535,7 @@ def _spawn_blue_team(rel: str, base: Path) -> dict:
     job = uuid.uuid4().hex[:12]
     jobdir = LENS_DIR / job
     jobdir.mkdir(parents=True, exist_ok=True)
+    stderr_path = jobdir / "stderr.log"
     # Stage RUN_DIR_STRUCTURE.md / TRACE_INDEX.md into the CWD, exactly as the
     # batch experiment does, and run with the same /source-read-only mount.
     audit_agent.stage_reference_docs(jobdir, base)
@@ -1548,19 +1549,24 @@ def _spawn_blue_team(rel: str, base: Path) -> dict:
         jobdir, inner, extra_ro_dest_binds=((str(base), "/source"),)
     )
     try:
-        proc = subprocess.Popen(
-            argv,
-            env=oversight.oversight_env(sandbox.HOME),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
+        errf = stderr_path.open("ab")
+        try:
+            proc = subprocess.Popen(
+                argv,
+                env=oversight.oversight_env(sandbox.HOME),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=errf,
+            )
+        finally:
+            errf.close()
     except OSError as exc:
         return {"error": f"failed to start blue-team agent: {exc}"}
     with _LENS_LOCK:
         _LENS_JOBS[job] = {
             "proc": proc,
             "session": jobdir / "session.jsonl",
+            "stderr": stderr_path,
             "dir": jobdir,
             "run": rel,
             "started": time.time(),
@@ -1572,8 +1578,12 @@ def _spawn_blue_team(rel: str, base: Path) -> dict:
     return {"job": job}
 
 
-def _session_has_findings(session_path: Path) -> bool:
-    """Whether the agent's session contains a non-empty ```json findings block."""
+def _session_has_findings_block(session_path: Path) -> bool:
+    """Whether the agent's session contains a parseable ```json findings block.
+
+    Empty findings still count: the follow-up is the coverage challenge that can
+    turn a too-shallow "nothing found" first pass into a real report.
+    """
     try:
         text = session_path.read_text(errors="replace")
     except OSError:
@@ -1585,27 +1595,23 @@ def _session_has_findings(session_path: Path) -> bool:
         for b in (t.get("blocks") or [])
         if b.get("kind") == "text"
     )
-    for block in reversed(re.findall(r"```json\s*([\s\S]*?)```", joined)):
+    for block in reversed(re.findall(r"```json[ \t]*\n([\s\S]*?)```", joined)):
         try:
             o = json.loads(block)
         except (ValueError, TypeError):
             continue
-        if (
-            isinstance(o, dict)
-            and isinstance(o.get("findings"), list)
-            and o["findings"]
-        ):
+        if isinstance(o, dict) and isinstance(o.get("findings"), list):
             return True
     return False
 
 
 def _blue_team_followup(job: str, base: Path) -> None:
     """After the first pass writes findings, resume the SAME session with a
-    clarity prompt so the findings are understandable to outside researchers.
+    coverage + clarity prompt.
 
     The resumed ``pi --session`` run appends a new turn with a rewritten ```json
     findings block; the persist logic keeps the last valid findings block, so the
-    clarified version becomes the saved report automatically.
+    challenged/clarified version becomes the saved report automatically.
     """
     from src import blue_team
 
@@ -1619,13 +1625,13 @@ def _blue_team_followup(job: str, base: Path) -> None:
             pass
         jobdir = info["dir"]
         session = info["session"]
-        # Only follow up on a clean completion that actually produced findings —
-        # skip cancellations (killed -> negative returncode / cancelled flag) and
-        # empty / errored first passes.
+        # Follow up on a clean completion that produced a parseable findings block,
+        # even if it was empty. The second pass is deliberately a coverage
+        # challenge, not just prose cleanup.
         if (
             not info.get("cancelled")
             and info["proc"].returncode == 0
-            and _session_has_findings(session)
+            and _session_has_findings_block(session)
         ):
             inner = oversight.pi_inner_argv(
                 f"{sandbox.WORKSPACE}/session.jsonl",
@@ -1637,15 +1643,49 @@ def _blue_team_followup(job: str, base: Path) -> None:
                 jobdir, inner, extra_ro_dest_binds=((str(base), "/source"),)
             )
             try:
-                proc2 = subprocess.Popen(
-                    argv,
-                    env=oversight.oversight_env(sandbox.HOME),
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                )
+                stderr_path = info.get("stderr") or (jobdir / "stderr.log")
+                errf = stderr_path.open("ab")
+                try:
+                    proc2 = subprocess.Popen(
+                        argv,
+                        env=oversight.oversight_env(sandbox.HOME),
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=errf,
+                    )
+                finally:
+                    errf.close()
                 with _LENS_LOCK:
                     info["proc"] = proc2
+                proc2.wait()
+                if (
+                    not info.get("cancelled")
+                    and proc2.returncode == 0
+                    and _session_has_findings_block(session)
+                ):
+                    inner3 = oversight.pi_inner_argv(
+                        f"{sandbox.WORKSPACE}/session.jsonl",
+                        BLUE_TEAM_MODEL,
+                        BLUE_TEAM_THINKING,
+                        blue_team.build_skim_rewrite_prompt(),
+                    )
+                    argv3 = sandbox.build_argv(
+                        jobdir, inner3, extra_ro_dest_binds=((str(base), "/source"),)
+                    )
+                    errf = stderr_path.open("ab")
+                    try:
+                        proc3 = subprocess.Popen(
+                            argv3,
+                            env=oversight.oversight_env(sandbox.HOME),
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=errf,
+                        )
+                    finally:
+                        errf.close()
+                    with _LENS_LOCK:
+                        info["proc"] = proc3
+                    proc3.wait()
             except OSError:
                 pass
     finally:
@@ -1715,7 +1755,11 @@ def lens_transcript(job: str) -> dict:
     if not info:
         return {"error": "unknown or expired lens job"}
     proc = info["proc"]
-    running = proc.poll() is None
+    # Stay "running" through the blue-team clarity follow-up: between the first
+    # pass exiting and the second pass's proc being swapped in, proc.poll() is
+    # briefly non-None — without this guard the client would flip to "done",
+    # try to show a not-yet-persisted report, then re-attach, and flicker.
+    running = proc.poll() is None or bool(info.get("followup_pending"))
     text = (
         info["session"].read_text(errors="replace") if info["session"].exists() else ""
     )
@@ -1732,18 +1776,23 @@ def lens_transcript(job: str) -> dict:
         if api_err:
             out["error"] = api_err
         elif rc not in (0, None):
-            err = b""
-            try:
-                err = proc.stderr.read() if proc.stderr else b""
-            except (OSError, ValueError):
-                pass
-            detail = err.decode("utf-8", "replace").strip()[-400:]
+            detail = ""
+            stderr_path = info.get("stderr")
+            if stderr_path:
+                try:
+                    detail = (
+                        Path(stderr_path).read_text(errors="replace").strip()[-400:]
+                    )
+                except OSError:
+                    detail = ""
             if not detail and rc < 0:
                 detail = (
                     f"oversight agent was killed (signal {-rc}); if this recurs "
                     f"under heavy summary fan-out, lower LENS_SUMMARY_CONCURRENCY"
                 )
             out["error"] = detail or f"oversight agent exited rc={rc}"
+        else:
+            out["error"] = "oversight agent exited without writing a transcript"
     return out
 
 
@@ -2162,7 +2211,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             path = parsed.path
-            if path == "/api/launch/options":
+            if path == "/favicon.ico":
+                self._send(204, b"", "image/x-icon")
+            elif path == "/api/launch/options":
                 self._json(launch_options())
             elif path == "/api/project":
                 rel = (parse_qs(parsed.query).get("run") or [""])[0]
@@ -2806,7 +2857,12 @@ function lensRender(body,data){
   if(data.error){body.innerHTML='<div class="lens-thinking" style="color:var(--err)">'+esc(data.error)+'</div>';return;}
   const blocks=(data.turns||[]).flatMap(t=>t.blocks||[]);
   if(!blocks.length){body.innerHTML='<div class="lens-thinking">'+(data.running?'working…':'(no output)')+'</div>';return;}
+  // Blocks are append-only while streaming, so remember which <details> the user
+  // had open (by position) and restore them after the rebuild — otherwise an
+  // expanded tool/thinking block snaps shut on every stream tick.
+  const open=[...body.querySelectorAll("details")].map(d=>d.open);
   body.innerHTML="";body.appendChild(renderBlocks(blocks));
+  body.querySelectorAll("details").forEach((d,i)=>{ if(open[i]) d.open=true; });
 }
 function lensStreamJob(job,body,workingMsg,onDone){
   const owner=state.lensRun;   // the run this job belongs to (chat may be switched away mid-flight)
@@ -3332,7 +3388,7 @@ async function launchRun(p,m){
       body:JSON.stringify({proposal:p,mode:m})});
     d=await r.json();
   }catch(e){toast("launch failed: "+e.message);return;}
-  if(!r.ok){toast(d.error||"launch failed");return;}
+  if(!r.ok||(d&&d.error)){toast((d&&d.error)||"launch failed");return;}
   document.getElementById("launcher").hidden=true;
   toast(`Launched in tmux session ${d.session} — it appears under Active once it starts writing`);
   showOverview();
@@ -3379,7 +3435,7 @@ async function ppPost(url,body,confirmMsg){
     r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     d=await r.json();
   }catch(e){toast("failed: "+e.message);return null;}
-  if(!r.ok){toast(d.error||"failed");return null;}
+  if(!r.ok||(d&&d.error)){toast((d&&d.error)||"failed");return null;}
   return d;
 }
 const ppContinued=new Set();

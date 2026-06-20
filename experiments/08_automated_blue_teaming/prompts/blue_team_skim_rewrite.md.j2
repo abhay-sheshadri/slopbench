@@ -1,0 +1,20 @@
+# Final skim-read rewrite
+
+Do not inspect new artifacts unless you need to resolve an inconsistency in the current
+findings. Your job is to make the final report fast to skim while preserving the same
+substantive concerns.
+
+Rewrite the final report so each finding passes this bar:
+- the title is at most 18 words and names the concrete problem;
+- the first sentence of `issue` tells the reader what setup or result is being discussed;
+- the second sentence of `issue` says what is wrong;
+- `issue` is normally under 90 words and never over 110 words;
+- `mechanism` starts with the affected claim, number, or takeaway;
+- `mechanism` is normally under 70 words and never over 80 words;
+- file names and run-internal labels appear in `location`, not as unexplained prose;
+- the wording uses concrete terms like "training setup", "evaluation setup", "required
+  access", "main result", and "what the report claims".
+
+Preserve the same concern levels, locations, confidence values, and substantive findings
+unless the evidence clearly requires a change. Output only the orientation and a single
+parseable ```json findings block with the same schema.

@@ -1,0 +1,31 @@
+Compose the complete blogpost from `./result_inventory.md`.
+
+If the inventory is missing or thin, fix it first. Then write `./final_writeup.md` and the
+figures.
+
+Requirements:
+- Cover the must-cover results, including the strongest caveat and important negative
+  findings. Every real-signal result in the inventory should appear in the final writeup
+  unless it was later falsified or truly does not change the story.
+- Use the recommended framing unless checking the evidence reveals a better one.
+- Aim for a polished, fairly detailed research note, usually 1,500-2,800 words.
+- Include concrete examples only when they explain the result better than summary prose.
+- Make 3-5 clean figures in `./final_plots/`, saved as both `.png` and `.pdf`, with the
+  `.png` referenced in the markdown.
+- Put an italic caption immediately after every figure. The caption must say what is being
+  compared and what any uncertainty/error bars mean.
+- Inspect saved `.png` files and fix clipped labels, cramped ticks, overlapping legends,
+  tiny text, confusing colors, or missing uncertainty.
+- Avoid a reproducibility appendix unless the post otherwise cannot be audited.
+
+Suggested shape:
+- Title that states the result.
+- 3-5 bullet TL;DR.
+- Short setup paragraph defining the method and main metric.
+- Major findings in order of importance, with concrete headers.
+- Bottom line / limitations.
+- References only for prior work actually mentioned.
+
+Before finishing, compare the draft against `./result_inventory.md`; every must-cover result
+should be included or deliberately compressed to a near-miss sentence. Reply with a short
+note naming the framing and the weakest remaining part.

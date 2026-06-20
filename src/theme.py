@@ -147,6 +147,16 @@ aside.side{width:300px;flex:0 0 auto;background:var(--panel);border-right:1px so
   border:1px solid var(--border);border-radius:7px;padding:6px 9px;font:12.5px var(--sans);outline:none}
 .sidesearch:focus{border-color:var(--accent)}
 .sidelist{flex:1;overflow:auto;display:flex;flex-direction:column;gap:1px;padding:4px 8px}
+.banner{margin:6px 10px;padding:7px 10px;border-radius:8px;background:rgba(224,175,104,.12);
+  border:1px solid rgba(224,175,104,.4);color:var(--warn);font-size:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.banner .bhint{color:var(--faint);font-weight:400}
+.status-badge{font-size:10.5px;font-family:var(--mono);display:inline-flex;align-items:center;gap:4px;
+  color:var(--muted);font-weight:600;white-space:nowrap}
+.status-badge.running{color:var(--accent)}
+.status-badge.running .tdot{background:currentColor}
+.status-badge.queued{color:var(--warn)}
+.status-badge.done{color:var(--ok)}
+.status-badge.error{color:var(--err)}
 .toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--panel3);
   color:var(--fg);border:1px solid var(--border);padding:8px 14px;border-radius:8px;opacity:0;
   transition:opacity .2s;pointer-events:none;z-index:9999;font-size:13px}
@@ -265,10 +275,40 @@ function makeResizer(handle, target, key, opts){
     localStorage.setItem(key,parseInt(target.style.width,10)||""); });
 }"""
 
+# Shared fetch helper for the web tabs (studio, proposals, blue team). One
+# definition replaces the three near-identical copies that had drifted apart.
+# Insert via the //__API_JS__ token. Requires toast() (APP_JS); uses Progress
+# (PROGRESS_JS) if present. Behavior:
+#   - body === undefined -> GET; otherwise POST with a JSON body.
+#   - a page may define window.apiBody(body) to inject per-tab fields (e.g. the
+#     selected run/name) into every POST body.
+#   - errors are surfaced for user actions (non-quiet): a non-2xx response OR a
+#     2xx whose JSON carries {error} toasts the message and returns null, so a
+#     failed action never looks like a silent success. Quiet background polls get
+#     the raw object back and handle errors themselves.
+API_JS = """// ---- shared fetch helper (theme.API_JS) ----
+async function api(url, body, quiet){
+  let r;
+  if(!quiet && window.Progress) Progress.start();
+  try{
+    let init = {};
+    if(body !== undefined){
+      const b = (window.apiBody ? window.apiBody(body) : body) || {};
+      init = {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(b)};
+    }
+    r = await fetch(url, init);
+  }catch(e){ toast("network error: "+e.message); return null; }
+  finally{ if(!quiet && window.Progress) Progress.done(); }
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok || (!quiet && d && d.error)){ toast((d&&d.error)||"failed"); return null; }
+  return d;
+}"""
+
 __all__ = [
     "PALETTE_CSS",
     "CONTROLS_CSS",
     "APP_JS",
+    "API_JS",
     "CHAT_CSS",
     "TRANSCRIPT_JS",
     "EDITOR_CSS",

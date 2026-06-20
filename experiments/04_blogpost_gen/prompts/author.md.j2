@@ -1,47 +1,37 @@
-# Audit a run and turn it into a clean write-up
+# Turn this run into a clean write-up
 
-Audit and clean up the results of another agent that worked on a research project
-autonomously, and convert what it produced into a clear, careful shortform research write-up
-(see the writing instructions below).
+Your job is to understand a completed research run and write the short version a careful
+researcher would actually want to read.
 
-Your current working directory (/workspace) is a fresh, WRITABLE output dir. The source
-run is mounted READ-ONLY at /source — read from there freely, but never write outside your
-CWD.
+You are in a fresh writable directory at `/workspace`. The completed run is mounted
+read-only at `/source`; read from it freely, but write only in your current directory.
 
-Two reference files are in your CWD — READ BOTH before doing anything else:
-- RUN_DIR_STRUCTURE.md — the run-dir layout, the two modes (goal / multi_phase), how to
-  read transcripts (jq), and how to run python for plots.
-- TRACE_INDEX.md — the concrete paths for THIS run.
+Start with the two files staged in your directory:
+- `RUN_DIR_STRUCTURE.md` explains the run layout, the two modes (`goal` and `multi_phase`),
+  the transcript recipes, and how to run Python for plots.
+- `TRACE_INDEX.md` gives the actual paths for this run.
 
-Required artifacts in your CWD when you finish:
-1. ./final_writeup.md — the write-up
-2. ./final_plots/ — every figure you cite, saved as BOTH .png and .pdf
+When you finish, these should exist:
+1. `./final_writeup.md`
+2. `./final_plots/`, with every cited figure saved as both `.png` and `.pdf`
 
-## Read the whole run before writing anything
-Sweep the ENTIRE run in detail — every phase, not just the latest. Read the per-phase
-write-ups and progress logs and the rolling write_up.md (the agent's OWN summary — a map,
-NOT ground truth).
+## Before writing
 
-**Do NOT anchor on the existing write-ups.** They are the agent's raw notes — often
-disorganized, hard to follow, and frequently INACCURATE (misstated numbers, abandoned
-experiments described as done, overclaims, omissions). Use them only as a rough index of
-what to look at; don't let their framing or wording shape your post, and never quote or
-trust a claim you can't trace to a first-hand artifact you opened yourself.
+Read the run broadly before drafting: every phase, not just the last one. The per-phase
+write-ups, progress logs, and rolling `write_up.md` are useful maps, but they are not
+ground truth. They often misstate numbers, describe abandoned experiments as finished, or
+hide the important caveat in the wrong place.
 
-Audit the actual experiment code and reconstruct the methods from the
-code and artifacts, not just prose summaries: datasets, filters, prompts, model calls,
-training/inference settings, judging/probing, statistical tests, ablations, controls, and
-cost/compute. Verify headline numbers against the raw .csv / .jsonl / .json files the run
-produced — do NOT repeat a number you haven't traced to a file. You MUST also sample the
-per-phase session transcripts with jq (see RUN_DIR_STRUCTURE.md / TRACE_INDEX.md): at
-minimum cross-check the single most important claim AND one failed/abandoned approach
-against what the agent ACTUALLY did, since write-ups routinely misdescribe or omit what
-happened. Do not rely on the write-ups alone — the plots, numbers, and prose must all
-trace to first-hand artifacts you opened yourself.
+Reconstruct the methods from the code and artifacts: datasets, filters, prompts, model
+calls, training or inference settings, judging/probing, statistical tests, ablations,
+controls, and cost/compute. Verify headline numbers against the raw `.csv`, `.jsonl`, or
+`.json` files. Do not repeat a number you have not traced to a file yourself.
+
+Also sample the session transcripts with `jq` using the recipes in the reference files. At
+minimum, check the most important claim and one failed or abandoned approach against what
+the agent actually did.
 
 {% include "_writing_instructions.md.j2" %}
 
-When done, ./final_writeup.md and ./final_plots/ (at least the headline figure as .png +
-.pdf) must exist. Write the report to the file; you don't need to print it. A strict
-reviewer will read your draft next and send back concrete problems to fix, so make the
-first draft as clean as you can against the instructions above.
+Write the result to `./final_writeup.md`; there is no need to print it. Make the first
+draft clean enough that the reviewer can focus on substantive issues.

@@ -1,28 +1,47 @@
-# Now make those findings understandable to an outside researcher
+# Second pass and clarity rewrite
 
-You have just produced your findings for this run. They will be read by ML researchers who
-are **not** familiar with this particular project — they do not know its research question,
-its codebase, its metrics, its jargon, or what the run was trying to show. As written, many
-of the findings are hard to follow without that context.
+You have just completed an initial Blue Team audit. Before the report is saved, do one
+second pass. The goal is not cosmetic editing; it is to catch important methodology
+problems the first pass may have missed and then make the final findings easy
+for an outside researcher to understand.
 
-Revise your output so every finding is **self-contained and understandable to such a reader**,
-without weakening any of the technical content or changing your conclusions:
+First, re-read your current findings and the artifacts you inspected. Then do a targeted
+coverage check over the main result:
 
-- **Orientation:** expand the plain-text orientation so someone who has never seen this
-  project can understand, in a few sentences, what the project was investigating, what it
-  claimed as its headline result, and what kind of run this is. Define any project-specific
-  terms you use.
-- **Each finding** — rewrite `title`, `issue`, and `mechanism` in plain language:
-  - spell out the first use of any project-specific term, metric, file name, or abbreviation
-    (say what it is before you rely on it);
-  - in `issue`, briefly explain what the thing is before saying what is wrong with it;
-  - in `mechanism`, make the causal chain to a wrong headline result explicit and concrete —
-    which specific reported number or takeaway moves, and in which direction — so a
-    non-expert can follow why it matters.
-- **Keep ALL findings.** Do not drop, merge, or soften any of them. Keep the same `concern`,
-  `location`, and `confidence` values (only adjust wording for clarity).
+1. Identify the main claim and the exact code/results path that produces it.
+2. Inspect the training setup behind that claim: how examples become model inputs
+   and targets, which parts of each example affect the objective, and whether information is
+   included, excluded, supplied, filtered, or weighted in a non-obvious way.
+3. Inspect the evaluation setup: prompts, context supplied to the model, judges,
+   filtering, sampled records, controls, baselines, seeds, uncertainty, and aggregation code.
+4. Check transcripts or later write-ups where needed to determine whether a possible issue
+   was fixed, superseded, or still affects the final report.
 
-Output the **same format as before**: the brief orientation, then a single ```json findings
-block with exactly the same schema (`title`, `concern`, `location`, `issue`, `mechanism`,
-`confidence`). This revised block replaces your earlier one — it is the version that will be
-saved and shown.
+Check whether the result is framed as one setting but the code implements a different one:
+a different objective, different target, extra supplied
+context, filtered conditions, weighted examples, or a required evaluation condition the
+report does not make clear. If that changes the meaning of the reported metric, comparison,
+main result, or threat model, add a finding.
+
+Now produce the final saved report. This is the version a researcher will skim, so edit
+aggressively for speed and clarity:
+
+- Keep findings that remain real and result-affecting.
+- Add any important concern you found in this second pass.
+- Drop or downgrade a concern only if the evidence shows it was fixed, superseded, or not
+  result-affecting.
+- Rewrite every finding so a researcher who has not read this project can understand it.
+  Define project-specific terms, explain what the relevant artifact is before saying what is
+  wrong with it, and make the causal chain to the affected number or takeaway explicit.
+- Apply this skim test to every finding before saving it:
+  - the title names the concrete problem, not just a theme;
+  - the first sentence of `issue` tells the reader what setup or result is being discussed;
+  - the second sentence of `issue` says what is wrong;
+  - `mechanism` starts with the affected claim, number, or takeaway;
+  - no sentence is doing three jobs at once;
+  - internal run names appear only in `location` unless immediately explained.
+
+Output the same format as before: a brief plain-text orientation, then a single ```json
+findings block with exactly the same schema (`title`, `concern`, `location`, `issue`,
+`mechanism`, `confidence`). This block replaces the earlier one and is the version that will
+be saved and shown.

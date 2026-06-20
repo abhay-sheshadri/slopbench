@@ -1,32 +1,43 @@
-Produce a COMPLETE draft of the post in this single turn, end to end, the way the batch
-blogpost pipeline would — this is the explicit exception to the usual one-piece-at-a-time
-rule. I'll take over and edit once you're done.
+Start the automatic draft by making an evidence inventory. Do not write the post yet; the
+next chained turn will compose from this file.
 
-Ground rules for this turn:
-- If you have NOT already investigated this run in this conversation, do that first, in
-  detail: sweep EVERY phase, not just the latest. Read the per-phase write-ups, progress
-  logs, and the rolling write_up.md (the agent's OWN summary — a map, NOT ground truth);
-  audit the actual experiment code and reconstruct the methods from code and artifacts,
-  not prose. Verify headline numbers against the raw .csv/.jsonl/.json result files, and
-  sample the per-phase session transcripts with jq (see RUN_DIR_STRUCTURE.md /
-  TRACE_INDEX.md): at minimum cross-check the single most important claim AND one
-  failed/abandoned approach against what the agent ACTUALLY did.
-- If you HAVE already investigated the run here, rely on that understanding — but either
-  way, do NOT put a number in the draft you haven't traced to a file you opened yourself.
-- If ./final_writeup.md already has content, treat it as the current draft: keep whatever
-  holds up against the writing standards, rewrite or cut the rest. Otherwise start fresh.
-- Before writing, inventory the run's well-tested results (not just the headline) and
-  decide deliberately what's in and what's out; results that nearly made the cut get one
-  pointer sentence. For each claim you do include, convey how strongly it's supported
-  (scale, repeats, whether later phases revisited it) so the reader can tell a replicated
-  effect from a single probe.
-- When a result is about model behavior or reasoning, pull one or two SHORT verbatim
-  excerpts from the transcripts that show WHY (e.g. the monitor's reasoning as it
-  declines to collude), and mark them as illustrative examples.
-- Write the complete post against the writing standards you were given (a short research
-  note; lead with the simplest true framing), and produce every figure you cite in
-  ./final_plots/ as BOTH .png and .pdf.
+Write `./result_inventory.md`.
 
-Work through all of it without stopping for my input. When you finish, reply in chat with
-a SHORT note only: the headline framing you chose, and anything you were unsure about or
-want me to look at first — I'll edit from there.
+Read the run broadly, but trust artifacts over prose summaries:
+- Read `RUN_DIR_STRUCTURE.md`, `TRACE_INDEX.md`, `/source/proposal.md` if present, and the
+  latest rolling `write_up.md`.
+- Sweep per-phase write-ups/progress logs for major successes, failures, ablations,
+  benchmarks, caveats, and validated negative results.
+- Separate results that still provide real signal from results later found erroneous,
+  misleading, or superseded. Do not center falsified results, but record them as traps if a
+  later reader might otherwise repeat them.
+- For important claims, open the code and raw `.json`, `.jsonl`, `.csv`, or `.md` analysis
+  files that produced the number.
+- Sample at least one transcript/output for the main behavioral result and one for a failed
+  or bounded result.
+
+`result_inventory.md` should contain:
+
+1. `Recommended framing`
+   - The simplest true headline, plus 1-2 alternatives you rejected.
+
+2. `Must-cover results`
+   - A table: result, exact numbers, evidence strength, source files opened, figure yes/no.
+   - Include every result that provides real signal and was not later falsified. Include
+     bounded/negative results, not just wins.
+
+3. `Methods that matter`
+   - Models, training/eval setup, datasets, graders, controls, sample sizes, uncertainty,
+     costs, and benchmark caveats that affect interpretation.
+
+4. `Concrete examples`
+   - 1-3 short examples or quotes worth using, with source paths.
+
+5. `Figure plan`
+   - 3-5 figures max: claim, source data, axes/series, uncertainty, visual pitfalls.
+
+6. `Near-misses and traps`
+   - Results to mention briefly, failed approaches, jargon to avoid, overclaims to avoid,
+     and places where old write-ups are misleading.
+
+When done, reply in chat with one sentence naming the recommended framing.

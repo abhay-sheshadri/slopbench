@@ -37,14 +37,16 @@ PLANNER_FINAL_RESPONSE = (
     "RUBRIC_SEGMENT_0_PHASE_0.md have been written and reviewed."
 )
 
-PLANNER_GUIDANCE = """# Planner Guidance
+PLANNER_GUIDANCE = """# Planner guidance
 
-Create and maintain a concrete execution plan for the task.
+Create a concrete execution plan for the project.
 
 Required files:
 - OVERALL_PLAN.md: high-level approach, risks, sequencing, and acceptance criteria.
-- INSTRUCTIONS_SEGMENT_0_PHASE_0.md: instructions for the first executable phase. It must start with YAML frontmatter:
-- RUBRIC_SEGMENT_0_PHASE_0.md: concrete success criteria, required checks, likely failure modes, and conditions that should block reviewer approval for the first phase.
+- INSTRUCTIONS_SEGMENT_0_PHASE_0.md: instructions for the first executable phase. Start it
+  with this YAML frontmatter:
+- RUBRIC_SEGMENT_0_PHASE_0.md: success criteria, required checks, likely failure modes, and
+  conditions that should block reviewer approval for the first phase.
 
 ---
 name: "short_underscore_name"
@@ -56,14 +58,19 @@ description: "One or two sentence description of this phase"
 ...
 
 Planning guidance:
-- Write the required files under the local `planner/` directory. Do not only describe the plan in chat.
-- Before finishing, inspect the files you wrote and make sure all three required files exist and are non-empty.
-- Break the work into reasonably self-contained segments. Prefer more focused segments when one segment would mix distinct objectives, require a long-running context, or combine weakly related work.
-- Make phase instructions detailed enough for a fresh agent to complete the phase autonomously. Include the motivation, objective, relevant constraints, acceptance criteria, and important context from the original task.
-- Keep instructions self-contained. Workers receive the current phase instructions and OVERALL_PLAN.md; they should not need to read prior instruction files.
-- Do not make the first phase too small, but avoid "do everything" phases that are likely to produce shallow work.
-- If useful skills should be used for a phase, mention them in that phase's instructions.
-- You are only planning and decomposing the work. Do not start implementing the task.
+- Write the files under the local `planner/` directory. Do not leave the plan only in chat.
+- Before finishing, inspect the files and make sure all three exist and are non-empty.
+- Break the work into self-contained segments. Use narrower segments when one segment would
+  mix distinct objectives, need a long context, or combine weakly related work.
+- Make phase instructions detailed enough for a fresh agent to complete the phase
+  autonomously: motivation, objective, constraints, acceptance criteria, and relevant context
+  from the original task.
+- Keep instructions self-contained. Workers receive the current phase instructions and
+  OVERALL_PLAN.md; they should not need prior instruction files.
+- Make the first phase substantial enough to create real progress, but not so broad that it
+  becomes shallow.
+- Mention any useful skills in the relevant phase instructions.
+- This turn is only for planning. Do not start implementation.
 
 When the plan and first phase are complete, end with this exact string:
 I have completed the plan. OVERALL_PLAN.md, INSTRUCTIONS_SEGMENT_0_PHASE_0.md, and RUBRIC_SEGMENT_0_PHASE_0.md have been written and reviewed.
@@ -114,12 +121,11 @@ def planner_dir_complete(work_dir: Path) -> bool:
 def build_initial_instructions(project_name: str, project_text: str) -> str:
     return f"""# Initial Instructions
 
-You are planning an autonomous research project from the project idea below.
+You are planning an autonomous research project from the idea below.
 
-Create a concrete execution plan for an autonomous worker agent. The
-plan should decompose the project into useful segments/phases, identify risks
-and likely failure modes, and produce a strong first phase that starts making
-real progress without trying to complete the entire project shallowly.
+Create a concrete execution plan for a worker agent. Decompose the project into useful
+segments/phases, identify risks and likely failure modes, and write a strong first phase
+that makes real progress without trying to do the whole project shallowly.
 
 You are running from the attempt work directory. Write the planner outputs to
 the relative paths `planner/OVERALL_PLAN.md`,

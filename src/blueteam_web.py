@@ -10,7 +10,7 @@ Like the studio, this also persists and manages audits:
   - every audit is SAVED to ``outputs/08_automated_blue_teaming/<run>/`` the same way
     the blogpost agent saves (``blue_team_report.md`` + ``blue_team_agent_session.jsonl``),
     written by a background daemon so it persists even if you close the tab;
-  - **Run all** kicks off ``run_all.sh`` over every completed run;
+  - **Run all** queues streamable per-run audits over every completed run;
   - **Delete** / **Delete all** remove saved audits.
 
 No server of its own: :func:`handle` is called by the viewer's request handler.
@@ -18,7 +18,6 @@ No server of its own: :func:`handle` is called by the viewer's request handler.
 
 from __future__ import annotations
 
-import collections
 import json
 import os
 import re
@@ -26,10 +25,12 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs
 
 from src import agent_viewer as av
+from src import web_common
 from src.theme import (
+    API_JS,
     APP_JS,
     CHAT_CSS,
     CONTROLS_CSS,
@@ -43,12 +44,18 @@ PREFIX = "/blueteam"
 BT_DIR = av.OUTPUTS_DIR / "08_automated_blue_teaming"
 REPORT = "blue_team_report.md"
 SESSION_OUT = "blue_team_agent_session.jsonl"
+ERROR = "blue_team_error.txt"
+STDERR_OUT = "blue_team_stderr.log"
+LAST_GOOD_REPORT = "last_good_blue_team_report.md"
+LAST_GOOD_SESSION = "last_good_blue_team_agent_session.jsonl"
 LEVELS = ["critical", "high", "medium", "low"]
 # Run all = enqueue the SAME streamable per-run jobs (not a separate run_all.sh),
 # so every audit in a batch streams + persists + re-attaches like a single one.
-BATCH_CAP = max(1, int(os.environ.get("BLUE_TEAM_BATCH_CONCURRENCY", "10")))
-_QUEUE: "collections.deque[str]" = collections.deque()  # rels waiting (batch)
-_BATCH_SET: set[str] = set()  # rels belonging to the current batch
+BATCH_CAP = max(1, int(os.environ.get("BLUE_TEAM_BATCH_CONCURRENCY", "5")))
+RECOVER_ORPHANS = os.environ.get("BLUE_TEAM_RECOVER_ORPHANS") == "1"
+FAILURE_QUIET_SECONDS = max(
+    30, int(os.environ.get("BLUE_TEAM_FAILURE_QUIET_SECONDS", "180"))
+)
 
 _LOCK = threading.Lock()
 _JOBS: dict[str, str] = {}  # every live audit (single or batch): job -> run rel
@@ -56,6 +63,7 @@ _PERSISTED: set[str] = set()
 _PERSIST_TRIES: dict[str, int] = (
     {}
 )  # job -> persist attempts (session file can lag exit)
+_RECOVERED_LENS: set[str] = set()
 
 
 def _name(rel: str) -> str:
@@ -70,7 +78,7 @@ def _saved_dir(rel: str) -> Path:
 # Parsing saved reports / transcripts into concern-labelled findings
 # --------------------------------------------------------------------------- #
 def _findings_from_text(text: str):
-    for b in reversed(re.findall(r"```json\s*([\s\S]*?)```", text or "")):
+    for b in reversed(re.findall(r"```json[ \t]*\n([\s\S]*?)```", text or "")):
         try:
             o = json.loads(b)
             if isinstance(o, dict) and isinstance(o.get("findings"), list):
@@ -96,7 +104,15 @@ def _worst(findings) -> str | None:
 def saved_summary(rel: str) -> dict | None:
     p = _saved_dir(rel) / REPORT
     if not p.exists():
-        return None
+        e = _saved_dir(rel) / ERROR
+        if not e.exists():
+            return None
+        msg = e.read_text(errors="replace").strip()
+        return {
+            "error": True,
+            "message": msg[:240],
+            "mtime": e.stat().st_mtime,
+        }
     f = _findings_from_text(p.read_text(errors="replace")) or []
     return {"count": len(f), "worst": _worst(f), "mtime": p.stat().st_mtime}
 
@@ -104,7 +120,15 @@ def saved_summary(rel: str) -> dict | None:
 def saved_full(rel: str) -> dict:
     p = _saved_dir(rel) / REPORT
     if not p.exists():
-        return {"exists": False}
+        e = _saved_dir(rel) / ERROR
+        if not e.exists():
+            return {"exists": False}
+        return {
+            "exists": True,
+            "error": e.read_text(errors="replace").strip(),
+            "findings": [],
+            "mtime": e.stat().st_mtime,
+        }
     t = p.read_text(errors="replace")
     return {
         "exists": True,
@@ -146,9 +170,108 @@ def _report_text(turns) -> str:
     """
     for t in reversed(turns):
         ttext = _turn_text(t)
-        if "```json" in ttext and _findings_from_text(ttext):
+        if "```json" in ttext and _findings_from_text(ttext) is not None:
             return ttext
     return "\n".join(_turn_text(t) for t in turns)
+
+
+def _failure_detail(info: dict, data: dict) -> str:
+    if data.get("error"):
+        return str(data["error"]).strip()
+    proc = info.get("proc")
+    rc = getattr(proc, "returncode", None)
+    stderr_path = info.get("stderr")
+    if stderr_path:
+        try:
+            detail = Path(stderr_path).read_text(errors="replace").strip()
+            if detail:
+                return detail[-4000:]
+        except OSError:
+            pass
+    if rc not in (0, None):
+        return f"blue-team agent exited before producing findings (rc={rc})"
+    return "blue-team agent exited before producing a parseable findings block"
+
+
+def _backup_success(rel: str) -> None:
+    out = _saved_dir(rel)
+    report = out / REPORT
+    session = out / SESSION_OUT
+    if report.exists():
+        shutil.copyfile(report, out / LAST_GOOD_REPORT)
+    if session.exists():
+        shutil.copyfile(session, out / LAST_GOOD_SESSION)
+
+
+def _restore_success_backup(rel: str) -> bool:
+    out = _saved_dir(rel)
+    backup = out / LAST_GOOD_REPORT
+    if not backup.exists():
+        return False
+    shutil.copyfile(backup, out / REPORT)
+    bsession = out / LAST_GOOD_SESSION
+    if bsession.exists():
+        shutil.copyfile(bsession, out / SESSION_OUT)
+    return True
+
+
+def _save_failure(job: str, rel: str, info: dict, detail: str) -> None:
+    out = _saved_dir(rel)
+    out.mkdir(parents=True, exist_ok=True)
+    if not (out / REPORT).exists() and _restore_success_backup(rel):
+        failed_session = out / f"failed_{job}_session.jsonl"
+    else:
+        failed_session = (
+            out / f"failed_{job}_session.jsonl"
+            if (out / REPORT).exists()
+            else out / SESSION_OUT
+        )
+    (out / ERROR).write_text((detail or "blue-team audit failed").strip() + "\n")
+    # If this was a failed re-run, keep the last successful report/session visible
+    # and auditable. A failed fresh run (no REPORT yet) still gets its partial
+    # session so the user can inspect what happened.
+    sess = info.get("session")
+    if sess and Path(sess).exists():
+        shutil.copyfile(sess, failed_session)
+    stderr_path = info.get("stderr")
+    if stderr_path and Path(stderr_path).exists():
+        shutil.copyfile(stderr_path, out / STDERR_OUT)
+
+
+def _finish_job(job: str, rel: str | None = None) -> None:
+    _PERSISTED.add(job)
+    _PERSIST_TRIES.pop(job, None)
+    if rel:
+        _BATCH.discard(rel)
+    with _LOCK:
+        _JOBS.pop(job, None)
+
+
+def _session_recently_changed(info: dict) -> bool:
+    session = info.get("session")
+    if not session:
+        return False
+    try:
+        return time.time() - Path(session).stat().st_mtime < FAILURE_QUIET_SECONDS
+    except OSError:
+        return False
+
+
+def _job_process_alive(job: str) -> bool:
+    needle = str(av.LENS_DIR / job).encode()
+    proc_root = Path("/proc")
+    try:
+        pids = [p for p in proc_root.iterdir() if p.name.isdigit()]
+    except OSError:
+        return False
+    for p in pids:
+        try:
+            cmdline = (p / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if needle in cmdline:
+            return True
+    return False
 
 
 def _persist(job: str, rel: str) -> None:
@@ -157,32 +280,118 @@ def _persist(job: str, rel: str) -> None:
     info = av._LENS_JOBS.get(job)
     if info is None or info["proc"].poll() is None:
         return  # gone or still running
+    if _job_process_alive(job):
+        return  # wrapper status lied; sandbox child is still alive
     if info.get("followup_pending"):
         return  # first pass done; clarity follow-up not started/finished yet
+    if info.get("cancelled"):
+        _finish_job(job, rel)
+        return
+
     try:
-        turns = av.lens_transcript(job).get("turns", [])
+        data = av.lens_transcript(job)
+        turns = data.get("turns", [])
         report = _report_text(turns)
-        # The session jsonl can lag a beat behind process exit. If the transcript
-        # is still empty, leave the job unpersisted so the daemon retries instead
-        # of freezing an empty "(no findings produced)" report (and losing real
-        # findings to a race). Give up after a few ticks for genuinely-empty runs.
-        if not report.strip():
+        # Only a COMPLETED audit counts as a real result — one that emitted a
+        # ```json findings``` block (even an EMPTY one is fine: "explored, found
+        # nothing"). No findings block means the agent was killed / crashed /
+        # errored / interrupted before finishing; do NOT freeze that as a clean
+        # "no problems found" report. Retry a few ticks (the session jsonl can
+        # lag process exit), then save an explicit failure artifact rather than a
+        # misleading "no problems found" report.
+        if _findings_from_text(report) is None:
             n = _PERSIST_TRIES.get(job, 0) + 1
             _PERSIST_TRIES[job] = n
-            if n < 6:
+            # Some pi/bwrap wrapper processes can report a killed/nonzero status
+            # while the sandboxed child is still appending useful transcript text.
+            # Do not freeze a failed audit until the transcript has gone quiet.
+            if n < 6 or _session_recently_changed(info):
                 return
+            _save_failure(job, rel, info, _failure_detail(info, data))
+            _finish_job(job, rel)
+            return
         out = _saved_dir(rel)
         out.mkdir(parents=True, exist_ok=True)
-        (out / REPORT).write_text(report or "(no findings produced)")
+        (out / ERROR).unlink(missing_ok=True)
+        (out / STDERR_OUT).unlink(missing_ok=True)
+        (out / REPORT).write_text(report)
         sess = info["session"]
         if sess.exists():
             shutil.copyfile(sess, out / SESSION_OUT)
+        _backup_success(rel)
     except Exception:
         pass
-    _PERSISTED.add(job)
-    _PERSIST_TRIES.pop(job, None)
-    with _LOCK:
-        _JOBS.pop(job, None)
+    _finish_job(job, rel)
+
+
+def _lens_run_name(jobdir: Path) -> str | None:
+    try:
+        first = (jobdir / "TRACE_INDEX.md").read_text(errors="replace").splitlines()[0]
+    except (IndexError, OSError):
+        return None
+    m = re.match(r"# Trace index for (.+)", first.strip())
+    return m.group(1) if m else None
+
+
+def _recover_orphaned_lens_audits(run_items: list[dict]) -> None:
+    """Recover completed Blue Team sessions that lost their in-memory job record.
+
+    The server is the only owner of _JOBS. If it is restarted, or if an older code
+    path dropped a finished job before saving, a valid session can remain in
+    outputs/.lens/<job>/ with no report under outputs/08_automated_blue_teaming/.
+    This is opt-in because delete-all/manual clears must be authoritative: stale
+    .lens sessions should not resurrect saved audits the user intentionally
+    removed.
+    """
+    if not RECOVER_ORPHANS or not av.LENS_DIR.exists():
+        return
+    try:
+        recovery_cutoff = BT_DIR.stat().st_mtime
+    except OSError:
+        recovery_cutoff = 0.0
+    name_to_rel = {
+        r.get("name"): r.get("path")
+        for r in run_items
+        if r.get("name") and r.get("path")
+    }
+    active = set(_JOBS)
+    for jobdir in av.LENS_DIR.iterdir():
+        if (
+            not jobdir.is_dir()
+            or jobdir.name in active
+            or jobdir.name in _RECOVERED_LENS
+        ):
+            continue
+        _RECOVERED_LENS.add(jobdir.name)
+        rel = name_to_rel.get(_lens_run_name(jobdir) or "")
+        if (
+            not rel
+            or (_saved_dir(rel) / REPORT).exists()
+            or (_saved_dir(rel) / ERROR).exists()
+        ):
+            continue
+        session = jobdir / "session.jsonl"
+        if not session.exists():
+            continue
+        if session.stat().st_mtime < recovery_cutoff:
+            continue
+        turns = [
+            t
+            for t in av.parse_session(session.read_text(errors="replace")).get(
+                "turns", []
+            )
+            if t.get("role") == "assistant"
+        ]
+        report = _report_text(turns)
+        if _findings_from_text(report) is None:
+            continue
+        out = _saved_dir(rel)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / ERROR).unlink(missing_ok=True)
+        (out / STDERR_OUT).unlink(missing_ok=True)
+        (out / REPORT).write_text(report)
+        shutil.copyfile(session, out / SESSION_OUT)
+        _backup_success(rel)
 
 
 def _running_rels() -> set[str]:
@@ -193,6 +402,7 @@ def _start_one(rel: str) -> str | None:
     """Spawn a streamable per-run audit and register it. Returns the job id."""
     if rel in _running_rels():
         return None
+    _backup_success(rel)
     r = av.start_blue_team(rel)
     job = r.get("job")
     if job:
@@ -203,13 +413,38 @@ def _start_one(rel: str) -> str | None:
     return job
 
 
-def _advance_queue() -> None:
-    """Start queued batch audits up to the concurrency cap (total live audits)."""
-    while _QUEUE and len(_JOBS) < BATCH_CAP:
-        rel = _QUEUE.popleft()
-        if rel in _running_rels():
-            continue
-        _start_one(rel)
+# One BatchRunner drives "Run all": enqueue every target, run BATCH_CAP at a
+# time, advanced by the pump below. The same class powers the studio's batch.
+_BATCH = web_common.BatchRunner(BATCH_CAP, _start_one, lambda: len(_JOBS))
+
+
+def _running_members() -> int:
+    return len(_BATCH.members() & _running_rels())
+
+
+def _phase(r: dict) -> str:
+    status = (r.get("phase") or r.get("status") or "").lower()
+    if r.get("live") or status in {"active", "running", "live"}:
+        return "Active"
+    if status in {"failed", "error", "stale"}:
+        return "Failed"
+    return "Completed"
+
+
+def _mode(name: str | None) -> str:
+    name = name or ""
+    if name.endswith("_multi_phase"):
+        return "multi_phase"
+    if name.endswith("_goal"):
+        return "goal"
+    return ""
+
+
+def _cancel_rel(rel: str) -> None:
+    """Cancel any live audit job(s) for a run (used by stop-all and delete)."""
+    for job, jrel in list(_JOBS.items()):
+        if jrel == rel:
+            cancel(job)
 
 
 def _pump() -> None:
@@ -220,7 +455,7 @@ def _pump() -> None:
             info = av._LENS_JOBS.get(job)
             if info is None or info["proc"].poll() is not None:
                 _persist(job, rel)
-        _advance_queue()
+        _BATCH.advance()
         time.sleep(3)
 
 
@@ -231,30 +466,35 @@ threading.Thread(target=_pump, daemon=True).start()
 # Batch (Run all) + lifecycle — one unified, streamable audit path for all runs
 # --------------------------------------------------------------------------- #
 def batch_running() -> bool:
-    return bool(_QUEUE) or bool(_BATCH_SET & _running_rels())
+    return _BATCH.status(_running_members())["batch"]
 
 
 def batch_status() -> dict:
-    return {
-        "batch": batch_running(),
-        "active": len(_BATCH_SET & _running_rels()),
-        "queued": len(_QUEUE),
-    }
+    return _BATCH.status(_running_members())
 
 
 def list_runs() -> dict:
     out = []
     job_by_rel = {r: j for j, r in _JOBS.items()}  # the active audit job per run
-    queued = set(_QUEUE)
-    for r in av.list_runs_overview():
+    queued = _BATCH.queued()
+    run_items = av.list_runs_overview()
+    _recover_orphaned_lens_audits(run_items)
+    for r in run_items:
         if r.get("type") and r["type"] != "run":
             continue
         rel = r.get("path")
+        group = ""
+        if rel:
+            parts = rel.split("/")
+            group = "/".join(parts[:-1])
         out.append(
             {
                 "path": rel,
                 "name": r.get("name"),
+                "group": group,
+                "mode": _mode(r.get("name")),
                 "status": r.get("status"),
+                "phase": _phase(r),
                 "live": bool(r.get("live")),
                 "audit": saved_summary(rel),
                 "running": rel in job_by_rel,
@@ -268,7 +508,10 @@ def list_runs() -> dict:
 
 def start(rel: str) -> dict:
     """Start (or re-run) a single streamable audit. Coexists with a batch."""
-    if rel in _running_rels() or rel in _QUEUE:
+    item = next((r for r in list_runs()["items"] if r.get("path") == rel), None)
+    if item and item.get("phase") != "Completed":
+        return {"error": "only completed runs can be audited"}
+    if rel in _running_rels() or rel in _BATCH.queued():
         return {"error": "this run is already queued or being audited"}
     job = _start_one(rel)
     return {"job": job} if job else {"error": "failed to start audit"}
@@ -279,28 +522,14 @@ def start_all() -> dict:
     normal streamable job, started up to BATCH_CAP at a time."""
     if batch_running():
         return {"error": "a batch is already running"}
-    rels = [
-        r["path"]
-        for r in list_runs()["items"]
-        if r["status"] == "completed" and not r["live"]
-    ]
+    rels = [r["path"] for r in list_runs()["items"] if r["phase"] == "Completed"]
     if not rels:
         return {"error": "no completed runs to audit"}
-    _BATCH_SET.clear()
-    _BATCH_SET.update(rels)
-    _QUEUE.clear()
-    _QUEUE.extend(r for r in rels if r not in _running_rels())
-    _advance_queue()
-    return {"ok": True, "queued": len(rels)}
+    return _BATCH.start_all(rels)
 
 
 def stop_all() -> dict:
-    _QUEUE.clear()
-    for job, rel in list(_JOBS.items()):
-        if rel in _BATCH_SET:
-            cancel(job)
-    _BATCH_SET.clear()
-    return {"ok": True}
+    return _BATCH.stop_all(_cancel_rel)
 
 
 def cancel(job: str) -> dict:
@@ -312,8 +541,12 @@ def cancel(job: str) -> dict:
 
 
 def delete(rel: str) -> dict:
-    if batch_running() or rel in _running_rels():
-        return {"error": "an audit for this run is in progress"}
+    # The user confirmed a destructive action — make it always work. Cancel any
+    # in-flight (or stuck) audit for this run first, drop it from the queue, then
+    # remove the saved dir. (Previously this refused while busy and the client
+    # swallowed the error, so the button looked dead.)
+    _cancel_rel(rel)
+    _BATCH.discard(rel)
     d = _saved_dir(rel)
     if d.is_dir():
         shutil.rmtree(d, ignore_errors=True)
@@ -321,8 +554,11 @@ def delete(rel: str) -> dict:
 
 
 def delete_all() -> dict:
-    if batch_running() or _running_rels():
-        return {"error": "an audit is in progress; stop it first"}
+    # Always works: stop the batch + every in-flight audit (including dead-but-
+    # unpersisted "stuck" jobs that linger in _JOBS), then wipe.
+    _BATCH.stop_all(_cancel_rel)
+    for job in list(_JOBS):
+        cancel(job)
     n = 0
     if BT_DIR.is_dir():
         for d in list(BT_DIR.iterdir()):
@@ -336,26 +572,13 @@ def delete_all() -> dict:
 # Request handling
 # --------------------------------------------------------------------------- #
 def handle(h, method: str) -> bool:
-    parsed = urlparse(h.path)
-    if parsed.path != PREFIX and not parsed.path.startswith(PREFIX + "/"):
-        return False
-    path = parsed.path[len(PREFIX) :] or "/"
-    try:
-        if method == "GET":
-            _get(h, path, parsed.query)
-        else:
-            _post(h, path)
-    except (BrokenPipeError, ConnectionError, OSError):
-        pass
-    except Exception as exc:  # noqa: BLE001
-        try:
-            h._json({"error": f"{type(exc).__name__}: {exc}"}, code=500)
-        except Exception:
-            pass
-    return True
+    return web_common.serve(h, method, PREFIX, _get, _post)
 
 
 def _get(h, path: str, query: str) -> None:
+    # GET endpoints return data at HTTP 200 even when carrying {error}: their
+    # clients poll quietly and parse the {error} body themselves (e.g. an expired
+    # transcript job). The auto-4xx convention is for user actions (POST) below.
     if path in ("/", "/index.html"):
         return h._send(200, INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
     if path == "/api/list":
@@ -371,19 +594,21 @@ def _get(h, path: str, query: str) -> None:
 
 
 def _post(h, path: str) -> None:
+    # Mutations go through web_common.reply: an {error} result is sent as HTTP
+    # 4xx so the client never reads a failed action as success.
     body = h._read_body()
     if path == "/api/start":
-        return h._json(start((body.get("run") or "").strip()))
+        return web_common.reply(h, start((body.get("run") or "").strip()))
     if path == "/api/start_all":
-        return h._json(start_all())
+        return web_common.reply(h, start_all())
     if path == "/api/stop_all":
-        return h._json(stop_all())
+        return web_common.reply(h, stop_all())
     if path == "/api/cancel":
-        return h._json(cancel((body.get("job") or "").strip()))
+        return web_common.reply(h, cancel((body.get("job") or "").strip()))
     if path == "/api/delete":
-        return h._json(delete((body.get("run") or "").strip()))
+        return web_common.reply(h, delete((body.get("run") or "").strip()))
     if path == "/api/delete_all":
-        return h._json(delete_all())
+        return web_common.reply(h, delete_all())
     h._send(404, b"not found", "text/plain")
 
 
@@ -411,20 +636,25 @@ a{color:var(--accent)}
 header{display:flex;align-items:center;gap:12px;padding:12px;background:var(--panel);
   border-bottom:1px solid var(--border);flex:0 0 auto}
 header .spacer{flex:1}
-.hint{color:var(--faint);font-size:12px}
 
 main{flex:1;display:flex;min-height:0}
-.ritem{display:flex;align-items:center;gap:8px;text-align:left;background:transparent;
-  border:1px solid transparent;border-radius:7px;padding:7px 9px;cursor:pointer;width:100%;color:var(--fg)}
-.ritem:hover{background:var(--panel2);border-color:var(--border)}
-.ritem.cur{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);background:var(--panel3)}
-.ritem .rn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;font-weight:600}
-.acount{font-size:10.5px;font-family:var(--mono);color:var(--muted);display:inline-flex;align-items:center;gap:4px}
-.livetag{font-size:8.5px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;padding:1px 5px;border-radius:5px;background:rgba(224,175,104,.18);color:#e0af68}
-.banner{margin:6px 10px;padding:7px 10px;border-radius:8px;background:rgba(224,175,104,.12);
-  border:1px solid rgba(224,175,104,.4);color:#e0af68;font-size:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.banner .bhint{color:var(--faint);font-weight:400}
+.runitem{display:flex;align-items:baseline;gap:10px;text-align:left;background:transparent;
+  border:1px solid transparent;border-radius:6px;padding:7px 9px;cursor:pointer;width:100%;color:var(--fg)}
+.runitem:hover{background:var(--panel2);border-color:var(--border)}
+.runitem.cur{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.runitem.unauditable{opacity:.65}
+.runitem .rn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600}
+.runitem .rt{color:var(--faint);font-size:10px;white-space:nowrap;font-family:var(--mono)}
 .muted{color:var(--muted);padding:16px;text-align:center;font-size:12.5px;line-height:1.6}
+.phase-tabs{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:2px 2px 8px}
+.phase-tab{border:1px solid var(--border);background:var(--panel2);color:var(--muted);
+  border-radius:7px;padding:5px 10px;font-size:12px;font-weight:700;cursor:pointer;transition:.12s}
+.phase-tab:hover{border-color:var(--accent);color:var(--fg)}
+.phase-tab.active{border-color:var(--accent);background:var(--panel3);color:var(--fg)}
+.phase-tab .num{color:var(--faint);font-weight:600;margin-left:4px}
+.dgroup{font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--faint);
+  font-weight:700;margin:10px 4px 3px}
+.dgroup:first-child{margin-top:2px}
 
 section.main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--bg)}
 .tbar{display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border);background:var(--panel)}
@@ -455,9 +685,12 @@ section.main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;
 .ftitle{font-weight:700;font-size:14px;flex:1;min-width:120px}
 .fconf{font-size:10.5px;color:var(--faint);font-family:var(--mono);white-space:nowrap}
 .floc{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin:6px 0 4px;word-break:break-all}
-.fissue{font-size:13px;margin:4px 0}
-.fmech{font-size:12.5px;color:var(--muted);margin:4px 0}
+.fissue{font-size:13px;margin:6px 0 4px;line-height:1.45}
+.fmech{font-size:12.5px;color:var(--muted);margin:4px 0;line-height:1.45}
 .fmech b,.fissue b{color:var(--fg)}
+.ftext{display:inline}
+.ftext p:first-child{display:inline}
+.ftext p{margin:.25em 0}
 
 #logBox{margin:10px 0 4px;border:1px solid var(--border);border-radius:9px;background:var(--panel2)}
 #logBox>summary{cursor:pointer;padding:8px 12px;font-weight:700;font-size:12.5px;color:var(--muted);
@@ -482,19 +715,18 @@ section.main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;
 <div id="topbar-progress"></div>
 <header>
   <nav class="appnav"><a href="/">🔎 Runs</a><a href="/proposals">🗒 Proposals</a><a href="/studio">📝 Studio</a><a class="on" href="/blueteam">🛡 Blue Team</a></nav>
-  <span class="spacer"></span>
-  <span class="hint">Read-only audits — surfaces concerning, result-affecting problems for you to judge (no verdict).</span>
 </header>
 <main>
   <aside class="side">
     <div class="sidehead">🛡 Runs <span class="spacer"></span></div>
     <div class="sideacts">
       <button class="primary mini" id="runAllBtn">▶ Run all</button>
-      <button class="danger mini" id="stopAllBtn" hidden>■ Stop all</button>
       <button class="danger mini" id="delAllBtn">🗑 Delete all</button>
+      <button class="danger mini" id="stopAllBtn" hidden>■ Stop all</button>
     </div>
     <div id="batchBanner"></div>
-    <input id="search" class="sidesearch" placeholder="filter runs…" autocomplete="off">
+    <input id="search" class="sidesearch" placeholder="Filter runs…" autocomplete="off">
+    <div class="phase-tabs" id="phaseTabs"></div>
     <div id="rlist" class="sidelist"><div class="muted">loading…</div></div>
   </aside>
   <section class="main">
@@ -518,20 +750,12 @@ const API = "/blueteam/api";
 const LEVELS=["critical","high","medium","low"];
 const ORDER={critical:0,high:1,medium:2,low:3};
 let runs=[], batch=false, batchActive=0, batchQueued=0, cur=null, job=null, poll=null, refresh=null, hidden=new Set(), viewKey="", logOpen=true;
+let selectionSeq=0;
+let pickerPhase="Completed";
 
 //__APP_JS__
 //__PROGRESS_JS__
-
-async function api(url,body,quiet){
-  let r;
-  if(!quiet)Progress.start();
-  try{ r=await fetch(url, body===undefined?{}:{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})}); }
-  catch(e){ toast("network error: "+e.message); return null; }
-  finally{ if(!quiet)Progress.done(); }
-  const d=await r.json().catch(()=>({}));
-  if(!r.ok){toast(d.error||"failed");return null;}
-  return d;
-}
+//__API_JS__
 
 // ---- run list ----
 // Audits run server-side and persist on their own; the page only *attaches* to a
@@ -554,7 +778,10 @@ async function loadRuns(){
 function syncView(){
   if(!cur) return;
   const r=runs.find(x=>x.path===cur); if(!r) return;
-  if(r.job && job!==r.job){ job=r.job; viewKey=""; startPoll(); }
+  // Don't re-attach a job we already finished client-side: it lingers in the
+  // server's job list through the clarity follow-up + persist, and re-attaching
+  // it makes the panel bounce between the live log and "saving…".
+  if(r.job && job!==r.job && !finished.has(r.job)){ job=r.job; viewKey=""; startPoll(); }
   else if(!r.job && job){ finishView(); }
   else if(!r.job && !job && r.audit){ maybeRefreshSaved(r); }
 }
@@ -565,72 +792,131 @@ function renderBatchBar(){
     ? `<div class="banner"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span> Auditing all — ${batchActive} running · ${batchQueued} queued <span class="bhint">(click any run to watch)</span></div>` : "";
 }
 function badge(r){
-  let b = r.live ? '<span class="livetag">live</span>' : "";
-  if(r.job) b += '<span class="acount"><span class="tdot"></span>auditing</span>';
-  else if(r.queued) b += '<span class="acount">queued</span>';
-  else if(r.audit) b += `<span class="acount"><span class="dot ${r.audit.worst||'low'}"></span>${r.audit.count}</span>`;
+  let b = "";
+  if(r.job) b += ' · <span class="status-badge running"><span class="tdot"></span>auditing</span>';
+  else if(r.queued) b += ' · <span class="status-badge queued">queued</span>';
+  else if(r.audit&&r.audit.error) b += ' · <span class="status-badge error">issue</span>';
+  else if(r.audit) b += ` · <span class="status-badge done"><span class="dot ${r.audit.worst||'low'}"></span>${r.audit.count}</span>`;
   return b;
 }
 function renderRuns(){
   const q=$("#search").value.toLowerCase();
   const list=$("#rlist");
-  const items=runs.filter(r=>!q || (r.name||"").toLowerCase().includes(q));
-  if(!items.length){ list.innerHTML='<div class="muted">no runs</div>'; return; }
-  list.innerHTML=items.map(r=>
-    `<button class="ritem${r.path===cur?' cur':''}" data-p="${esc(r.path)}">`
-    +`<span class="rn">${esc(r.name)}</span>${badge(r)}</button>`).join("");
-  list.querySelectorAll(".ritem").forEach(b=>b.onclick=()=>select(b.dataset.p));
+  const pool=runs.filter(r=>!q || (r.name||"").toLowerCase().includes(q));
+  const counts={Completed:0,Active:0,Failed:0};
+  pool.forEach(r=>{ if(counts[r.phase]!=null) counts[r.phase]++; });
+  if(!counts[pickerPhase])
+    pickerPhase = counts.Completed?"Completed":(counts.Active?"Active":(counts.Failed?"Failed":pickerPhase));
+  $("#phaseTabs").innerHTML=["Completed","Active","Failed"].map(ph=>
+    `<button class="phase-tab${ph===pickerPhase?' active':''}" data-ph="${ph}">${ph} <span class="num">${counts[ph]}</span></button>`).join("");
+  $("#phaseTabs").querySelectorAll(".phase-tab").forEach(b=>b.onclick=()=>switchPhase(b.dataset.ph));
+  const items=pool.filter(r=>r.phase===pickerPhase);
+  if(!items.length){ list.innerHTML=`<div class="muted">no ${pickerPhase.toLowerCase()} runs</div>`; return; }
+  let g=null, html="";
+  for(const r of items){
+    if((r.group||"")!==g){ g=r.group||""; html+=`<div class="dgroup">${esc(g||"runs")}</div>`; }
+    const auditable=r.phase==="Completed";
+    html+=`<button class="runitem${r.path===cur?' cur':''}${auditable?'':' unauditable'}" data-p="${esc(r.path)}">`
+      +`<span class="rn" title="${esc(r.name)}">${esc(r.name)}</span>`
+      +`<span class="rt">${esc(r.mode||"")}${badge(r)}</span></button>`;
+  }
+  list.innerHTML=html;
+  list.querySelectorAll(".runitem").forEach(b=>b.onclick=()=>select(b.dataset.p));
+}
+
+function switchPhase(ph){
+  pickerPhase=ph;
+  const selected=runs.find(r=>r.path===cur);
+  if(selected && selected.phase!==pickerPhase){
+    const word=pickerPhase.toLowerCase(), article=/^[aeiou]/.test(word)?"an":"a";
+    clearSelection(`Pick ${article} ${word} run on the left.`);
+  }
+  renderRuns(); setButtons();
+}
+
+function clearSelection(message){
+  selectionSeq++;
+  if(poll){ clearInterval(poll); poll=null; }
+  job=null; cur=null; viewKey=""; savedMtime=0; hidden.clear(); logOpen=true;
+  $("#curTitle").textContent="No run selected";
+  $("#curMeta").textContent="";
+  $("#results").innerHTML=`<div class="empty">${esc(message||"Pick a run on the left.")}</div>`;
 }
 
 function setButtons(){
   const r=runs.find(x=>x.path===cur);
   const auditing=!!(r&&r.job);            // this run currently has a live audit
+  const auditable=!!(r&&r.phase==="Completed");
   $("#auditBtn").hidden=auditing;
   $("#cancelBtn").hidden=!auditing;
-  // concurrent audits are fine; only block when a batch would race THIS completed run
-  $("#auditBtn").disabled=!cur||(batch && r && !r.live);
+  // concurrent audits are fine; only completed runs can be audited.
+  $("#auditBtn").disabled=!cur||!auditable||batch;
   $("#auditBtn").textContent=(r&&r.audit)?"↻ Re-run audit":"🛡 Run audit";
   $("#delBtn").hidden=!(r&&r.audit)||auditing;
 }
 
 // ---- selection (never blocks; audits keep running server-side) ----
 async function select(p){
+  const seq=++selectionSeq;
   if(poll){ clearInterval(poll); poll=null; }   // stop streaming the previous run (its audit keeps going)
-  job=null; cur=p; viewKey=""; hidden.clear(); logOpen=true;
+  job=null; cur=p; viewKey=""; savedMtime=0; hidden.clear(); logOpen=true;
   const r=runs.find(x=>x.path===p);
   $("#curTitle").textContent=r?r.name:p;
   $("#curMeta").textContent="";
   renderRuns(); setButtons();
-  if(r&&r.job){ job=r.job; $("#results").innerHTML='<div class="empty">attaching to the live audit…</div>'; startPoll(); }
+  if(r&&r.job&&!finished.has(r.job)){ job=r.job; $("#results").innerHTML='<div class="empty">attaching to the live audit…</div>'; startPoll(); }
   else if(r&&r.queued){ $("#results").innerHTML='<div class="empty">⏳ queued for audit — it will start when a slot frees, then stream here.</div>'; }
-  else if(r&&r.audit){ showSaved(p); }
+  else if(r&&(r.audit||r.job)){
+    $("#results").innerHTML='<div class="empty"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span> loading saved audit for <b>'+esc(r.name||p)+'</b>…</div>';
+    showSaved(p, seq);
+  }
+  else if(r&&r.phase!=="Completed") $("#results").innerHTML='<div class="empty"><b>'+esc(r.name||p)+'</b> is '+esc(r.phase.toLowerCase())+'.<br>Blue Team audits are for completed runs.</div>';
   else $("#results").innerHTML='<div class="empty">Ready to audit <b>'+esc(r?r.name:p)+'</b>'
-    +((r&&r.live)?' <span class="acount">— live run; the audit covers progress so far</span>':'')
     +'.<br>Click <b>🛡 Run audit</b>.</div>';
 }
 let savedMtime=0;
-async function showSaved(rel){
+let finished=new Set();   // job ids we've already finished client-side
+async function showSaved(rel, seq=selectionSeq){
   const d=await api(API+"/saved?run="+encodeURIComponent(rel), undefined, true);
-  if(!d||!d.exists){ $("#results").innerHTML='<div class="empty">No saved audit.</div>'; return; }
+  if(cur!==rel || seq!==selectionSeq) return; // user switched runs mid-fetch — don't clobber
+  if(!d||!d.exists){
+    // Report persists a beat after the agent exits. Always render a state for
+    // the selected run; keeping the previous pane here makes run switching look
+    // broken when the newly selected audit has not saved a transcript yet.
+    const r=runs.find(x=>x.path===rel), pending=r&&(r.job||r.queued);
+    $("#results").innerHTML=pending
+      ?'<div class="empty"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span> finishing audit — saving report…</div>'
+      :'<div class="empty">No saved audit.</div>';
+    return;
+  }
+  // Fetch the transcript too BEFORE touching the DOM, so the pane swaps exactly
+  // once (no flash of report-without-log, and the prior view stays put until now).
+  const t=await api(API+"/saved_transcript?run="+encodeURIComponent(rel), undefined, true);
+  if(cur!==rel || seq!==selectionSeq) return;
   savedMtime=d.mtime;
-  let html="";
-  html+=`<div class="savednote">saved audit · ${new Date(d.mtime*1000).toLocaleString()}</div>`;
+  const turns=(t&&t.turns)||[];
+  if(d.error){
+    let html=`<div class="savednote">saved failed audit · ${new Date(d.mtime*1000).toLocaleString()}</div>`;
+    html+=`<div class="errbox">${esc(d.error)}</div>`;
+    if(turns.length){
+      const logTurns=turns.map(tn=>`<div class="turn"><div class="role">Blue Team agent</div><div class="body">${(tn.blocks||[]).map(blockHtml).join("")}</div></div>`).join("");
+      html+=`<details id="logBox" open><summary>Partial transcript · ${steps(turns)} steps</summary><div id="log">${logTurns}</div></details>`;
+    }
+    $("#results").innerHTML=html;
+    return;
+  }
+  let html=`<div class="savednote">saved audit · ${new Date(d.mtime*1000).toLocaleString()}</div>`;
   if(d.orient) html+=`<div id="orient">${md(d.orient)}</div>`;
   html+=d.findings.length?renderFindings(d.findings,false)
     :'<div class="muted">No result-affecting problems were found in this run.</div>';
-  html+=`<div id="savedLog"></div>`;
-  $("#results").innerHTML=html;
-  bindChips(d.findings);
-  // load the saved agent exploration transcript into a collapsible log
-  const t=await api(API+"/saved_transcript?run="+encodeURIComponent(rel), undefined, true);
-  const turns=(t&&t.turns)||[];
   if(turns.length){
     const logTurns=turns.map(tn=>`<div class="turn"><div class="role">Blue Team agent</div><div class="body">${(tn.blocks||[]).map(blockHtml).join("")}</div></div>`).join("");
-    const box=$("#savedLog");
-    if(box) box.innerHTML=`<details id="logBox"><summary>Exploration log · ${steps(turns)} steps</summary><div id="log">${logTurns}</div></details>`;
+    html+=`<details id="logBox"><summary>Exploration log · ${steps(turns)} steps</summary><div id="log">${logTurns}</div></details>`;
   }
+  $("#results").innerHTML=html;
+  bindChips(d.findings);
 }
-function maybeRefreshSaved(r){ if(r.audit && r.audit.mtime>savedMtime+0.5 && cur===r.path) showSaved(r.path); }
+function maybeRefreshSaved(r){ if(r.audit && r.audit.mtime>savedMtime+0.5 && cur===r.path) showSaved(r.path, selectionSeq); }
 
 // ---- findings cards ----
 function findCard(f){
@@ -640,8 +926,8 @@ function findCard(f){
     +`<div class="fhead"><span class="fbadge ${lvl}">${lvl}</span>`
     +`<span class="ftitle">${esc(f.title||"(untitled)")}</span><span class="fconf">${conf}</span></div>`
     +(f.location?`<div class="floc">${esc(f.location)}</div>`:"")
-    +(f.issue?`<div class="fissue">${md(f.issue)}</div>`:"")
-    +(f.mechanism?`<div class="fmech"><b>Why it matters:</b> ${md(f.mechanism)}</div>`:"")
+    +(f.issue?`<div class="fissue"><b>Issue:</b> <div class="ftext">${md(f.issue)}</div></div>`:"")
+    +(f.mechanism?`<div class="fmech"><b>Why it matters:</b> <div class="ftext">${md(f.mechanism)}</div></div>`:"")
     +`</div>`;
 }
 function renderFindings(findings, running){
@@ -672,7 +958,7 @@ function bindChips(findings){
 // ---- live exploration rendering (block renderer shared via theme.TRANSCRIPT_JS) ----
 function parseFindings(turns){
   const text=turns.flatMap(t=>t.blocks||[]).filter(b=>b.kind==="text").map(b=>b.text||"").join("\n");
-  for(const b of [...text.matchAll(/```json\s*([\s\S]*?)```/g)].reverse()){
+  for(const b of [...text.matchAll(/```json[ \t]*\n([\s\S]*?)```/g)].reverse()){
     try{ const o=JSON.parse(b[1]); if(o&&Array.isArray(o.findings)) return o.findings; }catch(e){}
   }
   return null;
@@ -684,16 +970,35 @@ function renderLive(d){
   const key=JSON.stringify([findings,running,steps(turns),
     turns.reduce((n,t)=>n+(t.blocks||[]).reduce((m,b)=>m+(b.text||"").length+((b.result&&b.result.text)||"").length,0),0)]);
   if(key===viewKey) return; viewKey=key;
-  const res=$("#results"); const atBottom=res.scrollHeight-res.scrollTop-res.clientHeight<140;
-  let html="";
-  if(findings){ html+=findings.length?renderFindings(findings,running):'<div class="muted">No result-affecting problems found.</div>'; logOpen=false; }
-  else if(running) html+=`<div class="summary"><span class="total"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span> exploring the run…</span></div>`;
+  const res=$("#results");
+  const atBottom=res.scrollHeight-res.scrollTop-res.clientHeight<140;
   const logTurns=turns.map(t=>`<div class="turn"><div class="role">Blue Team agent</div><div class="body">${(t.blocks||[]).map(blockHtml).join("")}</div></div>`).join("");
-  if(logTurns) html+=`<details id="logBox"${logOpen?' open':''}><summary>Exploration log · ${steps(turns)} steps</summary><div id="log">${logTurns}</div></details>`;
-  res.innerHTML=html||'<div class="empty">No output yet.</div>';
-  if(findings) bindChips(findings);
-  const lb=$("#logBox"),lg=$("#log"); if(lb){lb.addEventListener("toggle",()=>logOpen=lb.open); if(lb.open&&lg)lg.scrollTop=lg.scrollHeight;}
-  if(atBottom && !findings) res.scrollTop=res.scrollHeight;
+  if(running){
+    let lb=$("#logBox"), lg=$("#log");
+    if(!lb){
+      res.innerHTML=`<div class="summary"><span class="total"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span> auditing…</span></div>`
+        +(logTurns
+          ?`<details id="logBox" open><summary>Live transcript · ${steps(turns)} steps</summary><div id="log">${logTurns}</div></details>`
+          :'<div class="empty">Waiting for auditor output…</div>');
+      lb=$("#logBox"); lg=$("#log");
+    }else{
+      if(lg) lg.innerHTML=logTurns;
+      const sum=lb.querySelector("summary");
+      if(sum) sum.textContent=`Live transcript · ${steps(turns)} steps`;
+    }
+    if(atBottom) res.scrollTop=res.scrollHeight;
+    return;
+  }
+  if(findings && !running){ // final findings state — render once (full swap is fine, it's terminal)
+    logOpen=false;
+    let html=findings.length?renderFindings(findings,running):'<div class="muted">No result-affecting problems found.</div>';
+    if(logTurns) html+=`<details id="logBox"><summary>Exploration log · ${steps(turns)} steps</summary><div id="log">${logTurns}</div></details>`;
+    res.innerHTML=html; bindChips(findings);
+    return;
+  }
+  res.innerHTML=logTurns
+    ?`<details id="logBox" open><summary>Transcript · ${steps(turns)} steps</summary><div id="log">${logTurns}</div></details>`
+    :'<div class="empty">No output yet.</div>';
 }
 
 // ---- audit lifecycle (per-run, concurrent, re-attachable) ----
@@ -711,9 +1016,9 @@ async function runAudit(){
 }
 async function pollOnce(){
   if(!job) return;
-  const myjob=job;
+  const myjob=job, seq=selectionSeq;
   const d=await api(API+"/transcript?job="+encodeURIComponent(myjob), undefined, true);
-  if(myjob!==job) return;        // user switched runs mid-fetch
+  if(myjob!==job || seq!==selectionSeq) return;        // user switched runs mid-fetch
   if(!d) return;
   if(d.error && !(d.turns&&d.turns.length)){ $("#results").innerHTML='<div class="errbox">'+esc(d.error)+'</div>'; finishView(); return; }
   renderLive(d);
@@ -721,17 +1026,19 @@ async function pollOnce(){
   if(!d.running) finishView();
 }
 function finishView(){
+  const rel=cur, seq=selectionSeq;
   if(poll){ clearInterval(poll); poll=null; }
+  if(job) finished.add(job);   // never auto-re-attach this job again
   job=null; viewKey=""; savedMtime=0;
   const r=runs.find(x=>x.path===cur); if(r){ r.running=false; r.job=null; }
   setButtons();
-  setTimeout(()=>{ loadRuns(); if(cur) showSaved(cur); }, 1200);  // let the daemon persist
+  setTimeout(()=>{ loadRuns(); if(cur===rel && seq===selectionSeq) showSaved(rel, seq); }, 1200);  // let the daemon persist
 }
 async function cancelAudit(){ if(!job) return; await api(API+"/cancel",{job}); toast("audit stopped"); finishView(); }
 
 // ---- batch + delete ----
 async function runAll(){
-  const n=runs.filter(r=>r.status==="completed" && !r.live).length;
+  const n=runs.filter(r=>r.phase==="Completed").length;
   if(!confirm(`Run a fresh audit on all ${n} completed runs? This overwrites existing saved audits and uses real model calls.`)) return;
   const d=await api(API+"/start_all",{}); if(!d||d.error) return;
   toast("running all audits…"); loadRuns();
@@ -739,12 +1046,12 @@ async function runAll(){
 async function stopAll(){ if(!confirm("Stop the running batch?")) return; await api(API+"/stop_all",{}); toast("stopping batch…"); setTimeout(loadRuns,800); }
 async function deleteAudit(){
   if(!cur) return;
-  if(!confirm("Delete the saved audit for this run?")) return;
+  if(!confirm("Delete the saved audit for this run? If an audit is running for it, this stops it.")) return;
   const d=await api(API+"/delete",{run:cur}); if(!d||d.error) return;
   await loadRuns(); select(cur);
 }
 async function deleteAll(){
-  if(!confirm("Delete ALL saved audits?")) return;
+  if(!confirm("Delete ALL saved audits? This also stops any audits currently running or queued.")) return;
   const d=await api(API+"/delete_all",{}); if(!d) return;
   toast(`deleted ${d.deleted||0} audits`); await loadRuns();
   if(cur) select(cur);
@@ -771,4 +1078,5 @@ INDEX_HTML = (
     .replace("/*__PROGRESS_CSS__*/", PROGRESS_CSS)
     .replace("//__APP_JS__", APP_JS + "\n" + TRANSCRIPT_JS)
     .replace("//__PROGRESS_JS__", PROGRESS_JS)
+    .replace("//__API_JS__", API_JS)
 )

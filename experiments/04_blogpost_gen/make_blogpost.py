@@ -48,17 +48,13 @@ ROOT = HERE.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src import audit_agent  # noqa: E402
+from src import DEFAULT_MODEL, audit_agent  # noqa: E402
 
-# Explicit, independent model choices for the two roles (not tied to the shared
-# project-wide constants, so neither silently shifts if those change):
-#   - author/fix: writing task -> Claude Opus 4.6.
-#   - reviewer:   red-teaming/judgement task -> Claude Opus 4.6.
-# (This account has no Fable access — the API 404s "Claude Fable 5 is not
-# available. Please use Opus 4.8.")
+# Explicit, independent model choices for the two roles. Blog synthesis and
+# review default to the shared Claude model; override per role when needed.
 # Override with BLOGPOST_MODEL / REVIEWER_MODEL env vars or --model / --reviewer-model.
-BLOGPOST_MODEL = os.environ.get("BLOGPOST_MODEL", "anthropic/claude-opus-4-6")
-REVIEWER_MODEL = os.environ.get("REVIEWER_MODEL", "anthropic/claude-opus-4-6")
+BLOGPOST_MODEL = os.environ.get("BLOGPOST_MODEL", DEFAULT_MODEL)
+REVIEWER_MODEL = os.environ.get("REVIEWER_MODEL", DEFAULT_MODEL)
 
 _JINJA = Environment(
     loader=FileSystemLoader(HERE / "prompts"),
@@ -84,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--reviewer-model",
         default=REVIEWER_MODEL,
-        help="Model for the red-team reviewer (default: Claude Opus 4.8).",
+        help=f"Model for the red-team reviewer (default: {REVIEWER_MODEL}).",
     )
     ap.add_argument("--thinking", default=audit_agent.THINKING_DEFAULT)
     ap.add_argument(

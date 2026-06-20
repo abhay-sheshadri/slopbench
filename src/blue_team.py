@@ -40,10 +40,16 @@ def build_prompt(
 
 
 def build_followup_prompt() -> str:
-    """Render the clarity follow-up sent after the first findings pass: asks the
-    agent to rewrite its findings to be understandable to researchers unfamiliar
-    with the project, re-emitting the same ```json findings schema."""
+    """Render the second-pass follow-up sent after the first audit: asks the
+    agent to challenge its coverage for missed methodological flaws, then rewrite
+    the final findings clearly for researchers unfamiliar with the project while
+    re-emitting the same ```json findings schema."""
     return _JINJA.get_template("blue_team_clarify.md.j2").render()
 
 
-__all__ = ["build_prompt", "build_followup_prompt"]
+def build_skim_rewrite_prompt() -> str:
+    """Render the final style-only rewrite prompt for live Blue Team audits."""
+    return _JINJA.get_template("blue_team_skim_rewrite.md.j2").render()
+
+
+__all__ = ["build_prompt", "build_followup_prompt", "build_skim_rewrite_prompt"]

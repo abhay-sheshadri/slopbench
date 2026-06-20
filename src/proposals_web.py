@@ -14,14 +14,18 @@ viewer's request handler and claims paths under ``/proposals``.
 from __future__ import annotations
 
 import re
+import shutil
 import threading
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs
 
+from src import web_common
 from src.agent_viewer import ROOT
 from src.blogpost_studio_web import _sse  # generic over DocAgentSession
 from src.proposal_studio import ProposalSession
 from src.theme import (
+    API_JS,
     APP_JS,
+    CHAT_CSS,
     CONTROLS_CSS,
     EDITOR_CSS,
     HIGHLIGHT_JS,
@@ -55,6 +59,11 @@ def _path_for(name: str):
     return PROPOSALS_DIR / f"{name}.md"
 
 
+def _stem_for(name: str) -> str:
+    """Validated proposal stem for API responses / session keys."""
+    return _path_for(name).stem
+
+
 def _session(name: str, *, create: bool) -> ProposalSession | None:
     """The agent session for a proposal (validated), created on demand."""
     p = _path_for(name)
@@ -86,6 +95,28 @@ def list_proposals() -> list[dict]:
     return items
 
 
+def _is_busy(name: str) -> bool:
+    """Whether a proposal has a live editing agent, including orphaned sandboxes."""
+    from src.blogpost_studio import live_sandbox_workspaces
+    from src.proposal_studio import WORK_ROOT
+
+    stem = _stem_for(name)
+    s = SESSIONS.get(stem)
+    return (
+        bool(s and s.is_running()) or str(WORK_ROOT / stem) in live_sandbox_workspaces()
+    )
+
+
+def create_doc(name: str, content: str) -> dict:
+    """Create a new proposal. Refuses to replace an existing file."""
+    p = _path_for(name)
+    if p.exists():
+        raise FileExistsError(f"{p.stem}.md already exists")
+    PROPOSALS_DIR.mkdir(parents=True, exist_ok=True)
+    p.write_text(content, encoding="utf-8")
+    return {"name": p.stem, "mtime": p.stat().st_mtime}
+
+
 def read_doc(name: str) -> dict:
     p = _path_for(name)
     if not p.exists():
@@ -108,28 +139,67 @@ def save_doc(name: str, content: str) -> dict:
     return {"name": p.stem, "mtime": p.stat().st_mtime}
 
 
+def rename_doc(name: str, new_name: str) -> dict:
+    """Rename a proposal and its idle agent workspace, if present."""
+    from src.proposal_studio import WORK_ROOT
+
+    old = _path_for(name)
+    new = _path_for(new_name)
+    if not old.exists():
+        raise ValueError(f"no proposal named {old.stem}")
+    if old == new:
+        return {"name": old.stem, "mtime": old.stat().st_mtime}
+    if new.exists():
+        raise FileExistsError(f"{new.stem}.md already exists")
+    if _is_busy(old.stem):
+        raise RuntimeError("the agent is editing this proposal; wait for it to finish")
+
+    with _LOCK:
+        SESSIONS.pop(old.stem, None)
+    old.rename(new)
+
+    old_work = WORK_ROOT / old.stem
+    new_work = WORK_ROOT / new.stem
+    if old_work.exists() and not new_work.exists():
+        try:
+            shutil.move(str(old_work), str(new_work))
+        except OSError:
+            pass
+    return {"name": new.stem, "oldName": old.stem, "mtime": new.stat().st_mtime}
+
+
+def duplicate_doc(name: str, new_name: str) -> dict:
+    src = _path_for(name)
+    dst = _path_for(new_name)
+    if not src.exists():
+        raise ValueError(f"no proposal named {src.stem}")
+    if dst.exists():
+        raise FileExistsError(f"{dst.stem}.md already exists")
+    if _is_busy(src.stem):
+        raise RuntimeError("the agent is editing this proposal; wait for it to finish")
+    PROPOSALS_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, dst)
+    return {"name": dst.stem, "mtime": dst.stat().st_mtime}
+
+
+def delete_doc(name: str) -> dict:
+    p = _path_for(name)
+    if not p.exists():
+        raise ValueError(f"no proposal named {p.stem}")
+    if _is_busy(p.stem):
+        raise RuntimeError("the agent is editing this proposal; wait for it to finish")
+    with _LOCK:
+        SESSIONS.pop(p.stem, None)
+    p.unlink()
+    return {"name": p.stem}
+
+
 # --------------------------------------------------------------------------- #
 # Request handling (called from the agent viewer's Handler)
 # --------------------------------------------------------------------------- #
 def handle(h, method: str) -> bool:
-    """Serve one request if its path is under /proposals. Returns whether it was ours."""
-    parsed = urlparse(h.path)
-    if parsed.path != PREFIX and not parsed.path.startswith(PREFIX + "/"):
-        return False
-    path = parsed.path[len(PREFIX) :] or "/"
-    try:
-        if method == "GET":
-            _get(h, path, parsed.query)
-        else:
-            _post(h, path)
-    except (BrokenPipeError, ConnectionError, OSError):
-        pass
-    except Exception as exc:  # noqa: BLE001 - never let a handler kill the server
-        try:
-            h._json({"error": f"{type(exc).__name__}: {exc}"}, code=500)
-        except Exception:
-            pass
-    return True
+    """Serve one request if its path is under /proposals (shared dispatch)."""
+    return web_common.serve(h, method, PREFIX, _get, _post)
 
 
 def _get(h, path: str, query: str) -> None:
@@ -158,6 +228,16 @@ def _get(h, path: str, query: str) -> None:
 def _post(h, path: str) -> None:
     body = h._read_body()
     name = body.get("name") or ""
+    if path == "/api/create":
+        content = body.get("content")
+        if not isinstance(content, str):
+            return h._json({"error": "missing content"}, code=400)
+        try:
+            return h._json({"ok": True, **create_doc(name, content)})
+        except ValueError as exc:
+            return h._json({"error": str(exc)}, code=400)
+        except FileExistsError as exc:
+            return h._json({"error": str(exc)}, code=409)
     if path == "/api/doc":
         content = body.get("content")
         if not isinstance(content, str):
@@ -166,6 +246,33 @@ def _post(h, path: str) -> None:
             return h._json({"ok": True, **save_doc(name, content)})
         except ValueError as exc:
             return h._json({"error": str(exc)}, code=400)
+        except RuntimeError as exc:
+            return h._json({"error": str(exc)}, code=409)
+    if path == "/api/rename":
+        try:
+            return h._json({"ok": True, **rename_doc(name, body.get("newName") or "")})
+        except ValueError as exc:
+            return h._json({"error": str(exc)}, code=400)
+        except FileExistsError as exc:
+            return h._json({"error": str(exc)}, code=409)
+        except RuntimeError as exc:
+            return h._json({"error": str(exc)}, code=409)
+    if path == "/api/duplicate":
+        try:
+            return h._json(
+                {"ok": True, **duplicate_doc(name, body.get("newName") or "")}
+            )
+        except ValueError as exc:
+            return h._json({"error": str(exc)}, code=400)
+        except FileExistsError as exc:
+            return h._json({"error": str(exc)}, code=409)
+        except RuntimeError as exc:
+            return h._json({"error": str(exc)}, code=409)
+    if path == "/api/delete":
+        try:
+            return h._json({"ok": True, **delete_doc(name)})
+        except ValueError as exc:
+            return h._json({"error": str(exc)}, code=404)
         except RuntimeError as exc:
             return h._json({"error": str(exc)}, code=409)
     try:
@@ -224,6 +331,7 @@ main{flex:1;display:flex;min-height:0}
 .pitem .pn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600}
 .pitem .pt{color:var(--faint);font-size:10px;white-space:nowrap;font-family:var(--mono)}
 .pitem .busy{color:var(--warn);font-size:10px}
+.sidecount{color:var(--faint);font:11px var(--mono)}
 .muted{color:var(--muted);padding:14px;text-align:center;font-size:12.5px}
 
 /* chat with the proposal-editing agent (same workflow as the writeup studio);
@@ -246,26 +354,24 @@ main{flex:1;display:flex;min-height:0}
 .turn .md p{margin:.3em 0} .turn .md pre{overflow:auto;background:var(--code-bg);padding:8px;border-radius:6px}
 .turn .md :first-child{margin-top:0} .turn .md :last-child{margin-bottom:0}
 .turn .md img{max-width:100%;cursor:zoom-in}
-details.aux{margin:8px 0;border:1px solid var(--border);border-radius:8px;background:var(--panel2);font-size:12.5px}
-details.aux>summary{cursor:pointer;padding:6px 11px;font-weight:600;list-style:none;display:flex;gap:8px;align-items:center;color:var(--muted)}
-details.aux>summary::-webkit-details-marker{display:none}
-details.aux>summary::before{content:"▸";color:var(--muted)}
-details.aux[open]>summary::before{content:"▾"}
-details.think>summary{color:var(--think)} details.tool>summary{color:var(--tool)} details.sub>summary{color:var(--accent)}
-details.aux.err>summary{color:var(--err)}
-details.aux .arg{color:var(--faint);font-family:var(--mono);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-details.aux .body2{padding:0 11px 10px;white-space:pre-wrap;font-family:var(--mono);font-size:11.5px;color:var(--muted);max-height:300px;overflow:auto}
-details.think .body2{color:#c8bfe7;font-style:italic}
+/*__CHAT_CSS__*/
 /* image lightbox (as in the studio / agent viewer) */
 .lightbox{position:fixed;inset:0;z-index:9999;background:rgba(3,5,10,.88);display:flex;
   align-items:center;justify-content:center;padding:40px}
 .lightbox[hidden]{display:none}
 .lightbox img{max-width:95vw;max-height:90vh;object-fit:contain;background:#fff;border-radius:6px;
   box-shadow:0 14px 45px rgba(0,0,0,.55)}
-.tdot{display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--muted);
-  margin-right:3px;animation:tb 1.2s infinite}
-.tdot:nth-child(2){animation-delay:.15s}.tdot:nth-child(3){animation-delay:.3s}
-@keyframes tb{0%,60%,100%{opacity:.25}30%{opacity:1}}
+.modal{position:fixed;inset:0;z-index:9000;background:rgba(3,5,10,.72);display:flex;
+  align-items:center;justify-content:center;padding:24px}
+.modal[hidden]{display:none}
+.dialog{width:min(440px,calc(100vw - 32px));background:var(--panel);border:1px solid var(--border);
+  border-radius:10px;box-shadow:0 18px 55px rgba(0,0,0,.45);padding:16px}
+.dialog h2{font-size:15px;line-height:1.3;margin:0 0 10px}
+.dialog p{color:var(--muted);font-size:13px;line-height:1.55;margin:0 0 12px}
+.dialog input{width:100%;background:var(--panel2);color:var(--fg);border:1px solid var(--border);
+  border-radius:7px;padding:8px 10px;font:13px var(--mono);outline:none}
+.dialog input:focus{border-color:var(--accent)}
+.dialog .actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
 .composer{display:flex;gap:8px;padding:10px;border-top:1px solid var(--border);align-items:flex-end}
 .composer .btncol{display:flex;flex-direction:column;gap:6px;justify-content:flex-end}
 .composer .btncol button{width:100%;white-space:nowrap}
@@ -279,6 +385,9 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 #viewtoggle:hover:not(:disabled){color:var(--fg)}
 #docname{color:var(--muted);font-family:var(--mono);font-size:12px}
 .docbar .spacer{flex:1}
+.docactions{display:flex;gap:6px;align-items:center}
+.docactions button{font-size:12px;padding:4px 10px}
+.docactions .danger{padding-left:9px;padding-right:9px}
 .meta{color:var(--faint);font-size:11px;font-family:var(--mono);font-variant-numeric:tabular-nums}
 .meta .dot{opacity:.5;margin:0 2px}
 #docview{flex:1;display:flex;min-height:0;overflow:hidden}
@@ -290,6 +399,29 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 /*__EDITOR_CSS__*/
 /*__PREVIEW_CSS__*/
 .empty{color:var(--muted);text-align:center;margin-top:14vh;padding:0 24px;line-height:1.6}
+.empty button{margin-top:14px}
+
+@media (max-width: 1000px){
+  main{display:grid;grid-template-columns:minmax(220px,280px) minmax(0,1fr);
+    grid-template-rows:minmax(0,1fr) minmax(250px,36vh)}
+  aside.side{grid-column:1;grid-row:1 / 3;width:auto}
+  #rsSide,#rsChat{display:none}
+  #doc{grid-column:2;grid-row:1;min-height:0}
+  #chatcol{grid-column:2;grid-row:2;width:auto;border-left:0;border-top:1px solid var(--border)}
+  .docbar{flex-wrap:wrap;gap:7px}
+  #docname{flex:1 1 260px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .docactions{order:3}
+  #meta{margin-left:auto}
+  #plog{padding:8px 10px}
+  .composer{padding:8px 10px}
+}
+@media (max-width: 680px){
+  main{display:flex;flex-direction:column}
+  aside.side{width:auto;max-height:34vh;border-right:0;border-bottom:1px solid var(--border)}
+  #doc{min-height:44vh}
+  #chatcol{width:auto;min-height:260px}
+  .docactions{order:3;width:100%;justify-content:flex-end}
+}
 
 /*__RESIZER_CSS__*/
 /*__PROGRESS_CSS__*/
@@ -303,8 +435,9 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 </header>
 <main>
   <aside class="side">
-    <div class="sidehead">🗒 Proposals</div>
+    <div class="sidehead">🗒 Proposals <span class="spacer"></span><span class="sidecount" id="pcount"></span></div>
     <div class="sideacts"><button class="primary mini" id="newbtn">＋ New proposal</button></div>
+    <input id="psearch" class="sidesearch" placeholder="filter proposals…" autocomplete="off">
     <div id="plist" class="sidelist"><div class="muted">loading…</div></div>
   </aside>
   <div class="vresizer" id="rsSide" title="Drag to resize"></div>
@@ -313,6 +446,11 @@ details.think .body2{color:#c8bfe7;font-style:italic}
       <button id="viewtoggle">✎ Edit</button>
       <span id="docname"></span>
       <span class="spacer"></span>
+      <span class="docactions">
+        <button class="mini" id="renamebtn" title="Rename this proposal">Rename</button>
+        <button class="mini" id="dupbtn" title="Duplicate this proposal">Duplicate</button>
+        <button class="danger mini" id="deletebtn" title="Delete this proposal">Delete</button>
+      </span>
       <span class="meta" id="meta"></span>
     </div>
     <div id="docview" class="view">
@@ -324,6 +462,7 @@ details.think .body2{color:#c8bfe7;font-style:italic}
   <div class="vresizer" id="rsChat" title="Drag to resize"></div>
   <section id="chatcol">
     <div class="chathead">Agent <span class="meta" id="cost"></span><span class="spacer"></span>
+      <button class="mini" id="resetchatbtn" title="Clear this proposal's agent conversation">New chat</button>
       <button class="mini" id="polishbtn" title="Ask the agent to clean up this proposal">✨ Clean up</button>
     </div>
     <div id="plog"><div class="muted">Chat with an agent that edits this proposal directly — same workflow as the writeup studio.</div></div>
@@ -338,11 +477,24 @@ details.think .body2{color:#c8bfe7;font-style:italic}
 </main>
 <div class="toast" id="toast"></div>
 <div class="lightbox" id="lightbox" hidden><img alt=""></div>
+<div class="modal" id="modal" hidden>
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <h2 id="modalTitle"></h2>
+    <p id="modalText"></p>
+    <input id="modalInput" autocomplete="off" spellcheck="false">
+    <div class="actions">
+      <button id="modalCancel">Cancel</button>
+      <button class="primary" id="modalOk">OK</button>
+    </div>
+  </div>
+</div>
 <script>
 const $ = s => document.querySelector(s);
 const API = "/proposals/api";
 const editor=$("#editor"), preview=$("#preview"), hl=$("#editorHL");
 let cur=null, dirty=false, mode="view", saveTimer, docMtime=0, running=false, es=null, turnsKey="";
+let lastTurns=[], queue=[], sending=false, sentBase=0;
+let proposals=[];
 
 //__APP_JS__
 
@@ -356,7 +508,7 @@ function syncHL(){
 function renderPreview(){ preview.innerHTML=md(editor.value); }
 function updateMeta(status){
   const n=(editor.value.match(/\S+/g)||[]).length;
-  status = status || (running?"agent editing…":(dirty?"unsaved":(cur?"saved":"")));
+  status = status || (dirty && running ? "unsaved · agent editing…" : (dirty ? "unsaved" : (running ? "agent editing…" : (cur ? "saved" : ""))));
   $("#meta").innerHTML=(n?n.toLocaleString()+" words":"")+(status?` <span class="dot">·</span> ${esc(status)}`:"");
 }
 function setMode(m){
@@ -366,23 +518,40 @@ function setMode(m){
   if(m==="view") renderPreview(); else syncHL();
 }
 
-async function api(url,body,quiet){
-  let r;
-  if(!quiet)Progress.start();
-  try{
-    r=await fetch(url, body===undefined?{}:{method:"POST",
-      headers:{"Content-Type":"application/json"},body:JSON.stringify({name:cur||undefined,...body})});
-  }catch(e){ toast("network error: "+e.message); return null; }
-  finally{ if(!quiet)Progress.done(); }
-  const d=await r.json().catch(()=>({}));
-  if(!r.ok){toast(d.error||"failed");return null;}
-  return d;
+// every POST names the current proposal (shared api() injects it via apiBody)
+window.apiBody=(b)=>({name:cur||undefined,...(b||{})});
+//__API_JS__
+
+let modalResolve=null;
+function closeModal(value){
+  const done=modalResolve; modalResolve=null;
+  $("#modal").hidden=true;
+  if(done) done(value);
 }
+function modalBase({title,text="",value="",input=true,danger=false,ok="OK"}){
+  $("#modalTitle").textContent=title;
+  $("#modalText").textContent=text;
+  $("#modalText").hidden=!text;
+  $("#modalInput").hidden=!input;
+  $("#modalInput").value=value;
+  $("#modalOk").textContent=ok;
+  $("#modalOk").className=danger?"danger":"primary";
+  $("#modal").hidden=false;
+  if(input){ setTimeout(()=>{ $("#modalInput").focus(); $("#modalInput").select(); },0); }
+  else setTimeout(()=>$("#modalOk").focus(),0);
+  return new Promise(resolve=>{ modalResolve=resolve; });
+}
+async function askName(opts){
+  const v=await modalBase({...opts,input:true});
+  return v==null?null:cleanName(v);
+}
+function askConfirm(opts){ return modalBase({...opts,input:false}); }
 
 // ---- document ----
 async function save(){
   clearTimeout(saveTimer);
-  if(!cur || !dirty || running) return !running;
+  if(!cur || !dirty) return true;
+  if(running) return true;       // keep edits local; save when the turn ends
   updateMeta("saving…");
   const d=await api(API+"/doc",{content:editor.value},true);
   if(!d){updateMeta();return false;}
@@ -390,13 +559,13 @@ async function save(){
   return true;
 }
 function onEdit(){
-  if(!cur || running) return;
+  if(!cur) return;
   dirty=true;
   syncHL();
   renderPreview();
   updateMeta();
   clearTimeout(saveTimer);
-  saveTimer=setTimeout(save,800);
+  if(!running) saveTimer=setTimeout(save,800);
 }
 async function reloadDoc(){
   const d=await api(API+"/doc?name="+encodeURIComponent(cur),undefined,true);
@@ -441,30 +610,36 @@ const typingHtml=cont=>`<div class="turn assistant typing${cont?' cont':''}">${c
   +`<div class="body"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span></div></div>`;
 const autoOpened=new Set();       // details we opened for the live stream (vs. user-opened)
 function renderTurns(turns){
+  if(sending && turns.length>sentBase){ queue.shift(); sending=false; }
+  lastTurns=turns;
+  const display = queue.length
+    ? turns.concat(queue.map(m=>({role:"user",blocks:[{kind:"text",text:m}]})))
+    : turns;
   const log=$("#plog");
   // Key on content size too: a live thinking/text block grows without the
   // turn or block count changing, and the re-render must still happen.
-  const key=JSON.stringify(turns.map(t=>[t.role,t.blocks.length,!!t.live,
-    t.blocks.reduce((n,b)=>n+(b.text||"").length+((b.result&&b.result.text)||"").length,0)]))+"|"+(running?1:0);
+  const key=JSON.stringify(display.map(t=>[t.role,t.blocks.length,!!t.live,
+    t.blocks.reduce((n,b)=>n+(b.text||"").length+((b.result&&b.result.text)||"").length,0)]))+"|"+queue.join("\x01")+"|"+(running?1:0);
   if(key===turnsKey) return;     // avoid clobbering scroll/details when nothing changed
   turnsKey=key;
   const atBottom=log.scrollHeight-log.scrollTop-log.clientHeight<80;
-  if(!turns.length && !running){
-    log.innerHTML='<div class="muted">Chat with an agent that edits this proposal directly — '
-      +'try <b>✨ Clean up</b>, or ask for specific changes.</div>';
+  if(!display.length && !running){
+    log.innerHTML='<div class="empty">No conversation yet.<br>'
+      +'<button class="primary" id="cleanempty">Clean up proposal</button></div>';
+    $("#cleanempty").onclick=()=>sendCommand("/polish");
     return;
   }
-  const parts=turns.map((t,ti)=>{
+  const parts=display.map((t,ti)=>{
     const who=t.role==="user"?"You":"Agent";
-    const cont=ti>0&&turns[ti-1].role===t.role;  // same speaker: group the bubbles
+    const cont=ti>0&&display[ti-1].role===t.role;  // same speaker: group the bubbles
     const last=t.live?t.blocks.length-1:-1;      // the block still streaming in
     const body=t.role==="user"
       ? `<div class="md">${md(t.blocks.map(b=>b.text||"").join("\n"))}</div>`
       : t.blocks.map((b,bi)=>blockHtml(b,ti+"."+bi,bi===last)).join("");
     return `<div class="turn ${t.role}${cont?' cont':''}">${cont?'':`<div class="role">${who}</div>`}<div class="body">${body}</div></div>`;
   });
-  if(running && !(turns.length && turns[turns.length-1].live))
-    parts.push(typingHtml(turns.length>0&&turns[turns.length-1].role==="assistant"));
+  if(running)
+    parts.splice(turns.length,0,typingHtml(turns.length>0&&turns[turns.length-1].role==="assistant"));
   // innerHTML replacement resets every <details>; restore what the user had,
   // and auto-open a NEWLY appeared live block so its stream is visible.
   const known=new Set(), openSet=new Set();
@@ -482,17 +657,22 @@ function renderTurns(turns){
   if(atBottom) log.scrollTop=log.scrollHeight;
 }
 function refreshControls(){
-  $("#psend").disabled=!cur||running;
-  $("#pmsg").disabled=!cur||running;
-  $("#polishbtn").disabled=!cur||running;
+  $("#psend").disabled=!cur;
+  $("#pmsg").disabled=!cur;
+  $("#polishbtn").disabled=!cur;
+  $("#resetchatbtn").disabled=!cur||running;
   $("#stopbtn").hidden=!running;
-  editor.readOnly=!cur||running;     // the agent owns the file mid-turn
+  $("#renamebtn").disabled=!cur||running;
+  $("#dupbtn").disabled=!cur||running;
+  $("#deletebtn").disabled=!cur||running;
+  $("#viewtoggle").disabled=!cur;
+  editor.readOnly=!cur;
 }
 function bindStream(){
   if(es) es.close(); es=null; turnsKey="";
   if(!cur) return;
   es=new EventSource(API+"/agent/stream?name="+encodeURIComponent(cur));
-  es.onmessage=ev=>{
+  es.onmessage=async ev=>{
     const d=JSON.parse(ev.data);
     if(d.error){toast(d.error);return;}
     if(!d.selected) return;
@@ -501,33 +681,83 @@ function bindStream(){
     $("#cost").textContent = d.cost>0.005 ? "$"+d.cost.toFixed(2) : "";
     if(d.doc && d.doc.mtime && d.doc.mtime!==docMtime) reloadDoc();
     refreshControls(); updateMeta();
-    if(was && !running) reloadDoc();   // turn ended: show the agent's final edits
+    if(was && !running){
+      if(sending){ if(lastTurns.length<=sentBase) queue.shift(); sending=false; }
+      if(dirty) await save();
+      else await reloadDoc();   // turn ended: show the agent's final edits
+      pump();
+    }
   };
   es.onerror=()=>{};
 }
-async function sendMsg(text){
-  text=(text||$("#pmsg").value).trim();
-  if(!text||!cur||running) return;
-  const d=await api(API+"/agent/chat",{message:text});
-  if(!d) return;
-  $("#pmsg").value="";
-  running=true; refreshControls(); updateMeta();
+function autosizeMsg(){const t=$("#pmsg");t.style.height="auto";t.style.height=Math.min(t.scrollHeight,180)+"px";}
+function sendMsg(){
+  if(!cur) return;
+  const text=$("#pmsg").value.trim();
+  if(!text) return;
+  $("#pmsg").value=""; autosizeMsg();
+  sendCommand(text);
+}
+function sendCommand(text){
+  if(!cur || !text) return;
+  queue.push(text);
+  renderTurns(lastTurns);
+  pump();
+}
+async function pump(){
+  if(sending || running || !cur || !queue.length) return;
+  sending=true; sentBase=lastTurns.length;
+  if(dirty) await save();
+  const ok=await api(API+"/agent/chat",{message:queue[0]});
+  if(ok){ running=true; renderTurns(lastTurns); refreshControls(); updateMeta(); }
+  else { sending=false; queue.shift(); renderTurns(lastTurns); }
 }
 async function stopAgent(){ await api(API+"/agent/stop",{}); }
+async function resetChat(){
+  if(!cur || running) return;
+  if(!await askConfirm({
+    title:"Clear agent conversation?",
+    text:"The proposal file stays unchanged.",
+    danger:true,
+    ok:"New chat",
+  })) return;
+  const d=await api(API+"/agent/reset",{});
+  if(!d) return;
+  lastTurns=[]; queue=[]; sending=false; turnsKey=""; autoOpened.clear();
+  renderTurns([]);
+  refreshControls();
+}
 
 // ---- proposal list / selection ----
-async function loadList(){
-  const d=await api(API+"/list");
-  if(!d) return;
+function visibleProposals(){
+  const q=$("#psearch").value.trim().toLowerCase();
+  return proposals.filter(p=>!q || p.name.toLowerCase().includes(q));
+}
+function renderList(){
   const list=$("#plist");
-  if(!d.items.length){ list.innerHTML='<div class="muted">no proposals yet</div>'; return; }
-  list.innerHTML=d.items.map(p=>
+  $("#pcount").textContent=proposals.length ? String(proposals.length) : "";
+  if(!proposals.length){
+    list.innerHTML='<div class="muted">no proposals yet</div>';
+    return;
+  }
+  const items=visibleProposals();
+  if(!items.length){
+    list.innerHTML='<div class="muted">no matches</div>';
+    return;
+  }
+  list.innerHTML=items.map(p=>
     `<button class="pitem${p.name===cur?' cur':''}" data-n="${esc(p.name)}">`
     +`<span class="pn">${esc(p.name)}</span>`
     +(p.busy?'<span class="busy">editing…</span>':"")
     +`<span class="pt">${new Date(p.mtime*1000).toISOString().slice(0,10)}</span></button>`).join("");
   list.querySelectorAll(".pitem").forEach(b=>b.onclick=()=>open(b.dataset.n));
-  return d.items;
+}
+async function loadList(){
+  const d=await api(API+"/list");
+  if(!d) return;
+  proposals=d.items;
+  renderList();
+  return proposals;
 }
 
 async function open(name){
@@ -535,43 +765,148 @@ async function open(name){
   const d=await api(API+"/doc?name="+encodeURIComponent(name));
   if(!d) return;
   cur=d.name; dirty=false; docMtime=d.mtime; running=false;
+  lastTurns=[]; queue=[]; sending=false; turnsKey=""; autoOpened.clear();
   editor.value=d.content;
   $("#docname").textContent=cur+".md";
   document.title="Proposals · "+cur;
   history.replaceState(null,"","/proposals?p="+encodeURIComponent(cur));
-  $("#plist").querySelectorAll(".pitem").forEach(b=>b.classList.toggle("cur",b.dataset.n===cur));
+  renderList();
   setMode(d.content.trim()?"view":"edit");
   updateMeta();
   bindStream();
   refreshControls();
 }
 
+function cleanName(raw){
+  return (raw||"").trim().replace(/\.md$/,"");
+}
+function titleFromName(name){
+  return cleanName(name).replace(/[_-]+/g," ").replace(/\s+/g," ").trim();
+}
+function clearSelection(){
+  if(es) es.close(); es=null;
+  cur=null; dirty=false; running=false; docMtime=0; turnsKey="";
+  lastTurns=[]; queue=[]; sending=false; autoOpened.clear();
+  editor.value=""; hl.textContent="";
+  $("#docname").textContent="";
+  $("#cost").textContent="";
+  document.title="Proposals";
+  history.replaceState(null,"","/proposals");
+  mode="view";
+  $("#docview").className="view";
+  $("#viewtoggle").textContent="✎ Edit";
+  preview.innerHTML='<div class="empty">Pick a proposal on the left, or create a new one.</div>';
+  $("#plog").innerHTML='<div class="muted">Chat with an agent that edits this proposal directly — same workflow as the writeup studio.</div>';
+  renderList();
+  updateMeta();
+  refreshControls();
+}
+
 async function newProposal(){
-  const raw=prompt("New proposal name (letters, digits, '.', '-', '_'):","empirical_");
-  if(!raw) return;
-  const d=await api(API+"/doc",{name:raw.trim(),content:"# "+raw.trim().replace(/_/g," ")+"\n\n"});
+  const name=await askName({
+    title:"New proposal",
+    text:"Use letters, digits, '.', '-', or '_'.",
+    value:"empirical_",
+    ok:"Create",
+  });
+  if(!name) return;
+  const d=await api(API+"/create",{name,content:"# "+titleFromName(name)+"\n\n"});
   if(!d) return;
   await loadList();
   await open(d.name);
   setMode("edit"); editor.focus();
 }
 
+async function renameProposal(){
+  if(!cur || running) return;
+  if(dirty && !await save()) return;
+  const name=await askName({
+    title:"Rename proposal",
+    text:"The .md extension is optional.",
+    value:cur,
+    ok:"Rename",
+  });
+  if(!name || name===cur) return;
+  const d=await api(API+"/rename",{newName:name});
+  if(!d) return;
+  cur=d.name; dirty=false; docMtime=d.mtime||docMtime;
+  $("#docname").textContent=cur+".md";
+  document.title="Proposals · "+cur;
+  history.replaceState(null,"","/proposals?p="+encodeURIComponent(cur));
+  bindStream();
+  await loadList();
+  updateMeta("renamed");
+}
+
+async function duplicateProposal(){
+  if(!cur || running) return;
+  if(dirty && !await save()) return;
+  let base=cur+"_copy", i=2;
+  const names=new Set(proposals.map(p=>p.name));
+  while(names.has(base)) base=cur+"_copy_"+(i++);
+  const name=await askName({
+    title:"Duplicate proposal",
+    text:"The new proposal will start with the same markdown.",
+    value:base,
+    ok:"Duplicate",
+  });
+  if(!name) return;
+  const d=await api(API+"/duplicate",{newName:name});
+  if(!d) return;
+  await loadList();
+  await open(d.name);
+  setMode("edit");
+}
+
+async function deleteProposal(){
+  if(!cur || running) return;
+  if(!await askConfirm({
+    title:"Delete "+cur+".md?",
+    text:dirty ? "Unsaved editor changes will be discarded." : "This cannot be undone.",
+    danger:true,
+    ok:"Delete",
+  })) return;
+  const old=cur;
+  const d=await api(API+"/delete",{});
+  if(!d) return;
+  toast("deleted "+old+".md");
+  clearSelection();
+  const items=await loadList();
+  if(items && items.length) open(items.reduce((a,b)=>a.mtime>b.mtime?a:b).name);
+}
+
 // ---- wiring ----
 $("#viewtoggle").onclick=()=>setMode(mode==="view"?"edit":"view");
 $("#newbtn").onclick=newProposal;
+$("#renamebtn").onclick=renameProposal;
+$("#dupbtn").onclick=duplicateProposal;
+$("#deletebtn").onclick=deleteProposal;
+$("#psearch").addEventListener("input",renderList);
+$("#modalCancel").onclick=()=>closeModal(null);
+$("#modalOk").onclick=()=>closeModal($("#modalInput").hidden?true:$("#modalInput").value);
+$("#modal").addEventListener("mousedown",e=>{ if(e.target===$("#modal")) closeModal(null); });
+$("#modalInput").addEventListener("keydown",e=>{
+  if(e.key==="Enter"){e.preventDefault();closeModal($("#modalInput").value);}
+  else if(e.key==="Escape"){e.preventDefault();closeModal(null);}
+});
 makeResizer($("#rsSide"),document.querySelector("aside"),"pp.sideW",{min:220,max:520});
 makeResizer($("#rsChat"),$("#chatcol"),"pp.chatW",{min:300,max:800,fromRight:true});
 $("#psend").onclick=()=>sendMsg();
-$("#polishbtn").onclick=()=>sendMsg("/polish");
+$("#polishbtn").onclick=()=>sendCommand("/polish");
+$("#resetchatbtn").onclick=resetChat;
 $("#stopbtn").onclick=stopAgent;
 $("#pmsg").addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMsg();}});
+$("#pmsg").addEventListener("input",autosizeMsg);
 document.addEventListener("click",e=>{
   if(e.target.tagName==="IMG" && e.target.closest("#preview,#plog")){
     $("#lightbox img").src=e.target.src; $("#lightbox").hidden=false;
   }
 });
 $("#lightbox").onclick=()=>$("#lightbox").hidden=true;
-document.addEventListener("keydown",e=>{ if(e.key==="Escape") $("#lightbox").hidden=true; });
+document.addEventListener("keydown",e=>{
+  if(e.key==="Escape" && !$("#modal").hidden) closeModal(null);
+  if(e.key==="Escape") $("#lightbox").hidden=true;
+});
 editor.addEventListener("input",onEdit);
 editor.addEventListener("scroll",()=>{hl.scrollTop=editor.scrollTop;hl.scrollLeft=editor.scrollLeft;});
 editor.addEventListener("keydown",e=>{
@@ -605,7 +940,9 @@ init();
 INDEX_HTML = (
     INDEX_HTML.replace("/*__PALETTE__*/", PALETTE_CSS)
     .replace("/*__CONTROLS_CSS__*/", CONTROLS_CSS)
+    .replace("/*__CHAT_CSS__*/", CHAT_CSS)
     .replace("//__APP_JS__", APP_JS)
+    .replace("//__API_JS__", API_JS)
     .replace("/*__EDITOR_CSS__*/", EDITOR_CSS)
     .replace("/*__PREVIEW_CSS__*/", PREVIEW_CSS)
     .replace("//__RESIZER_JS__", RESIZER_JS)

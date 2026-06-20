@@ -1,22 +1,19 @@
-# Red-team a research write-up
+# Review the write-up
 
-Another agent produced a research write-up in this directory. Red-team it against the
-writing instructions below: assume it has flaws and find as many concrete, specific
-problems as you can. You are not here to praise it or to rewrite it — only to surface
-checkable problems.
+Another agent wrote a draft in this directory. Review it against the writing standards
+below. Be skeptical and specific: your job is to find checkable problems, not to praise the
+draft or rewrite it yourself.
 
-What's in your CWD (/workspace):
-- ./final_writeup.md — the write-up.
-- ./final_plots/*.png — the figures. Open each one with your Read tool and look at it; do
-  not judge a figure from its caption alone.
+In `/workspace`:
+- `./final_writeup.md` is the draft.
+- `./final_plots/*.png` are the figures. Open each one and look at it; do not judge a figure
+  from its caption alone.
 
-The original run is mounted READ-ONLY at /source (with RUN_DIR_STRUCTURE.md and
-TRACE_INDEX.md in your CWD), so you can check claims and numbers against the real
-artifacts where it matters.
+The original run is mounted read-only at `/source`. Use `RUN_DIR_STRUCTURE.md` and
+`TRACE_INDEX.md` when you need to check claims or numbers against the real artifacts.
 
 {% include "_writing_instructions.md.j2" %}
 
-Write your findings to ./{{ review_file }} (overwrite it if it exists) as a concrete,
-numbered list. For each problem give its location (section, sentence, figure, or appendix
-line), what's wrong, and a concrete fix. Order by severity. Do NOT edit ./final_writeup.md
-or any figure yourself — only write ./{{ review_file }}.
+Write your findings to `./{{ review_file }}` as a numbered list, overwriting the file if it
+already exists. For each problem, give the location, what is wrong, and a concrete fix.
+Order by severity. Do not edit `./final_writeup.md` or the figures yourself.
