@@ -2045,6 +2045,7 @@ PUBLICATION_TRACE_FILES = (
     "REVIEW_round1.md",
     "REVIEW_RESPONSE.md",
 )
+PUBLICATION_AUTH_NOTE = "GITHUB_AND_HF_AUTH_AVAILABLE.md"
 
 
 def _read_json(p: Path) -> dict | None:
@@ -2241,6 +2242,123 @@ def _validate_publication_context(base: Path, copied_figures: list[dict]) -> Non
         )
 
 
+def _git_global_value(key: str) -> str | None:
+    try:
+        value = subprocess.check_output(
+            ["git", "config", "--global", "--get", key],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return value or None
+
+
+def _write_git_identity(run_home: Path) -> dict[str, str]:
+    """Ensure git commits inside the sandbox have an author identity."""
+    name = _git_global_value("user.name")
+    email = _git_global_value("user.email")
+    if not name or not email:
+        raise ValueError(
+            "host git identity is incomplete; set `git config --global user.name` "
+            "and `git config --global user.email` before launching publication mode"
+        )
+    gitconfig = run_home / ".gitconfig"
+    gitconfig.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "config", "--file", str(gitconfig), "user.name", name],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "--file", str(gitconfig), "user.email", email],
+        check=True,
+    )
+    return {"name": name, "email": email, "path": str(gitconfig)}
+
+
+def _seed_gh_auth(run_home: Path) -> list[str]:
+    """Copy host gh credentials into the run HOME used by the sandbox."""
+    host_gh = Path.home() / ".config" / "gh"
+    hosts_yml = host_gh / "hosts.yml"
+    if not hosts_yml.is_file():
+        raise ValueError(
+            "host GitHub CLI auth was not found at ~/.config/gh/hosts.yml; "
+            "run `gh auth login` before launching publication mode"
+        )
+    dest_gh = run_home / ".config" / "gh"
+    dest_gh.mkdir(parents=True, exist_ok=True)
+    copied: list[str] = []
+    for name in ("hosts.yml", "config.yml"):
+        src = host_gh / name
+        if not src.is_file():
+            continue
+        dest = dest_gh / name
+        shutil.copy2(src, dest)
+        os.chmod(dest, 0o600)
+        copied.append(str(dest))
+    os.chmod(run_home / ".config", 0o700)
+    os.chmod(dest_gh, 0o700)
+    return copied
+
+
+def _env_has_hf_token() -> bool:
+    env_path = ROOT / ".env"
+    env = parse_env_text(env_path.read_text()) if env_path.exists() else {}
+    return any(
+        bool(env.get(key) or os.environ.get(key))
+        for key in ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN")
+    )
+
+
+def _validate_publication_hf_auth() -> str:
+    if _env_has_hf_token():
+        return "HF token is available from repo .env or process environment."
+    if (Path.home() / ".cache" / "huggingface" / "token").is_file():
+        raise ValueError(
+            "a host Hugging Face token exists, but publication runs receive "
+            "credentials from repo .env; add HF_TOKEN to .env before launching "
+            "publication mode"
+        )
+    raise ValueError(
+        "Hugging Face auth was not found; add HF_TOKEN to repo .env before "
+        "launching publication mode"
+    )
+
+
+def _prepare_publication_credentials(base: Path) -> dict:
+    """Seed credentials that publication continuations need inside the sandbox."""
+    run_home = base / ".home"
+    run_home.mkdir(parents=True, exist_ok=True)
+    gh_files = _seed_gh_auth(run_home)
+    git_identity = _write_git_identity(run_home)
+    hf_status = _validate_publication_hf_auth()
+    note_path = base / PUBLICATION_FIGURE_DIR / PUBLICATION_AUTH_NOTE
+    note_path.write_text(
+        "\n".join(
+            [
+                "# Publication Auth",
+                "",
+                "The publication launcher staged credentials for this continuation.",
+                "",
+                "- GitHub CLI auth is available in the sandbox HOME at `.home/.config/gh/`.",
+                "- Git commit identity is available in the sandbox HOME at `.home/.gitconfig`.",
+                f"- Hugging Face auth: {hf_status}",
+                "",
+                "Do not copy these credential files into the release repository.",
+                "If an earlier trace says GitHub auth was unavailable, that finding is stale.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "github_files": gh_files,
+        "git_identity": git_identity,
+        "hf_status": hf_status,
+        "note": str(note_path.relative_to(base)),
+    }
+
+
 def _publication_prompt(
     base: Path, copied_figures: list[dict], copied_trace: list[dict]
 ) -> str:
@@ -2272,6 +2390,11 @@ your clean notebook must reproduce:
 {figure_lines}
 
 {trace_section}
+
+Publication credentials have been staged for this continuation. GitHub CLI auth is
+available in the sandbox HOME, and Hugging Face auth is available from the run
+environment. See `{PUBLICATION_FIGURE_DIR}/{PUBLICATION_AUTH_NOTE}` for details.
+Do not copy credential files into the release repository.
 
 Put the clean project in a new subfolder named after this project inside this repo:
 
@@ -2371,9 +2494,16 @@ def publish_continuation(rel: str) -> dict:
         )
     _validate_publication_context(base, copied)
     copied_trace = _copy_publication_trace(base)
+    credentials = _prepare_publication_credentials(base)
     manifest_path = base / PUBLICATION_FIGURE_DIR / "manifest.json"
     manifest = _read_json(manifest_path) or {}
     manifest["trace_files"] = copied_trace
+    manifest["credentials"] = {
+        "github_cli_seeded": bool(credentials["github_files"]),
+        "git_identity_seeded": True,
+        "hf_auth_checked": True,
+        "note": credentials["note"],
+    }
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
