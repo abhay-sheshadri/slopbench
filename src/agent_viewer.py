@@ -4,13 +4,13 @@
 Streams pi agent state straight off disk from the run directories created by
 ``src.agent_runner`` (each at outputs/<...>/<proposal>/<mode>/agent_N/), then
 renders a normalized transcript: user/assistant messages, thinking, tool calls +
-results, subagents, multi-phase run-loop phases, and goal state. There is no
-Docker: a run is "live" while its ``.pi_transcripts/RUNNING`` marker exists and
-the agent is appending to ``session.jsonl``; otherwise it's a finished record.
-Both read through the same code path.
+results, subagents, and the run-loop phases. There is no Docker: a run is "live"
+while its ``.pi_transcripts/RUNNING`` marker exists and the agent is appending to
+``session.jsonl``; otherwise it's a finished record. Both read through the same
+code path.
 
 No third-party dependencies (stdlib ``http.server`` + an embedded single-page
-app). Filter the sidebar by mode (goal / multi_phase) and proposal.
+app). Filter the sidebar by proposal.
 
 Usage:
     python -m src.agent_viewer            # serve on http://127.0.0.1:8765
@@ -36,18 +36,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-from src import DEFAULT_GPT_MODEL, oversight, sandbox
+from src import DEFAULT_MODEL, oversight, sandbox
 from src.runner_utils import parse_env_text
-from src.theme import PALETTE_CSS
+from src.theme import FAVICON_BYTES, FAVICON_LINK, PALETTE_CSS
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUTS_DIR = ROOT / "outputs"
 
-# Runs live directly on disk under outputs/<...>/<proposal>/<mode>/agent_N/.
+# Runs live directly on disk under outputs/<...>/<proposal>_multi_phase/.
 # The runner writes both a compatibility RUNNING marker and a heartbeat. The
 # heartbeat plus recent filesystem activity is the source of truth for whether a
 # run is actively progressing; a marker by itself can be stale after hard kills.
-MODES = ("goal", "multi_phase")
+# There is one run mode; the dir suffix is retained as a naming convention.
+MODES = ("multi_phase",)
 RUNNING_MARKER = "RUNNING"
 HEARTBEAT_FILE = "heartbeat.json"
 HEARTBEAT_STALE_SECONDS = 90
@@ -71,31 +72,20 @@ def _iter_jsonl(text: str):
 def parse_session(text: str) -> dict:
     """Parse a pi session.jsonl into normalized turns + sidecar state.
 
-    Returns {"turns": [...], "goal": {...}|None, "header": {...}}.
+    Returns {"turns": [...], "header": {...}, "cost": ...}.
     """
     turns: list[dict] = []
     tool_results: dict[str, dict] = {}
-    goal: dict | None = None
     header: dict = {}
     cost = 0.0
 
     entries = list(_iter_jsonl(text))
 
-    # First pass: collect tool results (so we can attach them to tool calls)
-    # and the latest goal state.
+    # First pass: collect tool results (so we can attach them to tool calls).
     for entry in entries:
         etype = entry.get("type")
         if etype == "session":
             header = {"cwd": entry.get("cwd"), "id": entry.get("id")}
-        elif etype == "custom" and entry.get("customType") == "goal":
-            data = entry.get("data") or {}
-            if data.get("objective"):
-                goal = {
-                    "objective": data.get("objective"),
-                    "status": data.get("status"),
-                    "tokensUsed": data.get("tokensUsed"),
-                    "tokenBudget": data.get("tokenBudget"),
-                }
         elif etype == "message":
             msg = entry.get("message") or {}
             if msg.get("role") == "toolResult" and msg.get("toolCallId"):
@@ -160,7 +150,7 @@ def parse_session(text: str) -> dict:
                     "id": entry.get("id"),
                 }
             )
-    return {"turns": turns, "goal": goal, "header": header, "cost": cost}
+    return {"turns": turns, "header": header, "cost": cost}
 
 
 def _content_text(content) -> str:
@@ -412,6 +402,10 @@ def _parse_iso_ts(value) -> float | None:
         return None
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _run_health(d: Path) -> dict:
     tdir = d / ".pi_transcripts"
     marker = tdir / RUNNING_MARKER
@@ -622,9 +616,6 @@ def transcript_signature(data: dict) -> str:
     if not isinstance(data, dict) or data.get("error"):
         return f"err:{(data or {}).get('error')}"
     parts = [str(data.get("mode"))]
-    goal = data.get("goal")
-    if goal:
-        parts.append(f"g:{goal.get('status')}:{goal.get('tokensUsed')}")
     rl = data.get("run_loop")
     if rl:
         parts.append(
@@ -655,22 +646,20 @@ _STAGE_LABEL = {
 }
 
 
-def _session_meta(name: str, mode: str | None = None) -> dict:
+def _session_meta(name: str) -> dict:
     """Display ``label``, phase ``group``, and fallback sort ``order`` for a tab.
 
     Sessions are ultimately ordered by when they actually ran (first-message
     timestamp); ``order`` is only a tiebreaker for sessions without timestamps.
     Run-loop sub-sessions are named ``<stage>_<segment>_<phase>`` (worker /
-    reviewer / phase_planner) and are grouped per phase. In ``goal`` mode the
-    single execution session is the agent itself, so it is labelled "Worker".
-    Handles both live ("worker 0:0") and disk ("worker_0_0") naming.
+    reviewer / phase_planner) and are grouped per phase. Handles both live
+    ("worker 0:0") and disk ("worker_0_0") naming.
     """
     n = name.lower().replace("-", "_").replace(" ", "_").replace(":", "_")
     if n == "planner":  # our /init-planner session (runs first)
         return {"label": "Planner", "group": "Planning", "order": (-2, 0, 0, 0)}
-    if n == "main":  # the execution session (/goal or /run-loop)
-        label = "Worker" if mode == "goal" else "Run loop"
-        return {"label": label, "group": "Execution", "order": (-1, 0, 0, 0)}
+    if n == "main":  # the /run-loop execution session
+        return {"label": "Run loop", "group": "Execution", "order": (-1, 0, 0, 0)}
     if n.startswith("main_planner"):
         return {
             "label": "Run-loop planner",
@@ -915,7 +904,7 @@ def _assemble(
             raw.append((nm, p["turns"]))
         sessions = []
         for nm, turns in raw:
-            meta = _session_meta(nm, mode)
+            meta = _session_meta(nm)
             sessions.append(
                 {
                     "name": nm,
@@ -933,9 +922,6 @@ def _assemble(
             s.pop("_ord", None)
     return {
         "mode": mode,
-        # The goal-mode objective lives in the execution session; fall back to the
-        # planner session just in case.
-        "goal": main["goal"] or (planner["goal"] if planner else None),
         "run_loop": _run_loop_summary(run_loop_state_text),
         "sessions": sessions,
         "cost": round(total_cost, 4),
@@ -1084,7 +1070,6 @@ def list_runs_overview() -> list[dict]:
                 or transcript_activity > item["lastActivity"]
             ):
                 item["lastActivity"] = transcript_activity
-            item["goal"] = data.get("goal")
             item["cost"] = data.get("cost")
             rl = data.get("run_loop")
             item["run_loop"] = (
@@ -1128,7 +1113,7 @@ def list_runs_overview() -> list[dict]:
 
 def audit_disk_transcripts() -> list[dict]:
     """Audit every saved on-disk transcript for the agent stages it captured:
-    planner mode, goal mode, and the ryan-loop stages.
+    planner mode and the run-loop stages.
     """
     results: list[dict] = []
     if not OUTPUTS_DIR.exists():
@@ -1157,7 +1142,6 @@ def audit_disk_transcripts() -> list[dict]:
                 or ("init-planner" in planner_raw)
                 or ('"customType":"planner-mode"' in raw)
                 or ("init-planner" in raw),
-                "goal_mode": ('"customType":"goal"' in raw) or ("/goal " in raw),
                 "run_loop": rl is not None,
                 "ryan_loop_stages": stages or (["state-only"] if rl else []),
                 "completed_phases": len(rl["completed"]) if rl else 0,
@@ -1192,11 +1176,9 @@ def _run_loop_session_files(sessions: dict) -> list[dict]:
 # but physically cannot modify the run it is auditing. Its answer streams back to
 # the browser via the same session.jsonl parser the rest of the viewer uses.
 LENS_DIR = OUTPUTS_DIR / ".lens"
-# Oversight/lens questions are interactive reading tasks. Default to Opus 4.6:
-# this account has no Fable access (the API 404s "Claude Fable 5 is not
-# available. Please use Opus 4.8."), and the experiment runners keep their own
-# DEFAULT_MODEL. Override with LENS_MODEL.
-LENS_MODEL = os.environ.get("LENS_MODEL", "anthropic/claude-opus-4-6")
+# Oversight/lens questions use the same default model as the rest of the
+# pipeline. Override with LENS_MODEL only when deliberately testing a variant.
+LENS_MODEL = os.environ.get("LENS_MODEL", DEFAULT_MODEL)
 LENS_THINKING = os.environ.get("LENS_THINKING", "medium")
 # Max number of Run-Lens summary agents the dashboard's "Generate summaries"
 # fan-out runs at once (also injected as the client-side cap). Each one is a full
@@ -1339,11 +1321,8 @@ def _lens_prompt(rel: str, base: Path, question: str) -> str:
         "conclusions plus the evidence you verified.",
         "",
         f"Run: {rel}",
-        f"Status: {status} | mode: {data.get('mode')} | est. spend so far: ${data.get('cost', 0) or 0:.2f}",
+        f"Status: {status} | est. spend so far: ${data.get('cost', 0) or 0:.2f}",
     ]
-    if data.get("goal"):
-        g = data["goal"]
-        lines.append(f"Goal: status={g.get('status')} tokensUsed={g.get('tokensUsed')}")
     if rl:
         lines.append(
             f"Run-loop: status={rl.get('status')} segment={rl.get('segment')} "
@@ -1354,7 +1333,7 @@ def _lens_prompt(rel: str, base: Path, question: str) -> str:
         f"Transcript sessions present (name(turns)): {sess or 'none yet'}",
         "",
         "Key locations (relative to /workspace; some may be absent for this run):",
-        *(f"  - {label}: {rel}" for label, rel in oversight.key_locations()),
+        *(f"  - {label}: {rel}" for label, rel in oversight.key_locations(base)),
         "",
         "File index (relative path | bytes):",
         *_lens_file_index(base),
@@ -1614,9 +1593,9 @@ def reset_lens(rel: str) -> dict:
 # Same read-only model as the audit_agent experiment (run mounted READ-ONLY at
 # /source, a writable CWD at /workspace), but launched non-blocking and streamed
 # through the lens job machinery so the UI can watch it explore live.
-# Blue-teaming is a careful reasoning task; default to the shared GPT reasoning
-# model while keeping BLUE_TEAM_MODEL as an override.
-BLUE_TEAM_MODEL = os.environ.get("BLUE_TEAM_MODEL", DEFAULT_GPT_MODEL)
+# Blue-teaming is a careful reasoning task; default to the shared Claude
+# reasoning model while keeping BLUE_TEAM_MODEL as an override.
+BLUE_TEAM_MODEL = os.environ.get("BLUE_TEAM_MODEL", DEFAULT_MODEL)
 BLUE_TEAM_THINKING = os.environ.get("BLUE_TEAM_THINKING", "high")
 
 
@@ -1807,7 +1786,7 @@ def finalize_blue_team(job: str, base: Path) -> bool:
         jobdir = info["dir"]
         stderr_path = info.get("stderr") or (jobdir / "stderr.log")
         info["finalizing"] = True
-        info["followup_pending"] = False
+        info["followup_pending"] = True
     _kill_lens_processes(info)
     inner = oversight.pi_inner_argv(
         f"{sandbox.WORKSPACE}/session.jsonl",
@@ -1838,7 +1817,69 @@ def finalize_blue_team(job: str, base: Path) -> bool:
     with _LENS_LOCK:
         info["proc"] = proc
         info["finalize_started"] = time.time()
+    threading.Thread(
+        target=_blue_team_finalize_followup, args=(job, base), daemon=True
+    ).start()
     return True
+
+
+def _blue_team_finalize_followup(job: str, base: Path) -> None:
+    """After a watchdog finalizer emits findings, run the same skim rewrite pass.
+
+    Watchdog-finalized audits bypass the normal first-pass -> coverage ->
+    skim flow. Keep them from saving until the style-preserving skim pass has a
+    chance to rewrite the findings into the same plain-language shape.
+    """
+    from src import blue_team
+
+    info = _LENS_JOBS.get(job)
+    if not info:
+        return
+    try:
+        proc = info.get("proc")
+        try:
+            if proc is not None:
+                proc.wait()
+        except Exception:
+            pass
+        jobdir = info["dir"]
+        session = info["session"]
+        if (
+            not info.get("cancelled")
+            and getattr(proc, "returncode", None) == 0
+            and _session_has_findings_block(session)
+        ):
+            stderr_path = info.get("stderr") or (jobdir / "stderr.log")
+            inner = oversight.pi_inner_argv(
+                f"{sandbox.WORKSPACE}/session.jsonl",
+                BLUE_TEAM_MODEL,
+                BLUE_TEAM_THINKING,
+                blue_team.build_skim_rewrite_prompt(),
+            )
+            argv = sandbox.build_argv(
+                jobdir, inner, extra_ro_dest_binds=((str(base), "/source"),)
+            )
+            try:
+                errf = stderr_path.open("ab")
+                try:
+                    proc2 = subprocess.Popen(
+                        argv,
+                        env=oversight.oversight_env(sandbox.HOME),
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=errf,
+                        start_new_session=True,
+                    )
+                finally:
+                    errf.close()
+                with _LENS_LOCK:
+                    info["proc"] = proc2
+                proc2.wait()
+            except OSError:
+                pass
+    finally:
+        with _LENS_LOCK:
+            info["followup_pending"] = False
 
 
 def start_blue_team(rel: str) -> dict:
@@ -1995,6 +2036,15 @@ def _lens_signature(data: dict) -> str:
 # --------------------------------------------------------------------------- #
 RUN_OUTPUT_ROOT = OUTPUTS_DIR / "03_run_agents"
 FEEDBACK_DIR = ROOT / "feedback"
+PUBLICATION_FIGURE_DIR = "publication_reference_figures"
+PUBLICATION_FIGURE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".pdf", ".svg"}
+PUBLICATION_TRACE_FILES = (
+    "session.jsonl",
+    "studio_agent.log",
+    "final_writeup.md",
+    "REVIEW_round1.md",
+    "REVIEW_RESPONSE.md",
+)
 
 
 def _read_json(p: Path) -> dict | None:
@@ -2087,6 +2137,186 @@ def save_feedback(rel: str, text: str) -> dict:
     return {"file": p.name, "path": str(p.relative_to(ROOT))}
 
 
+def _write_feedback_file(run_name: str, stem: str, text: str) -> dict:
+    """Write a named timestamped feedback/continuation note."""
+    fdir = _feedback_dir(run_name)
+    fdir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-") or "feedback"
+    p = fdir / f"{ts}-{safe_stem}.md"
+    p.write_text(text.strip() + "\n", encoding="utf-8")
+    return {"file": p.name, "path": str(p.relative_to(ROOT))}
+
+
+def _writeup_figure_sources(run_name: str) -> list[tuple[str, Path]]:
+    """The writeup figures used as release targets.
+
+    Publication continuations intentionally use only the interactive Blogpost
+    Studio output. Older selected_blogs / batch blogpost outputs can be stale
+    relative to the writeup the user is looking at in the panel.
+    """
+    candidates = [
+        (
+            "blogpost_studio",
+            OUTPUTS_DIR / "06_blogpost_studio" / run_name / "final_plots",
+        )
+    ]
+    return [(label, path) for label, path in candidates if path.is_dir()]
+
+
+def _copy_publication_figures(base: Path) -> list[dict]:
+    """Stage writeup figures into the run dir so /run-loop continue can see them."""
+    dest_root = base / PUBLICATION_FIGURE_DIR
+    if dest_root.exists():
+        shutil.rmtree(dest_root)
+    dest_root.mkdir(parents=True, exist_ok=True)
+    copied: list[dict] = []
+    for label, src_dir in _writeup_figure_sources(base.name):
+        dest_dir = dest_root / label
+        for src in sorted(src_dir.iterdir()):
+            if not src.is_file() or src.suffix.lower() not in PUBLICATION_FIGURE_EXTS:
+                continue
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / src.name
+            shutil.copy2(src, dest)
+            copied.append(
+                {
+                    "source": str(src.relative_to(ROOT)),
+                    "reference": str(dest.relative_to(base)),
+                    "bytes": dest.stat().st_size,
+                }
+            )
+    manifest = {
+        "created_at": _utc_now(),
+        "note": "Reference figures copied from writeup outputs for the publication continuation.",
+        "figures": copied,
+    }
+    (dest_root / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return copied
+
+
+def _copy_publication_trace(base: Path) -> list[dict]:
+    """Stage Blogpost Studio trace files that explain how figures were made."""
+    src_root = OUTPUTS_DIR / "06_blogpost_studio" / base.name
+    if not src_root.is_dir():
+        return []
+    dest_root = base / PUBLICATION_FIGURE_DIR / "blogpost_studio_trace"
+    dest_root.mkdir(parents=True, exist_ok=True)
+    copied: list[dict] = []
+    for name in PUBLICATION_TRACE_FILES:
+        src = src_root / name
+        if not src.is_file():
+            continue
+        dest = dest_root / name
+        shutil.copy2(src, dest)
+        copied.append(
+            {
+                "source": str(src.relative_to(ROOT)),
+                "reference": str(dest.relative_to(base)),
+                "bytes": dest.stat().st_size,
+            }
+        )
+    return copied
+
+
+def _validate_publication_context(base: Path, copied_figures: list[dict]) -> None:
+    """Fail before launching if the Blogpost Studio context is incomplete."""
+    studio_root = OUTPUTS_DIR / "06_blogpost_studio" / base.name
+    missing: list[str] = []
+    if not copied_figures:
+        missing.append(str(studio_root / "final_plots"))
+    for rel in ("final_writeup.md",):
+        if not (studio_root / rel).is_file():
+            missing.append(str(studio_root / rel))
+    if not any(
+        (studio_root / rel).is_file() for rel in ("session.jsonl", "studio_agent.log")
+    ):
+        missing.append(f"{studio_root}/session.jsonl or {studio_root}/studio_agent.log")
+    if missing:
+        raise ValueError(
+            "Blogpost Studio context is incomplete; expected these file(s) before "
+            "launching publication mode: " + "; ".join(missing)
+        )
+
+
+def _publication_prompt(
+    base: Path, copied_figures: list[dict], copied_trace: list[dict]
+) -> str:
+    figure_lines = "\n".join(
+        f"- `{f['reference']}` copied from `{f['source']}`" for f in copied_figures
+    )
+    trace_lines = "\n".join(
+        f"- `{f['reference']}` copied from `{f['source']}`" for f in copied_trace
+    )
+    trace_section = (
+        "The Blogpost Studio trace files below have also been copied into this run. "
+        "Use them to understand how the writeup agent found data, wrote plotting code, "
+        "and selected the final figures. Treat the writeup and trace as context for "
+        "the release package; do not publish them verbatim unless they are genuinely "
+        "useful documentation:\n\n"
+        f"{trace_lines}\n"
+        if copied_trace
+        else "No Blogpost Studio trace files were found beyond the figure files.\n"
+    )
+    return f"""I think you did a reasonable job on this project, and I want to publish it.
+
+Please create a clean, minimal copy of your code: minimal scripts plus a single master
+Jupyter notebook that reproduces the main plots/results from this work.
+
+The current writeup figures have been copied into this run directory under
+`{PUBLICATION_FIGURE_DIR}/`. Treat these as the reference plots from the writeup that
+your clean notebook must reproduce:
+
+{figure_lines}
+
+{trace_section}
+
+Put the clean project in a new subfolder named after this project inside this repo:
+
+https://github.com/redwoodresearch/automated-research-projects.git
+
+Do not put files at the repository root except when absolutely necessary for repository-wide
+metadata. The release artifact for this project should live under one project-named folder.
+
+If you created novel data, datasets, model weights, or other large artifacts, do not put
+them directly in the GitHub repo. Instead, upload them to this Hugging Face organization:
+
+https://huggingface.co/automated-alignment-science
+
+Then make the notebook/code load those artifacts from Hugging Face.
+
+Make the codebase clean, minimal, and easy for someone else to run from a fresh checkout.
+The master notebook should regenerate the same main plots shown in the copied reference
+figures from `{PUBLICATION_FIGURE_DIR}/`: same plotted quantities, data values, axes,
+labels, legends, and conclusions. Use clean code and the appropriate data artifacts;
+do not reproduce the plots by copying these image/PDF files into the release repo.
+
+Publication standards:
+- The GitHub folder should be a small release package, not a dump of the working run.
+- Include only minimal, cleaned scripts/modules needed to understand and reproduce the
+  important results.
+- Keep relevant training, data-generation, and evaluation scripts organized and readable,
+  but do not make the release notebook rerun expensive jobs.
+- Upload novel datasets, model checkpoints, large raw results, and other heavy artifacts
+  to Hugging Face if they are not already hosted there.
+- Include a clear README with setup, artifact locations, and exact reproduction commands.
+- Include a figure-generation entry point, such as `generate_figures.py` or a clearly
+  marked notebook section, that regenerates the main saved figures from the released
+  artifacts.
+
+Do not rerun expensive training, model generation, or long data-collection jobs just to
+publish the project. Instead, keep the relevant training/data-generation scripts cleaned
+up and organized in the release repo for reference, upload the resulting datasets/models/
+large artifacts to Hugging Face, and make the released notebook load those artifacts.
+
+Verify that the notebook or figure-generation command reproduces the main plots. Commit
+your work to the GitHub repo when you are done, and report the commit hash and any
+Hugging Face repo(s) you used.
+"""
+
+
 def resume_run(rel: str) -> dict:
     """Relaunch a dead (failed/killed) run with --resume, detached in tmux."""
     base = _safe_disk_path(rel)
@@ -2096,25 +2326,23 @@ def resume_run(rel: str) -> dict:
         raise ValueError(
             "run looks alive (fresh heartbeat) — refusing to double-launch"
         )
-    proposal, mode = _proposal_and_mode(base.name)
+    proposal, _ = _proposal_and_mode(base.name)
     session = f"agent_{base.name}"
     _tmux_run(
         session,
         f".venv/bin/python experiments/03_run_agents/run.py "
-        f"--projects {proposal} --modes {mode} --resume",
+        f"--projects {proposal} --resume",
     )
     return {"ok": True, "session": session}
 
 
 def continue_run(rel: str, feedback_text: str) -> dict:
-    """Relaunch a COMPLETED multi_phase run as a continuation: the feedback note
-    becomes the new instructions (run.py --continue-file)."""
+    """Relaunch a COMPLETED run as a continuation: the feedback note becomes the
+    new instructions (run.py --continue-file)."""
     base = _safe_disk_path(rel)
     if base is None or not (base / ".pi_transcripts").exists():
         raise ValueError("unknown run")
-    proposal, mode = _proposal_and_mode(base.name)
-    if mode != "multi_phase":
-        raise ValueError("continuation only supports multi_phase runs")
+    proposal, _ = _proposal_and_mode(base.name)
     if _run_item(base, rel).get("phase") != "Completed":
         raise ValueError("only completed runs can be continued")
     saved = save_feedback(rel, feedback_text)  # the continue-file lives in feedback/
@@ -2122,13 +2350,52 @@ def continue_run(rel: str, feedback_text: str) -> dict:
     _tmux_run(
         session,
         f".venv/bin/python experiments/03_run_agents/run.py "
-        f"--projects {proposal} --modes multi_phase --continue-file {ROOT / saved['path']}",
+        f"--projects {proposal} --continue-file {ROOT / saved['path']}",
     )
     return {"ok": True, "session": session, "feedback": saved["path"]}
 
 
+def publish_continuation(rel: str) -> dict:
+    """Stage writeup figures and launch the standard publication continuation."""
+    base = _safe_disk_path(rel)
+    if base is None or not (base / ".pi_transcripts").exists():
+        raise ValueError("unknown run")
+    proposal, _ = _proposal_and_mode(base.name)
+    if _run_item(base, rel).get("phase") != "Completed":
+        raise ValueError("only completed runs can be published")
+    copied = _copy_publication_figures(base)
+    if not copied:
+        raise ValueError(
+            "no Blogpost Studio writeup figures found for this run; expected "
+            f"{OUTPUTS_DIR / '06_blogpost_studio' / base.name / 'final_plots'}"
+        )
+    _validate_publication_context(base, copied)
+    copied_trace = _copy_publication_trace(base)
+    manifest_path = base / PUBLICATION_FIGURE_DIR / "manifest.json"
+    manifest = _read_json(manifest_path) or {}
+    manifest["trace_files"] = copied_trace
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    prompt = _publication_prompt(base, copied, copied_trace)
+    saved = _write_feedback_file(base.name, "publish-continuation", prompt)
+    session = f"agent_{base.name}"
+    _tmux_run(
+        session,
+        f".venv/bin/python experiments/03_run_agents/run.py "
+        f"--projects {proposal} --continue-file {ROOT / saved['path']}",
+    )
+    return {
+        "ok": True,
+        "session": session,
+        "feedback": saved["path"],
+        "figures": len(copied),
+        "figure_dir": str((base / PUBLICATION_FIGURE_DIR).relative_to(ROOT)),
+    }
+
+
 def launch_options() -> dict:
-    """Every proposal × mode, marking combos that already have a run dir."""
+    """Every proposal, marking those that already have a run dir."""
     proposals = []
     for p in sorted((ROOT / "proposals").glob("*.md")):
         proposals.append(
@@ -2142,7 +2409,7 @@ def launch_options() -> dict:
     return {"proposals": proposals, "modes": list(MODES)}
 
 
-def launch_run(proposal: str, mode: str) -> dict:
+def launch_run(proposal: str, mode: str = MODES[0]) -> dict:
     """Start a fresh agent run for a proposal, detached in its own tmux session
     (so it survives this server restarting, and lands where the user's manually
     launched runs live)."""
@@ -2164,7 +2431,7 @@ def launch_run(proposal: str, mode: str) -> dict:
         raise ValueError(f"tmux session {session} already exists")
     _tmux_run(
         session,
-        f".venv/bin/python experiments/03_run_agents/run.py --projects {proposal} --modes {mode}",
+        f".venv/bin/python experiments/03_run_agents/run.py --projects {proposal}",
     )
     return {"ok": True, "session": session}
 
@@ -2301,7 +2568,12 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 except ValueError as exc:
                     self._json({"error": str(exc)}, code=400)
-            elif path in ("/api/feedback", "/api/resume", "/api/continue"):
+            elif path in (
+                "/api/feedback",
+                "/api/resume",
+                "/api/continue",
+                "/api/publish-continuation",
+            ):
                 body = self._read_body()
                 fn = {
                     "/api/feedback": lambda: save_feedback(
@@ -2310,6 +2582,9 @@ class Handler(BaseHTTPRequestHandler):
                     "/api/resume": lambda: resume_run(body.get("run") or ""),
                     "/api/continue": lambda: continue_run(
                         body.get("run") or "", body.get("text") or ""
+                    ),
+                    "/api/publish-continuation": lambda: publish_continuation(
+                        body.get("run") or ""
                     ),
                 }[path]
                 try:
@@ -2356,7 +2631,9 @@ class Handler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = parsed.path
             if path == "/favicon.ico":
-                self._send(204, b"", "image/x-icon")
+                # Same logo as the <link rel=icon> in every page head, so a bare
+                # browser request to /favicon.ico also gets the shared mark.
+                self._send(200, FAVICON_BYTES, "image/svg+xml")
             elif path == "/api/launch/options":
                 self._json(launch_options())
             elif path == "/api/project":
@@ -2412,6 +2689,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Agent Viewer</title>
+<!--__FAVICON__-->
 <style>
 /*__PALETTE__*/
 *{box-sizing:border-box}
@@ -2650,7 +2928,7 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
     <button id="launchBtn" class="ovbtn" title="Start a new agent run from a proposal">🚀 Launch a run</button>
     <div class="launcher" id="launcher" hidden>
       <div class="lhead">Launch a new run <button class="lclose" id="launchClose" title="Close">×</button></div>
-      <div class="lsub">Pick a proposal and a mode. Combos that already have a run are disabled.</div>
+      <div class="lsub">Pick a proposal. Proposals that already have a run are disabled.</div>
       <div id="launchList" class="llist"></div>
     </div>
     <div class="browse-head"><h1>Browse</h1><button id="refresh" title="Refresh">⟳</button></div>
@@ -2685,6 +2963,7 @@ pre{background:#0b0d13;border:1px solid var(--border);border-radius:7px;padding:
         <span class="spacer"></span>
         <button class="mini" id="ppResume" hidden title="Relaunch this run with --resume in its tmux session">⟲ Resume run</button>
         <button class="mini" id="ppContinue" hidden title="Relaunch this completed run with the feedback above as its new instructions">🚀 Launch continuation</button>
+        <button class="mini primary" id="ppPublish" hidden title="Copy Blogpost Studio figures, writeup, and trace into the run and launch the standard publication continuation">Publish package</button>
       </div>
       <div class="pp-label">Saved feedback</div>
       <div class="pp-fb" id="ppFb"></div>
@@ -3099,7 +3378,6 @@ async function loadOverview(){
   if(!res||!res.runs)return;
   state.overview=res.runs;
   const sig=JSON.stringify(res.runs.map(r=>[r.path,r.phase,r.health,r.status,r.turns,r.sessions,r.lastActivity,r.heartbeatAt,r.cost,
-    r.goal&&[r.goal.status,r.goal.tokensUsed],
     r.run_loop&&[r.run_loop.status,r.run_loop.segment,r.run_loop.phase,r.run_loop.stage,r.run_loop.completed]]));
   if(sig===state.overviewSig)return;            // nothing changed -> no DOM churn
   state.overviewSig=sig; renderOverview(res.runs);
@@ -3124,7 +3402,6 @@ function statusTag(r){
 function runStatusLine(r){
   const b=[];
   if(r.cost!=null)b.push(`<b style="color:var(--ok)">$${Number(r.cost).toFixed(2)}</b>`);
-  if(r.goal&&r.goal.tokensUsed!=null)b.push(`goal <b>${esc(r.goal.tokensUsed)} tok</b>`);
   if(r.run_loop){const rl=r.run_loop;b.push(`S${rl.segment}P${rl.phase} ${esc(rl.stage||"")} \u00b7 ${rl.completed} done`);}
   b.push(`<b>${r.sessions}</b> sess \u00b7 <b>${r.turns}</b> turns`);
   b.push(`activity ${fmtAgo(r.lastActivity)}`);
@@ -3253,7 +3530,7 @@ function stopSummaries(){
 // planner while planning is still in progress).
 function defaultSess(data){
   const ss=data.sessions||[];
-  const mi=ss.findIndex(s=>s.name==="main" && (s.turns||[]).length);   // goal: the Worker
+  const mi=ss.findIndex(s=>s.name==="main" && (s.turns||[]).length);   // the run-loop execution session
   if(mi>=0)return mi;
   for(let i=ss.length-1;i>=0;i--){ if((ss[i].turns||[]).length) return i; }  // else most recent active phase
   return 0;
@@ -3519,13 +3796,13 @@ async function openLauncher(){
   if(!d){document.getElementById("launchList").innerHTML='<div class="lsub">failed to load proposals</div>';return;}
   document.getElementById("launchList").innerHTML=d.proposals.map(p=>{
     const btns=d.modes.map(m=>`<button class="lmode" data-p="${esc(p.name)}" data-m="${m}"`
-      +`${p.existing[m]?' disabled title="this run already exists"':''}>${m}</button>`).join("");
+      +`${p.existing[m]?' disabled title="this run already exists"':''}>Run</button>`).join("");
     return `<div class="lrow"><span class="lname" title="${esc(p.name)}">${esc(p.name)}</span>${btns}</div>`;
   }).join("")||'<div class="lsub">no proposals found</div>';
   el.querySelectorAll(".lmode:not([disabled])").forEach(b=>b.onclick=()=>launchRun(b.dataset.p,b.dataset.m));
 }
 async function launchRun(p,m){
-  if(!confirm(`Launch ${p} in ${m} mode?\n\nThis starts a real, long-running (and expensive) agent run in a tmux session.`))return;
+  if(!confirm(`Launch ${p}?\n\nThis starts a real, long-running (and expensive) agent run in a tmux session.`))return;
   let r,d;
   try{
     r=await fetch("/api/launch",{method:"POST",headers:{"Content-Type":"application/json"},
@@ -3567,6 +3844,7 @@ async function openProject(){
   // produce a heartbeat, during which the run still reads "Completed" — keep the
   // button hidden so the launch visibly "took" and can't be double-fired.
   document.getElementById("ppContinue").hidden = !(d.phase==="Completed" && d.mode==="multi_phase") || ppContinued.has(state.agentId);
+  document.getElementById("ppPublish").hidden = !(d.phase==="Completed" && d.mode==="multi_phase") || ppContinued.has(state.agentId);
   const fb=document.getElementById("ppFb");
   fb.innerHTML=(d.feedback||[]).map(f=>
     `<div class="fbitem"><span class="fbdate">${esc(f.file)}</span>\n${esc(f.text)}</div>`).join("")
@@ -3610,6 +3888,17 @@ document.getElementById("ppContinue").onclick=async()=>{
     toast(`Continuation launched in tmux session ${d.session} (feedback saved to ${d.feedback})`);
   }
 };
+document.getElementById("ppPublish").onclick=async()=>{
+  const d=await ppPost("/api/publish-continuation",{run:state.agentId},
+    "Launch the standard publication continuation for this COMPLETED run?\n\nThis copies the Blogpost Studio figures, writeup, and agent trace into the run as publication context, then starts a real, long-running (and expensive) agent run.");
+  if(d){
+    ppContinued.add(state.agentId);
+    document.getElementById("ppContinue").hidden=true;
+    document.getElementById("ppPublish").hidden=true;
+    openProject();openProject();
+    toast(`Publication continuation launched in tmux session ${d.session}; copied ${d.figures} reference figure(s)`);
+  }
+};
 
 if(state.agentId)lensSwitchTo(state.agentId);
 lensSetOpen(true,false);   // open the lens iff a run is deep-linked; otherwise it stays closed/disabled
@@ -3651,6 +3940,7 @@ setInterval(()=>{ refreshDir(); if(state.view==="overview")loadOverview(); },300
 """
 
 INDEX_HTML = INDEX_HTML.replace("/*__PALETTE__*/", PALETTE_CSS)
+INDEX_HTML = INDEX_HTML.replace("<!--__FAVICON__-->", FAVICON_LINK)
 INDEX_HTML = INDEX_HTML.replace(
     "const SUMMARY_MAX=50;", f"const SUMMARY_MAX={LENS_SUMMARY_CONCURRENCY};"
 )
@@ -3671,7 +3961,7 @@ def main() -> None:
     parser.add_argument(
         "--audit",
         action="store_true",
-        help="Audit saved on-disk transcripts (planner/goal/ryan-loop stages) and exit.",
+        help="Audit saved on-disk transcripts (planner/run-loop stages) and exit.",
     )
     args = parser.parse_args()
 
@@ -3684,7 +3974,6 @@ def main() -> None:
         for r in rows:
             print(f"- {r['path']}")
             print(f"    planner mode : {'yes' if r['planner_mode'] else 'no'}")
-            print(f"    goal mode    : {'yes' if r['goal_mode'] else 'no'}")
             rl = (
                 f"yes ({r['completed_phases']} phase(s) complete; stages: {', '.join(r['ryan_loop_stages']) or 'none'})"
                 if r["run_loop"]
