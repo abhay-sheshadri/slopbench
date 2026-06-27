@@ -28,6 +28,7 @@ from src.theme import (
     CHAT_CSS,
     CONTROLS_CSS,
     EDITOR_CSS,
+    FAVICON_LINK,
     HIGHLIGHT_JS,
     PALETTE_CSS,
     PREVIEW_CSS,
@@ -307,6 +308,7 @@ INDEX_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Proposals</title>
+<!--__FAVICON__-->
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <style>
 /*__PALETTE__*/
@@ -939,6 +941,7 @@ init();
 # Shared palette + markdown-editor pieces come from src.theme (single source).
 INDEX_HTML = (
     INDEX_HTML.replace("/*__PALETTE__*/", PALETTE_CSS)
+    .replace("<!--__FAVICON__-->", FAVICON_LINK)
     .replace("/*__CONTROLS_CSS__*/", CONTROLS_CSS)
     .replace("/*__CHAT_CSS__*/", CHAT_CSS)
     .replace("//__APP_JS__", APP_JS)

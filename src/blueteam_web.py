@@ -34,6 +34,7 @@ from src.theme import (
     APP_JS,
     CHAT_CSS,
     CONTROLS_CSS,
+    FAVICON_LINK,
     PALETTE_CSS,
     PROGRESS_CSS,
     PROGRESS_JS,
@@ -487,11 +488,7 @@ def _phase(r: dict) -> str:
 
 def _mode(name: str | None) -> str:
     name = name or ""
-    if name.endswith("_multi_phase"):
-        return "multi_phase"
-    if name.endswith("_goal"):
-        return "goal"
-    return ""
+    return "multi_phase" if name.endswith("_multi_phase") else ""
 
 
 def _cancel_rel(rel: str) -> None:
@@ -689,6 +686,7 @@ INDEX_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Blue Team</title>
+<!--__FAVICON__-->
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <style>
 /*__PALETTE__*/
@@ -753,11 +751,12 @@ section.main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;
 .ftitle{font-weight:700;font-size:14px;flex:1;min-width:120px}
 .fconf{font-size:10.5px;color:var(--faint);font-family:var(--mono);white-space:nowrap}
 .floc{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin:6px 0 4px;word-break:break-all}
-.fissue{font-size:13px;margin:6px 0 4px;line-height:1.45}
-.fmech{font-size:12.5px;color:var(--muted);margin:4px 0;line-height:1.45}
-.fmech b,.fissue b{color:var(--fg)}
-.ftext{display:inline}
-.ftext p:first-child{display:inline}
+.fcontext{font-size:13px;margin:8px 0 5px;line-height:1.5}
+.fissue{font-size:13px;margin:8px 0 5px;line-height:1.45}
+.fmech{font-size:12.5px;color:var(--muted);margin:8px 0 2px;line-height:1.45}
+.fmech b,.fissue b,.fcontext b{color:var(--fg)}
+.ftext{display:block}
+.fcontext .ftext,.fissue .ftext,.fmech .ftext{margin-top:3px}
 .ftext p{margin:.25em 0}
 
 #logBox{margin:10px 0 4px;border:1px solid var(--border);border-radius:9px;background:var(--panel2)}
@@ -994,6 +993,7 @@ function findCard(f){
     +`<div class="fhead"><span class="fbadge ${lvl}">${lvl}</span>`
     +`<span class="ftitle">${esc(f.title||"(untitled)")}</span><span class="fconf">${conf}</span></div>`
     +(f.location?`<div class="floc">${esc(f.location)}</div>`:"")
+    +(f.context?`<div class="fcontext"><b>Context:</b><div class="ftext">${md(f.context)}</div></div>`:"")
     +(f.issue?`<div class="fissue"><b>Issue:</b> <div class="ftext">${md(f.issue)}</div></div>`:"")
     +(f.mechanism?`<div class="fmech"><b>Why it matters:</b> <div class="ftext">${md(f.mechanism)}</div></div>`:"")
     +`</div>`;
@@ -1141,6 +1141,7 @@ loadRuns();
 
 INDEX_HTML = (
     INDEX_HTML.replace("/*__PALETTE__*/", PALETTE_CSS)
+    .replace("<!--__FAVICON__-->", FAVICON_LINK)
     .replace("/*__CONTROLS_CSS__*/", CONTROLS_CSS)
     .replace("/*__CHAT_CSS__*/", CHAT_CSS)
     .replace("/*__PROGRESS_CSS__*/", PROGRESS_CSS)

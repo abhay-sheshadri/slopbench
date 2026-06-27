@@ -5,16 +5,45 @@ findings. Your job is to make the final report fast to skim while preserving the
 substantive concerns.
 
 Rewrite the final report so each finding passes this bar:
-- the title is at most 18 words and names the concrete problem;
-- the first sentence of `issue` tells the reader what setup or result is being discussed;
-- the second sentence of `issue` says what is wrong;
-- `issue` is normally under 90 words and never over 110 words;
-- `mechanism` starts with the affected claim, number, or takeaway;
-- `mechanism` is normally under 70 words and never over 80 words;
+- the title is at most 18 words, preferably 14 or fewer, and names the concrete problem;
+- the title must be understandable by itself in the UI: no acronyms, no project shorthand,
+  no internal labels, and no multi-clause sentence;
+- `context` exists and has exactly two short paragraphs separated by a blank line;
+- paragraph 1 of `context` explains the relevant claim, result, or comparison in plain
+  words and why it matters to the project;
+- paragraph 2 of `context` explains the key setup/evidence needed to judge the concern;
+- neither context paragraph is a one-sentence stub; each should usually be 45-90 words;
+- each context paragraph must have at least two sentences;
+- before outputting, split each context paragraph into sentences and count them; if a
+  paragraph has one sentence, add a second plain sentence that explains why the claim
+  matters or what evidence points to the problem;
+- a semicolon-heavy single sentence does not count as two sentences;
+- `issue` states the concrete problem directly, without redoing all the background, and
+  should usually be 45-95 words;
+- for comparison failures, `issue` says what each side was allowed to see, use, or assume;
+- `issue` is normally 2-4 short sentences and never over 100 words;
+- `mechanism` is the "Why it matters" section and starts with the affected claim, number,
+  or takeaway;
+- `mechanism` says what the reader would wrongly believe if they trusted the original
+  headline or number;
+- `mechanism` is 2-3 short sentences, at least 45 words, and never over 95 words;
+- acronyms and project-specific shorthand are defined immediately in plain words in
+  `issue`/`mechanism`, or are kept only in `location`;
 - file names and run-internal labels appear in `location`, not as unexplained prose;
+- audit-process jargon such as "affordance", "contract", "reader-facing", "topline", and
+  "provenance" does not appear;
 - the wording uses concrete terms like "training setup", "evaluation setup", "required
   access", "main result", and "what the report claims".
 
+Before outputting, count the words in every title. Rewrite any title with more than 18
+words. Replace title acronyms with plain phrases, for example "prompt-based false-fact
+tool" instead of `PFF`, "per-fact document fine-tuning" instead of `SDF`, "supervised
+fine-tuning" instead of `SFT`, "neural lie detection" instead of `NLA`, and "out-of-
+distribution" instead of `OOD`.
+
 Preserve the same concern levels, locations, confidence values, and substantive findings
-unless the evidence clearly requires a change. Output only the orientation and a single
-parseable ```json findings block with the same schema.
+unless the evidence clearly requires a change. Keep distinct substantive findings distinct:
+do not merge separate concerns into one broader finding. If one issue is about a weak
+baseline and another is about one condition receiving extra information, both must remain
+visible. Output only the orientation and a single parseable ```json findings block with the
+schema (`title`, `concern`, `location`, `context`, `issue`, `mechanism`, `confidence`).

@@ -10,17 +10,25 @@ Requirements:
 - Use the recommended framing unless checking the evidence reveals a better one.
 - Aim for a polished, fairly detailed research note, usually 1,500-2,800 words.
 - Include concrete examples only when they explain the result better than summary prose.
-- Make 3-5 clean figures in `./final_plots/`, saved as both `.png` and `.pdf`, with the
-  `.png` referenced in the markdown.
+- Make figures for significant results when they can be clearly illustrated visually. Save
+  each figure in `./final_plots/` as both `.png` and `.pdf`, with the `.png` referenced in
+  the markdown.
+- When an experiment has multiple settings, conditions, prompts, ablations, or model
+  variants, strongly consider a compact table naming each setting and describing what
+  changed.
+- When a result depends on exact prompt wording, model responses, grading prompts, or a
+  transcript exchange, include enough verbatim text for a skeptical reader to check it. If a
+  shortened excerpt could hide the relevant issue, include the full relevant prompt/response
+  block.
 - Put an italic caption immediately after every figure. The caption must say what is being
   compared and what any uncertainty/error bars mean.
 - Inspect saved `.png` files and fix clipped labels, cramped ticks, overlapping legends,
-  tiny text, confusing colors, or missing uncertainty.
+  tiny text, text-heavy plot areas, confusing colors, or missing uncertainty.
 - Avoid a reproducibility appendix unless the post otherwise cannot be audited.
 
 Suggested shape:
 - Title that states the result.
-- 3-5 bullet TL;DR.
+- Good bullet-point TL;DR.
 - Short setup paragraph defining the method and main metric.
 - Major findings in order of importance, with concrete headers.
 - Bottom line / limitations.

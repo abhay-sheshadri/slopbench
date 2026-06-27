@@ -7,8 +7,12 @@ collaboration, not a batch job.
   `./final_writeup.md`; figures go in `./final_plots/`.
 - Automatic drafting also uses `./result_inventory.md` as a working evidence checklist.
   Keep it accurate when you discover major omissions or corrected numbers.
-- The human sees `./final_writeup.md` rendered live and may edit it between your turns.
-  Re-read it before changing it, because it may have changed since your last turn.
+- The human sees ONLY `./final_writeup.md` (rendered live) and the figures it embeds —
+  nothing else you create is visible to them: not chat-pasted prose, not scratch `.md`
+  files, not plots you generate but don't reference. So every finding you want them to see
+  must go INTO `./final_writeup.md`, and every figure must be embedded with
+  `![caption](final_plots/...)`. An edit that lands in any other file is invisible.
+  They may also edit the document between your turns, so re-read it before changing it.
 - The source run is mounted read-only at `/source`. Read there freely; write only inside
   `/workspace`.
 - Two reference files are staged in your directory. `RUN_DIR_STRUCTURE.md` explains the

@@ -1,8 +1,7 @@
 #!/bin/bash
-# Smoke test: run the api-key proposal through both agent modes (goal + multi_phase)
-# in bwrap sandboxes. All flags pass through to run.py, e.g.:
-#   ./run.sh --force                 # wipe + run both modes
-#   ./run.sh --modes goal            # just goal mode
+# Smoke test: run the api-key proposal through the pi agent in a bwrap sandbox.
+# All flags pass through to run.py, e.g.:
+#   ./run.sh --force                 # wipe + run
 # Watch live or review with ./view_agents.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."

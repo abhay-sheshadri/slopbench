@@ -18,8 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in _sys.path:
     _sys.path.insert(0, str(ROOT))
 
-from src import DEFAULT_GPT_MODEL
-from src import DEFAULT_MODEL as DEFAULT_CLAUDE_MODEL  # noqa: E402
+from src import DEFAULT_MODEL  # noqa: E402
 from src.runner_utils import load_env_file  # noqa: E402
 
 PROJECT_IDEAS_DIR = ROOT / "proposals"
@@ -626,8 +625,8 @@ def main() -> None:
         default=["claude", "gpt"],
         help="Model families to run. Default: claude gpt.",
     )
-    parser.add_argument("--claude-model", default=DEFAULT_CLAUDE_MODEL)
-    parser.add_argument("--gpt-model", default=DEFAULT_GPT_MODEL)
+    parser.add_argument("--claude-model", default=DEFAULT_MODEL)
+    parser.add_argument("--gpt-model", default=DEFAULT_MODEL)
     parser.add_argument("--attempts", type=int, default=3)
     parser.add_argument("--thinking", default="xhigh")
     parser.add_argument("--max-concurrent", type=int, default=1)

@@ -13,9 +13,38 @@ in the transcript:
 - the most important supporting result paths;
 - training/evaluation setup mismatches;
 - controls, baselines, filters, seeds, aggregation, and presentation;
+- the strongest negative, null, or limiting results that narrow the headline claim;
 - whether a possible issue was fixed, superseded, or still affects the final report.
 
 Now output the final report only: a brief 2-3 sentence orientation followed by one parseable
-```json findings block with the same schema (`title`, `concern`, `location`, `issue`,
-`mechanism`, `confidence`). If evidence is incomplete but the concern is plausible and
-result-affecting, include it with lower confidence instead of doing more exploration.
+```json findings block with the same schema (`title`, `concern`, `location`, `context`,
+`issue`, `mechanism`, `confidence`). If evidence is incomplete but the concern is plausible
+and result-affecting, include it with lower confidence instead of doing more exploration.
+Do not include a finding if you are below 50% sure it is a genuine result-affecting issue.
+Use 50-60 confidence only for concerns that are real enough for a reviewer to check but
+still meaningfully uncertain.
+
+Write the findings in plain language. For each finding, `context` must be exactly two short
+paragraphs separated by a blank line: first explain the relevant claim/result, then explain
+the setup or evidence needed to judge the concern. Each context paragraph should usually be
+45-90 words and must have at least two sentences; it should not be a one-sentence stub.
+Before emitting JSON, split each context paragraph into sentences and count them. If a
+paragraph has only one sentence, add a second plain sentence that explains why that claim
+matters or what evidence points to the problem. `issue` states the concrete problem
+directly and should usually be 45-95 words. For an unfair
+comparison, explicitly say what one side gets to see or use and what the other side has to
+do without; in other words, say what each side was allowed to see or use. `mechanism` is the
+"Why it matters" section: it says what the reader would wrongly believe if they trusted the
+original headline or number, and makes that wrong inference easy to see in 2-3 short
+sentences. Use 2-3 short sentences and at least 45 words. Avoid
+unexplained acronyms in `title`, `issue`, and `mechanism`; define them immediately or keep
+them only in `location`.
+Do not use audit-process jargon such as "affordance", "contract", "reader-facing",
+"topline", or "provenance"; replace it with ordinary wording.
+Titles are shown alone in the UI. Keep each title at most 18 words, preferably 14 or fewer,
+and use no acronyms or project shorthand in titles.
+
+Keep distinct concerns separate. If the transcript contains one concern about baseline
+strength and another concern about extra information or access in one condition, report both
+instead of folding them into a single broad benchmark caveat. The same applies to low power,
+post-hoc filtering, and overbroad headlines when each affects trust in a different way.

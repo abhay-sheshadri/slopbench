@@ -16,6 +16,8 @@ coverage check over the main result:
    filtering, sampled records, controls, baselines, seeds, uncertainty, and aggregation code.
 4. Check transcripts or later write-ups where needed to determine whether a possible issue
    was fixed, superseded, or still affects the final report.
+5. Check the strongest negative, null, or limiting results, because they often determine
+   whether the headline claim is too broad.
 
 Do not spawn sub-agents or independent reviewer agents in this pass. Keep the check focused
 on the existing evidence and only the extra artifacts needed to resolve coverage gaps.
@@ -33,18 +35,43 @@ aggressively for speed and clarity:
 - Add any important concern you found in this second pass.
 - Drop or downgrade a concern only if the evidence shows it was fixed, superseded, or not
   result-affecting.
+- Drop any finding if, after this pass, you are below 50% sure it is a genuine
+  result-affecting issue. Use 50-60 confidence only for concerns that are real enough for a
+  reviewer to check but still meaningfully uncertain.
+- Do not collapse distinct concerns just because they affect the same headline. A weak
+  baseline, extra information given to one condition, low statistical power, post-hoc
+  filtering, and overbroad framing are separate findings when they would change trust for
+  different reasons.
 - Rewrite every finding so a researcher who has not read this project can understand it.
   Define project-specific terms, explain what the relevant artifact is before saying what is
   wrong with it, and make the causal chain to the affected number or takeaway explicit.
+- For comparison failures, use plain contrast language: say what the report compared, what
+  one side was allowed to see or use, what the other side had to do without, and what a
+  reader would wrongly infer from the headline. In `mechanism`, say what the reader would
+  wrongly believe if they trusted the original headline or number.
 - Apply this skim test to every finding before saving it:
   - the title names the concrete problem, not just a theme;
-  - the first sentence of `issue` tells the reader what setup or result is being discussed;
-  - the second sentence of `issue` says what is wrong;
-  - `mechanism` starts with the affected claim, number, or takeaway;
+  - the title is at most 18 words, preferably 14 or fewer, and contains no acronyms or
+    project shorthand because the UI shows titles by themselves;
+  - `context` has exactly two short paragraphs: first the relevant claim/result, then the
+    key setup/evidence needed to judge the concern;
+  - neither context paragraph is a one-sentence stub; each should usually be 45-90 words
+    and must have at least two sentences;
+  - before saving the final JSON, count sentences in each context paragraph; if a paragraph
+    has one sentence, add a second plain sentence explaining why the claim matters or what
+    evidence points to the problem;
+  - `issue` states the concrete problem directly, without repeating all the background, and
+    should usually be 45-95 words;
+  - `mechanism` is the "Why it matters" section and starts with the affected claim, number,
+    or takeaway, then says what a skimming reader would get wrong in 2-3 short sentences
+    and at least 45 words;
+  - acronyms and run-internal labels are defined in plain words or moved to `location`;
+  - audit-process jargon such as "affordance", "contract", "reader-facing", "topline",
+    and "provenance" is replaced with ordinary wording;
   - no sentence is doing three jobs at once;
   - internal run names appear only in `location` unless immediately explained.
 
 Output the same format as before: a brief plain-text orientation, then a single ```json
-findings block with exactly the same schema (`title`, `concern`, `location`, `issue`,
-`mechanism`, `confidence`). This block replaces the earlier one and is the version that will
-be saved and shown.
+findings block with exactly the same schema (`title`, `concern`, `location`, `context`,
+`issue`, `mechanism`, `confidence`). This block replaces the earlier one and is the version
+that will be saved and shown.

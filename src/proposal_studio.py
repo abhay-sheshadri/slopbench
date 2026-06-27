@@ -76,6 +76,15 @@ class ProposalSession(DocAgentSession):
             return prompt
         return message
 
+    def job_spec(self) -> dict:
+        return {
+            "module": "src.proposal_studio",
+            "cls": "ProposalSession",
+            "kwargs": {"name": self.name},
+            "model": self.model,
+            "thinking": self.thinking,
+        }
+
     def _argv(self, prompt: str) -> list[str]:
         return sandbox.build_argv(
             self.work,
@@ -85,12 +94,11 @@ class ProposalSession(DocAgentSession):
 
     def reset(self) -> None:
         """Forget the conversation. The proposal file itself is never touched."""
-        with self._lock:
-            if self._proc is not None and self._proc.poll() is None:
-                raise RuntimeError("stop the running turn first")
-            for p in (self.session_path, self.log_path):
-                p.unlink(missing_ok=True)
-            self._clear_session_state()
+        if self.is_running():
+            raise RuntimeError("stop the running turn first")
+        for p in (self.session_path, self.log_path):
+            p.unlink(missing_ok=True)
+        self._clear_session_state()
 
     def state(self) -> dict:
         return {**super().state(), "name": self.name}

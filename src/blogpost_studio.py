@@ -18,9 +18,21 @@ It reuses the audit-agent infrastructure directly:
     next user turn; a constant collaboration + writing-standards system prompt is
     appended on every turn.
 
+**Execution model — detached, resumable jobs.** An agent turn is NOT run as a
+child of the web server. ``start_turn`` launches a small *supervisor* process
+(:mod:`src.studio_job`) detached into its own session; that supervisor runs the
+turn (or the whole ``/draft`` chain) inside the bwrap sandbox and records its
+progress to ``turn_status.json`` in the workspace. Because the agent's sandbox is
+``--die-with-parent`` to the *supervisor* (not the web server), restarting or
+crashing the web server leaves running writeups untouched: they reparent to init
+and keep going, and any viewer re-adopts them by reading the workspace off disk
+(``turn_status.json`` + a ``/proc`` liveness scan). A crashed supervisor is
+resumable from ``session.jsonl`` (``--resume``). This is the same decoupling that
+lets ``03_run_agents`` survive viewer restarts.
+
 The web UI lives in ``experiments/06_blogpost_studio/app.py``; this module is the
 headless engine it talks to (start/stop a turn, read/save the document, list
-figures, parse the transcript) and can also be driven from a script or a test.
+figures, parse the transcript) and the per-turn executor the supervisor calls.
 """
 
 from __future__ import annotations
@@ -30,6 +42,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -70,8 +83,8 @@ def render(template: str, **ctx: object) -> str:
 
 
 # Chat commands: a message whose first word is a known /command expands into a
-# full prompt template. Expansion happens server-side, in start_turn, so the
-# session transcript records the real prompt the agent received.
+# full prompt template. Expansion happens at execution time (in the supervisor),
+# so the session transcript records the real prompt the agent received.
 COMMANDS = {
     "/draft": "draft.md.j2",  # inventory first; chained into /compose below
     "/compose": "compose.md.j2",  # write the complete post from the inventory
@@ -80,9 +93,9 @@ COMMANDS = {
     "/kickoff": "kickoff.md.j2",  # investigate the run, reply "ready"
 }
 
-# After a turn for the keyed /command finishes successfully, the session
-# automatically chains the mapped follow-up /command as the next turn. This is
-# how a /draft is always followed by a self-review pass.
+# After a turn for the keyed /command finishes successfully, the pipeline
+# automatically runs the mapped follow-up /command as the next step. This is how
+# a /draft is always followed by compose -> review -> polish.
 CHAIN_AFTER = {
     "/draft": "/compose",
     "/compose": "/review",
@@ -107,19 +120,31 @@ def expand_command(message: str) -> str:
 # All studio workspaces live here, one dir per run.
 STUDIO_ROOT = ROOT / "outputs" / "06_blogpost_studio"
 
-# Where a running turn's json-stream offset is persisted (see start_turn): lets
-# a restarted server re-adopt an in-flight turn's live stream.
-TURN_OFFSET_NAME = "turn.offset"
-TURN_STATUS_NAME = "turn_status.json"
+# Workspace files written by the supervisor and read by any viewer off disk.
+TURN_OFFSET_NAME = "turn.offset"  # byte offset of the running turn in the json log
+TURN_STATUS_NAME = "turn_status.json"  # authoritative job state (see JobStatus)
+JOB_SPEC_NAME = "job_spec.json"  # how to reconstruct the session for --resume
+
+# Liveness: a running supervisor rewrites turn_status.json's heartbeat on this
+# cadence. If the recorded pid is dead or the heartbeat is older than the stale
+# threshold, the supervisor crashed and the turn is eligible for resume.
+HEARTBEAT_INTERVAL = 8.0
+HEARTBEAT_STALE_S = 40.0
+# Grace window after launch before the supervisor has written its first
+# heartbeat: a freshly launched job is "running" even though pid is not yet on
+# disk, so a second concurrent start can't slip in and is_running doesn't flap.
+LAUNCH_GRACE_S = 45.0
+# How many times the supervisor retries a single step on a transient failure
+# (a kill/crash mid-turn, or a recoverable API error) before giving up on it.
+MAX_STEP_ATTEMPTS = max(1, int(os.environ.get("STUDIO_STEP_ATTEMPTS", "3")))
 
 
 def live_sandbox_workspaces() -> set[str]:
     """Workspace paths of every live bwrap sandbox on the host (one /proc scan).
 
-    This is the ground truth for "is an agent working on X?". It deliberately
-    ignores process ancestry: the supervisor (outer) bwrap is sometimes killed
-    (observed: rc=-9 minutes into a turn) while the sandboxed agent keeps
-    running re-parented to init and finishes the job — so neither our Popen
+    Ground truth for "is an agent working on X?", independent of process
+    ancestry: a writeup's sandbox can outlive the web server that launched it
+    (it is parented to its supervisor, not the server), so neither a Popen
     handle nor parent/child relationships can be trusted for liveness.
     """
     found: set[str] = set()
@@ -150,19 +175,88 @@ def default_work_dir(run_dir: str | Path) -> Path:
     return STUDIO_ROOT / Path(run_dir).resolve().name
 
 
+def _pid_alive(pid: int | None) -> bool:
+    """Whether a host pid currently exists (signal 0 probe)."""
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but owned by someone else
+    return True
+
+
+# --- Workspace-level state, readable without constructing a session ---------- #
+# The web layer polls many runs and the pump scans every workspace; building a
+# StudioSession per run is expensive (it stages reference docs), so liveness and
+# status are computed straight from the workspace's turn_status.json + a /proc
+# scan. The session methods below delegate here so there is one definition.
+
+
+def workspace_status(work: str | Path) -> dict | None:
+    """The job status last written for a workspace (or None / malformed)."""
+    try:
+        status = json.loads((Path(work) / TURN_STATUS_NAME).read_text())
+    except (OSError, ValueError, TypeError):
+        return None
+    return status if isinstance(status, dict) else None
+
+
+def workspace_running(work: str | Path, live_ws: set[str] | None = None) -> bool:
+    """Whether a turn is in flight for a workspace, by ground truth off disk.
+
+    A ``running`` status counts as live while its supervisor pid is alive with a
+    fresh heartbeat, or (just after launch, before the first heartbeat) within a
+    boot grace window. Failing that, a bwrap still bound to the workspace counts.
+    """
+    st = workspace_status(work)
+    if st and st.get("state") == "running":
+        pid = st.get("pid")
+        hb = st.get("heartbeat") or 0
+        if (
+            _pid_alive(pid if isinstance(pid, int) else None)
+            and (time.time() - hb) < HEARTBEAT_STALE_S
+        ):
+            return True
+        if pid is None and (time.time() - (st.get("launched") or 0)) < LAUNCH_GRACE_S:
+            return True
+    if live_ws is None:
+        live_ws = live_sandbox_workspaces()
+    return os.path.abspath(str(work)) in live_ws
+
+
+def workspace_resumable(work: str | Path, live_ws: set[str] | None = None) -> bool:
+    """A turn that was ``running`` but whose supervisor died without recording a
+    terminal state — safe to relaunch with --resume."""
+    st = workspace_status(work)
+    if not st or st.get("state") != "running" or st.get("terminal"):
+        return False
+    if not (Path(work) / JOB_SPEC_NAME).exists():
+        return False  # no recipe to reconstruct the session (e.g. a pre-upgrade turn)
+    if workspace_running(work, live_ws):
+        return False
+    pid = st.get("pid")
+    if pid is None and (time.time() - (st.get("launched") or 0)) < LAUNCH_GRACE_S:
+        return False  # still booting; give it a chance before resuming
+    return True
+
+
 class DocAgentSession:
     """Generic human+agent co-editing session: one sandboxed ``pi`` conversation
     that edits one document, with chat and document streamed off disk.
 
     Subclasses say which document (:attr:`doc_path`), how to build the agent
-    command (:meth:`_argv`), and how slash-commands expand (:meth:`_expand`).
-    Used per-window/per-target: callers keep one session per edited thing, so
-    any number of them can run turns in parallel.
+    command (:meth:`_argv`), how slash-commands expand (:meth:`_expand`), what
+    chains after a step (:meth:`_next_chain`), and how to reconstruct themselves
+    in the supervisor process (:meth:`job_spec`). Used per-window/per-target:
+    callers keep one session per edited thing, so any number can run in parallel.
 
-    Thread-safety: at most one agent turn runs at a time per session.
-    :meth:`start_turn` refuses to start a second concurrent turn; the turn runs
-    in a background process so the web server stays responsive and can stream
-    the transcript and document off disk while the agent works.
+    A turn runs in a *detached supervisor* process, not as a child of this
+    process, so it survives a web-server restart. State is read back off disk
+    (``turn_status.json`` + a ``/proc`` liveness scan), so a restarted server
+    re-adopts in-flight turns transparently.
     """
 
     def __init__(
@@ -185,18 +279,15 @@ class DocAgentSession:
         self.system_prompt = system_prompt
 
         self._lock = threading.Lock()
-        self._proc: subprocess.Popen | None = None
-        self._last_rc: int | None = None
+        # Handle to the supervisor WE launched (None after a server restart that
+        # adopts an already-running turn — liveness then comes from disk/proc).
+        self._job_proc: subprocess.Popen | None = None
         self._log = self.work / "studio_agent.log"
         self._turn_log_offset: int | None = (
             None  # where the running turn's json stream starts
         )
         self._tx_cache: tuple | None = None  # ((mtime, size), parsed transcript)
         self._live_cache: dict | None = None  # incremental live_turns parse state
-        self._alive_cache: tuple | None = None  # (monotonic, bool) sandbox liveness
-        self._pending_chain: str | None = (
-            None  # follow-up /command to auto-run on success
-        )
         self.work.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------- subclass surface --
@@ -215,6 +306,11 @@ class DocAgentSession:
         """The follow-up /command to auto-run after ``message``'s turn succeeds
         (default: none)."""
         return None
+
+    def job_spec(self) -> dict:
+        """How the supervisor reconstructs this exact session (module + class +
+        constructor kwargs). Must be JSON-serializable."""
+        raise NotImplementedError
 
     # ----------------------------------------------------------------- paths --
 
@@ -246,52 +342,51 @@ class DocAgentSession:
         from clobbering each other: the agent owns the file mid-turn, the human
         owns it between turns.
         """
-        with self._lock:
-            if self._proc is not None and self._proc.poll() is None:
-                raise RuntimeError(
-                    "the agent is writing; save is disabled until it finishes"
-                )
-            self.doc_path.write_text(content, encoding="utf-8")
-            st = self.doc_path.stat()
+        if self.is_running():
+            raise RuntimeError(
+                "the agent is writing; save is disabled until it finishes"
+            )
+        self.doc_path.write_text(content, encoding="utf-8")
+        st = self.doc_path.stat()
         return {"mtime": st.st_mtime, "size": st.st_size}
 
     def _clear_session_state(self) -> None:
-        """Forget the cached conversation state (callers hold no turn)."""
+        """Forget the cached conversation state and on-disk job markers."""
         self._tx_cache = None
-        self._last_rc = None
         self._turn_log_offset = None
         self._live_cache = None
-        self._alive_cache = None
-        (self.work / TURN_OFFSET_NAME).unlink(missing_ok=True)
-        (self.work / TURN_STATUS_NAME).unlink(missing_ok=True)
+        self._job_proc = None
+        for name in (TURN_OFFSET_NAME, TURN_STATUS_NAME, JOB_SPEC_NAME):
+            (self.work / name).unlink(missing_ok=True)
 
-    def _write_turn_status(self, **data: object) -> None:
-        payload = {"time": time.time(), **data}
-        try:
-            (self.work / TURN_STATUS_NAME).write_text(json.dumps(payload, indent=2))
-        except OSError:
-            pass
+    # ----------------------------------------------------------- job status ---
+    def _status_path(self) -> Path:
+        return self.work / TURN_STATUS_NAME
 
-    def turn_status(self) -> dict | None:
-        try:
-            status = json.loads((self.work / TURN_STATUS_NAME).read_text())
-        except (OSError, ValueError, TypeError):
-            return None
-        if not isinstance(status, dict):
-            return None
-        running = self.is_running()
-        if status.get("state") == "running" and not running:
-            status = {
-                **status,
-                "state": "unknown",
-                "error": (
-                    "The previous agent turn is no longer running, but this server "
-                    "did not observe its exit. Check the transcript and studio_agent.log."
-                ),
-            }
-        return status
+    def read_status(self) -> dict | None:
+        """Raw job status as last written by the supervisor (or None)."""
+        return workspace_status(self.work)
 
-    # ------------------------------------------------------------ transcript --
+    def write_status(self, **fields: object) -> dict:
+        """Atomically merge ``fields`` into turn_status.json, stamping ``time``.
+
+        Merge (not overwrite) so a heartbeat-only update from one writer doesn't
+        drop the step/state another writer set. Atomic via tmp + rename so a
+        reader never sees a torn file.
+        """
+        with self._lock:
+            base = self.read_status() or {}
+            base.update(fields)
+            base["time"] = time.time()
+            tmp = self._status_path().with_suffix(".json.tmp")
+            try:
+                tmp.write_text(json.dumps(base, indent=2))
+                tmp.replace(self._status_path())
+            except OSError:
+                pass
+            return base
+
+    # ----------------------------------------------------------------- live ---
     def transcript(self) -> dict:
         """Parsed chat: ``{turns, cost, ...}`` (empty turns before the first message).
 
@@ -302,7 +397,7 @@ class DocAgentSession:
         try:
             st = self.session_path.stat()
         except OSError:
-            return {"turns": [], "goal": None, "header": {}, "cost": 0.0}
+            return {"turns": [], "header": {}, "cost": 0.0}
         sig = (st.st_mtime, st.st_size)
         if self._tx_cache and self._tx_cache[0] == sig:
             return self._tx_cache[1]
@@ -327,7 +422,7 @@ class DocAgentSession:
         offset = self._turn_log_offset
         if offset is None:
             # Adopt an in-flight turn we didn't start (server restarted, or the
-            # outer bwrap died): the offset was persisted at turn start.
+            # supervisor wrote the offset): it was persisted at turn start.
             try:
                 offset = int((self.work / TURN_OFFSET_NAME).read_text())
             except (OSError, ValueError):
@@ -413,24 +508,27 @@ class DocAgentSession:
                     break
         return pids
 
+    def _supervisor_pid(self) -> int | None:
+        st = self.read_status()
+        pid = (st or {}).get("pid")
+        return int(pid) if isinstance(pid, int) else None
+
     def is_running(self) -> bool:
         """Whether an agent turn is in flight — by ground truth, not ancestry.
 
-        The Popen handle alone is unreliable: the outer bwrap can be killed
-        while the sandboxed agent keeps drafting (re-parented to init), and a
-        server restart loses the handle entirely. So: our child if we have one,
-        else scan /proc for a live sandbox bound to this workspace (cached
-        briefly — the SSE loop polls this every second)."""
-        with self._lock:
-            if self._proc is not None and self._proc.poll() is None:
-                return True
-        now = time.monotonic()
-        cached = self._alive_cache
-        if cached and now - cached[0] < 3.0:
-            return cached[1]
-        alive = bool(self._sandbox_pids())
-        self._alive_cache = (now, alive)
-        return alive
+        Layers, cheapest first: a supervisor we launched and still hold; a fresh
+        ``running`` status whose supervisor pid is alive with a recent heartbeat
+        (this is what a restarted server re-adopts); a just-launched job inside
+        its boot grace window; finally a live sandbox bound to this workspace.
+        """
+        if self._job_proc is not None and self._job_proc.poll() is None:
+            return True
+        return workspace_running(self.work)
+
+    def is_resumable(self) -> bool:
+        """A turn that was running but whose supervisor died (crash / kill while
+        not stopping) — safe to relaunch with --resume to finish the pipeline."""
+        return workspace_resumable(self.work)
 
     def _env(self) -> dict[str, str]:
         if self._env_text is not None:
@@ -460,120 +558,218 @@ class DocAgentSession:
             prompt,
         ]
 
+    def command_chain(self, message: str) -> list[str]:
+        """The ordered steps a fresh turn for ``message`` runs: the message
+        itself, then each chained follow-up command (compose -> review -> ...).
+        The first step keeps any extra instructions; later steps are bare
+        commands."""
+        steps = [message]
+        nxt = self._next_chain(message)
+        while nxt:
+            steps.append(nxt)
+            nxt = self._next_chain(nxt)
+        return steps
+
+    # ------------------------------------------------- supervisor: execute ---
+    def run_turn_sync(self, prompt: str) -> int:
+        """Run ONE pi turn synchronously and return its exit code.
+
+        Called by the supervisor process (:mod:`src.studio_job`), NOT by the web
+        server. Appends the agent's ``--mode json`` stream to ``studio_agent.log``
+        and records the turn's byte offset so a viewer can stream it live. The
+        sandbox is ``--die-with-parent`` to the supervisor, so killing the
+        supervisor (a stop) cleanly tears the agent down with it.
+        """
+        argv = self._argv(prompt)
+        with self._log.open("ab") as log:
+            log.write(f"\n\n===== turn: {prompt[:200]!r} =====\n".encode())
+            log.flush()
+            (self.work / TURN_OFFSET_NAME).write_text(str(self._log.stat().st_size))
+            proc = subprocess.run(
+                argv,
+                env=self._env(),
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+        return proc.returncode
+
+    def last_stop_reason(self) -> str | None:
+        """The ``stopReason`` of the last assistant message in the session.
+
+        Used by the supervisor to classify a turn that exited 0: ``stop`` /
+        ``toolUse`` / ``length`` are success; ``refusal`` is a terminal decline;
+        ``error`` is a (usually transient) API failure worth retrying. pi exits 0
+        even on a refusal in json mode, so the exit code alone is not enough.
+        """
+        try:
+            text = self.session_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        reason = None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            msg = entry.get("message") if entry.get("type") == "message" else entry
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                reason = msg.get("stopReason") or reason
+        return reason
+
+    def last_error_message(self) -> str | None:
+        """The ``errorMessage`` of the last assistant message, if any (the human
+        reason behind a refusal or API error)."""
+        try:
+            text = self.session_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        err = None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            msg = entry.get("message") if entry.get("type") == "message" else entry
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                em = msg.get("errorMessage")
+                err = em if isinstance(em, str) and em.strip() else err
+        return err
+
+    # --------------------------------------------------- web server: drive ---
     def start_turn(self, message: str) -> None:
-        """Resume the session with ``message`` as the next user turn (background).
+        """Launch a detached supervisor to run ``message`` (and its chain).
 
         Returns immediately; poll :meth:`is_running` / stream :meth:`transcript`
         and :meth:`read_doc` off disk to follow progress. Raises if a turn is
-        already running or the message is empty.
+        already running or the message is empty. The supervisor is detached
+        (``start_new_session``) and is NOT tied to this process's lifetime, so a
+        server restart leaves it running.
         """
         raw = (message or "").strip()
-        chain = self._next_chain(raw)
-        message = self._expand(raw)
-        if not message:
+        if not raw:
             raise ValueError("empty message")
-        with self._lock:
-            if self._proc is not None and self._proc.poll() is None:
-                raise RuntimeError(
-                    "the agent is already working on the previous message"
-                )
-            self._pending_chain = chain  # consumed by _reap on a clean exit
-            argv = self._argv(message)
-            log = self._log.open("ab")
-            try:
-                log.write(f"\n\n===== turn: {message[:200]!r} =====\n".encode())
-                log.flush()
-                self._turn_log_offset = self._log.stat().st_size
-                # Persisted so a restarted server can re-adopt the live stream.
-                (self.work / TURN_OFFSET_NAME).write_text(str(self._turn_log_offset))
-                self._write_turn_status(
-                    state="running",
-                    message=raw[:240],
-                    started=time.time(),
-                )
-                proc = subprocess.Popen(
-                    argv,
-                    env=self._env(),
-                    stdin=subprocess.DEVNULL,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    # Detach from our session/group: a Ctrl-C server restart must
-                    # not take down in-flight turns (they're recoverable — the
-                    # transcript, doc, and this json stream all live on disk).
-                    start_new_session=True,
-                )
-                self._write_turn_status(
-                    state="running",
-                    message=raw[:240],
-                    started=time.time(),
-                    pid=proc.pid,
-                )
-            except Exception as exc:
-                self._write_turn_status(
-                    state="failed",
-                    message=raw[:240],
-                    error=f"failed to start agent turn: {exc}",
-                )
-                log.close()
-                raise
-            self._proc = proc
-            self._alive_cache = None
-        threading.Thread(target=self._reap, args=(proc, log), daemon=True).start()
+        if self.is_running():
+            raise RuntimeError("the agent is already working on the previous message")
+        steps = self.command_chain(raw)
+        # Persist how to rebuild this session so the supervisor (and any later
+        # --resume) can reconstruct it without the web server's in-memory state.
+        (self.work / JOB_SPEC_NAME).write_text(json.dumps(self.job_spec(), indent=2))
+        # Seed status so the UI flips to "running" instantly, before the
+        # supervisor has booted and written its pid/heartbeat.
+        self.write_status(
+            state="running",
+            terminal=False,
+            steps=steps,
+            step_index=0,
+            current_step=steps[0],
+            attempts=0,
+            message=raw[:240],
+            pid=None,
+            heartbeat=time.time(),
+            launched=time.time(),
+            started=time.time(),
+            error=None,
+            reason=None,
+        )
+        self._turn_log_offset = None
+        self._live_cache = None
+        self._job_proc = self._spawn_supervisor()
 
-    def _reap(self, proc: subprocess.Popen, log) -> None:
+    def _spawn_supervisor(self, resume: bool = False) -> subprocess.Popen:
+        argv = [sys.executable, "-m", "src.studio_job", "--work", str(self.work)]
+        if resume:
+            argv.append("--resume")
+        log = (self.work / "studio_job.log").open("ab")
         try:
-            proc.wait()
+            return subprocess.Popen(
+                argv,
+                cwd=str(ROOT),
+                env={**os.environ, **self._env()},
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                # Detach: NOT --die-with-parent, NOT in our process group — a
+                # server restart must leave this supervisor (and its agent)
+                # running; they reparent to init and a new server re-adopts them.
+                start_new_session=True,
+            )
         finally:
-            with self._lock:
-                self._last_rc = proc.poll()
-                if self._proc is proc:
-                    self._proc = None
-                # Pop the chained follow-up only on a clean exit; a failed or
-                # killed (stopped) turn leaves nothing to review.
-                chain = self._pending_chain if self._last_rc == 0 else None
-                self._pending_chain = None
-                if self._last_rc == 0:
-                    self._write_turn_status(
-                        state="completed",
-                        rc=self._last_rc,
-                        finished=time.time(),
-                    )
-                else:
-                    self._write_turn_status(
-                        state="failed",
-                        rc=self._last_rc,
-                        finished=time.time(),
-                        error=f"agent turn exited rc={self._last_rc}",
-                    )
-            try:
-                log.close()
-            except OSError:
-                pass
-            if chain:
-                try:
-                    self.start_turn(chain)
-                except Exception:
-                    pass  # raced with a manual turn, or the session is gone
+            log.close()
+
+    def resume(self) -> bool:
+        """Relaunch the supervisor to finish a crashed turn's pipeline. Returns
+        whether a resume was started."""
+        if not self.is_resumable():
+            return False
+        st = self.read_status() or {}
+        self.write_status(
+            relaunches=int(st.get("relaunches") or 0) + 1,
+            pid=None,
+            heartbeat=time.time(),
+            launched=time.time(),
+        )
+        self._turn_log_offset = None
+        self._live_cache = None
+        self._job_proc = self._spawn_supervisor(resume=True)
+        return True
 
     def stop(self) -> bool:
-        """Kill the running turn, if any. Returns whether something was killed.
+        """Kill the running turn, if any, and record it as a deliberate stop.
 
-        Kills both our own child (if alive) and any sandbox for this workspace
-        we no longer parent — adopted/orphaned turns included. SIGKILLing a
-        bwrap takes its whole PID namespace down with it."""
+        Kills the supervisor (its sandbox is ``--die-with-parent``, so the agent
+        dies with it) plus, belt-and-suspenders, any sandbox still bound to this
+        workspace. SIGKILLing a bwrap takes its whole PID namespace with it. The
+        status is marked ``stopped`` (terminal) so the pump won't resume it and
+        the UI doesn't read a deliberate cancel as a crash."""
         killed = False
-        with self._lock:
-            if self._proc is not None and self._proc.poll() is None:
-                self._proc.kill()
+        if self._job_proc is not None and self._job_proc.poll() is None:
+            try:
+                self._job_proc.kill()
                 killed = True
-        for pid in self._sandbox_pids():
+            except OSError:
+                pass
+        for pid in {self._supervisor_pid(), *self._sandbox_pids()}:
+            if not pid or not _pid_alive(pid):
+                continue
             try:
                 os.kill(pid, signal.SIGKILL)
                 killed = True
             except (OSError, ProcessLookupError):
                 pass
-        self._alive_cache = None
+        self._job_proc = None
+        if self.read_status() is not None:
+            self.write_status(
+                state="stopped", terminal=True, error=None, finished=time.time()
+            )
         return killed
+
+    def turn_status(self) -> dict | None:
+        """Status snapshot for the UI, reconciled against live ground truth.
+
+        A ``running`` status whose supervisor has died without recording an exit
+        is reported as ``unknown`` (it will be resumed by the pump); everything
+        else passes through as written.
+        """
+        st = self.read_status()
+        if not st:
+            return None
+        if st.get("state") == "running" and not self.is_running():
+            return {
+                **st,
+                "state": "unknown",
+                "error": (
+                    "the writeup turn is no longer running but did not record an "
+                    "exit; it will be resumed automatically."
+                ),
+            }
+        return st
 
     def state(self) -> dict:
         """Snapshot for the UI header / polling."""
@@ -582,7 +778,6 @@ class DocAgentSession:
             "model": self.model,
             "thinking": self.thinking,
             "running": self.is_running(),
-            "last_rc": self._last_rc,
             "turn_status": self.turn_status(),
         }
 
@@ -630,6 +825,15 @@ class StudioSession(DocAgentSession):
         head = message.partition(" ")[0].lower()
         return CHAIN_AFTER.get(head)
 
+    def job_spec(self) -> dict:
+        return {
+            "module": "src.blogpost_studio",
+            "cls": "StudioSession",
+            "kwargs": {"run_dir": str(self.run_dir), "work_dir": str(self.work)},
+            "model": self.model,
+            "thinking": self.thinking,
+        }
+
     def _argv(self, prompt: str) -> list[str]:
         return sandbox.build_argv(
             self.work,
@@ -645,11 +849,10 @@ class StudioSession(DocAgentSession):
         """Delete this run's draft: the document, conversation, figures, and
         anything else the agent created — the workspace is re-staged fresh.
         Refuses while a turn is running."""
-        with self._lock:
-            if self._proc is not None and self._proc.poll() is None:
-                raise RuntimeError("stop the running turn before deleting the draft")
-            shutil.rmtree(self.work, ignore_errors=True)
-            self._clear_session_state()
+        if self.is_running():
+            raise RuntimeError("stop the running turn before deleting the draft")
+        shutil.rmtree(self.work, ignore_errors=True)
+        self._clear_session_state()
         audit_agent.stage_reference_docs(self.work, self.run_dir)
 
     def state(self) -> dict:

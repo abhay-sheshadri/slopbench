@@ -21,12 +21,13 @@ import subprocess
 import time
 from pathlib import Path
 
-from src import DEFAULT_GPT_MODEL, oversight, sandbox
+from src import DEFAULT_MODEL as SHARED_DEFAULT_MODEL
+from src import oversight, sandbox
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Write-ups and figures are writing/design tasks, so default to a GPT model.
-DEFAULT_MODEL = DEFAULT_GPT_MODEL
+# Write-ups and figures use the same default model as the rest of the pipeline.
+DEFAULT_MODEL = SHARED_DEFAULT_MODEL
 THINKING_DEFAULT = "high"
 DEFAULT_TIMEOUT = None  # no timeout by default: the agent runs to completion
 

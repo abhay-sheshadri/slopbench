@@ -35,17 +35,22 @@ from src import audit_agent, web_common
 from src.agent_viewer import OUTPUTS_DIR, ROOT, _discover_run_dirs, _run_item
 from src.blogpost_studio import (
     DOC_NAME,
+    JOB_SPEC_NAME,
     SESSION_NAME,
     STUDIO_ROOT,
     TURN_STATUS_NAME,
     StudioSession,
     default_work_dir,
     live_sandbox_workspaces,
+    workspace_resumable,
+    workspace_running,
+    workspace_status,
 )
 from src.theme import (
     API_JS,
     CONTROLS_CSS,
     EDITOR_CSS,
+    FAVICON_LINK,
     HIGHLIGHT_JS,
     PALETTE_CSS,
     PREVIEW_CSS,
@@ -67,60 +72,141 @@ PREFIX = "/studio"
 SESSIONS: dict[str, StudioSession] = {}
 _SELECT_LOCK = threading.Lock()
 
-# "Automatic writeup" runs many real agent turns; cap how many run at once instead
-# of launching all of them simultaneously (heavy on cost, rate limits, and disk).
-# Same BatchRunner the blue team uses (see src.web_common).
+# "Automatic writeup" ("Write all") runs many real agent turns; cap how many run
+# at once instead of launching all simultaneously (heavy on cost, rate limits,
+# disk). The batch is DURABLE: its member set lives on disk, so a viewer restart
+# never loses it — a reconcile pump re-derives what is running/queued from each
+# workspace's turn_status.json + a /proc scan, resumes crashed turns, and starts
+# queued ones up to the cap. There is no in-memory queue to lose.
 DRAFT_CAP = max(1, int(os.environ.get("STUDIO_DRAFT_CONCURRENCY", "5")))
-_RESET_BEFORE_DRAFT: set[str] = set()
-_RESET_BEFORE_DRAFT_LOCK = threading.Lock()
+# How many times the pump will relaunch a crashed (non-terminal) turn before it
+# gives up; a genuine model refusal / repeated error is terminal and never
+# relaunched, so this only bounds recovery from infra kills/crashes.
+MAX_RELAUNCH = max(0, int(os.environ.get("STUDIO_MAX_RELAUNCH", "8")))
+
+_BATCH_FILE = STUDIO_ROOT / ".batch.json"
+_BATCH_LOCK = threading.Lock()
 
 
-def _start_draft(rel: str) -> None:
-    # Use _resolve so the session is created under the SAME canonical (resolved)
-    # key the UI uses when the run is opened — otherwise a symlinked outputs dir
-    # could spawn two sessions for one run, or hide it from stop-all.
-    try:
-        s = _resolve(rel)
-    except (ValueError, OSError):
-        return
-    if s is None:
-        return
-    key = str(s.run_dir.resolve())
-    with _RESET_BEFORE_DRAFT_LOCK:
-        reset_first = key in _RESET_BEFORE_DRAFT
-        _RESET_BEFORE_DRAFT.discard(key)
-    if reset_first:
+def _load_members() -> list[str]:
+    """The current "Write all" member set (resolved run-dir strings)."""
+    with _BATCH_LOCK:
         try:
-            s.reset()
-        except RuntimeError:
-            return
-    try:
-        s.start_turn("/draft")
-    except (ValueError, RuntimeError):
-        pass  # already drafting / raced with another turn
+            data = json.loads(_BATCH_FILE.read_text())
+        except (OSError, ValueError):
+            return []
+    members = data.get("members") if isinstance(data, dict) else None
+    return [str(x) for x in members] if isinstance(members, list) else []
 
 
-def _stop_draft(rel: str) -> None:
+def _save_members(members: list[str]) -> None:
+    with _BATCH_LOCK:
+        STUDIO_ROOT.mkdir(parents=True, exist_ok=True)
+        try:
+            _BATCH_FILE.write_text(json.dumps({"members": list(members)}, indent=2))
+        except OSError:
+            pass
+
+
+def _studio_workspaces() -> list[Path]:
     try:
-        s = _resolve(rel)
+        return [
+            d
+            for d in STUDIO_ROOT.iterdir()
+            if d.is_dir() and not d.name.startswith(".")
+        ]
+    except OSError:
+        return []
+
+
+def _run_dir_for_workspace(ws: Path) -> str | None:
+    """The source run a workspace writes about, from its job_spec (or None)."""
+    try:
+        spec = json.loads((Path(ws) / JOB_SPEC_NAME).read_text())
+    except (OSError, ValueError):
+        return None
+    rd = (spec.get("kwargs") or {}).get("run_dir")
+    return str(rd) if rd else None
+
+
+def _live_drafts(live_ws: set[str] | None = None) -> int:
+    if live_ws is None:
+        live_ws = live_sandbox_workspaces()
+    return sum(1 for ws in _studio_workspaces() if workspace_running(ws, live_ws))
+
+
+def _stop_workspace(ws: Path) -> None:
+    rd = _run_dir_for_workspace(ws)
+    if not rd:
+        return
+    try:
+        s = _resolve(rd)
     except (ValueError, OSError):
         return
     if s is not None:
         s.stop()
 
 
-def _live_drafts() -> int:
-    with _SELECT_LOCK:
-        return sum(1 for s in SESSIONS.values() if s.is_running())
+def _reconcile() -> None:
+    """One pump tick: resume crashed turns, then start queued members, up to cap.
 
+    Idempotent and stateless beyond the on-disk member set + each workspace's
+    status — so it behaves identically whether the server has been up for days or
+    started ten seconds ago after a restart (it re-adopts in-flight work).
+    """
+    live_ws = live_sandbox_workspaces()
+    slots = DRAFT_CAP - _live_drafts(live_ws)
+    if slots <= 0:
+        return
 
-_BATCH = web_common.BatchRunner(DRAFT_CAP, _start_draft, _live_drafts)
+    # 1) Resume turns whose supervisor died without finishing (infra kill/crash),
+    #    bounded by MAX_RELAUNCH; a terminal failure (refusal/repeated error) is
+    #    not resumable and is left alone.
+    for ws in _studio_workspaces():
+        if slots <= 0:
+            return
+        if not workspace_resumable(ws, live_ws):
+            continue
+        if int((workspace_status(ws) or {}).get("relaunches") or 0) >= MAX_RELAUNCH:
+            continue
+        rd = _run_dir_for_workspace(ws)
+        if not rd:
+            continue
+        try:
+            s = _resolve(rd)
+        except (ValueError, OSError):
+            continue
+        if s is not None and s.resume():
+            slots -= 1
+
+    # 2) Start members that have not begun yet (queued). run_all clears a target's
+    #    status so it re-drafts; a started/completed/failed member is left as-is.
+    for rel in _load_members():
+        if slots <= 0:
+            return
+        work = default_work_dir(rel)
+        if workspace_status(work) is not None or workspace_running(work, live_ws):
+            continue
+        try:
+            s = _resolve(rel)
+        except (ValueError, OSError):
+            continue
+        if s is None:
+            continue
+        try:
+            s.start_turn("/draft")
+            slots -= 1
+        except (ValueError, RuntimeError):
+            pass  # raced with another start
 
 
 def _draft_pump() -> None:
-    """Keep the automatic writeup queue flowing as runs finish."""
+    """Keep the durable writeup batch flowing and self-healing."""
     while True:
-        _BATCH.advance()
+        try:
+            _reconcile()
+        except Exception:  # noqa: BLE001 - a bad workspace must not kill the pump
+            pass
         time.sleep(3)
 
 
@@ -147,21 +233,41 @@ def _run_phase(d: Path) -> str:
         return "Failed"
 
 
-def _batch_running_members() -> int:
-    members = _BATCH.members()
-    if not members:
-        return 0
-    with _SELECT_LOCK:
-        return sum(
-            1
-            for rel in members
-            if (s := SESSIONS.get(str(Path(rel).resolve()))) is not None
-            and s.is_running()
-        )
-
-
 def batch_status() -> dict:
-    return _BATCH.status(_batch_running_members())
+    """Durable 'Write all' summary for the UI banner: how many members are in
+    flight (running or being resumed) vs queued (not started yet)."""
+    members = _load_members()
+    if not members:
+        return {"batch": False, "active": 0, "queued": 0}
+    live_ws = live_sandbox_workspaces()
+    active = queued = 0
+    for rel in members:
+        work = default_work_dir(rel)
+        if workspace_running(work, live_ws) or workspace_resumable(work, live_ws):
+            active += 1
+        elif workspace_status(work) is None:
+            queued += 1
+    return {"batch": active > 0 or queued > 0, "active": active, "queued": queued}
+
+
+def _workspace_turn_status(work: Path, live_ws: set[str]) -> dict | None:
+    """Job status reconciled against live ground truth, for the UI.
+
+    ``running`` is trusted only while the supervisor is actually alive; a running
+    record whose supervisor died is reported as ``resuming`` (the pump will
+    relaunch it) rather than as a failure — only a ``terminal`` failure
+    (refusal / repeated error) is a real "issue"."""
+    status = workspace_status(work)
+    if not status:
+        return None
+    if status.get("state") == "running" and not workspace_running(work, live_ws):
+        return {
+            **status,
+            "state": "resuming",
+            "error": None,
+            "note": "the turn was interrupted and will be resumed automatically.",
+        }
+    return status
 
 
 def list_runs() -> list[dict]:
@@ -174,16 +280,12 @@ def list_runs() -> list[dict]:
     activity), then the rest newest-first."""
     runs = []
     # One /proc scan: catches agents writing for workspaces we hold no session
-    # for (server restarted mid-turn, or the supervisor process died).
+    # for (server restarted mid-turn, or a supervisor reparented to init).
     live_ws = live_sandbox_workspaces()
-    queued = _BATCH.queued()
+    members = set(_load_members())
     for d in _discover_run_dirs(OUTPUTS_DIR):
         name = d.name
-        mode = (
-            "multi_phase"
-            if name.endswith("_multi_phase")
-            else ("goal" if name.endswith("_goal") else "")
-        )
+        mode = "multi_phase" if name.endswith("_multi_phase") else ""
         try:
             group = str(d.parent.relative_to(OUTPUTS_DIR))
         except ValueError:
@@ -197,28 +299,26 @@ def list_runs() -> list[dict]:
             draft_mtime = (work / DOC_NAME).stat().st_mtime
         except OSError:
             draft_mtime = None
-        turn_status = _workspace_turn_status(work, str(work.resolve()) in live_ws)
-        draft_error = bool(
-            turn_status
-            and turn_status.get("state") in {"failed", "unknown"}
-            and str(work.resolve()) not in live_ws
-        )
-        phase = _run_phase(d)
-        session = SESSIONS.get(str(d))
+        turn_status = _workspace_turn_status(work, live_ws)
+        state = (turn_status or {}).get("state")
+        drafting = state in {"running", "resuming"}
+        is_member = str(d.resolve()) in members
         runs.append(
             {
                 "name": name,
                 "path": str(d),
                 "mode": mode,
                 "group": group,
-                "phase": phase,  # Active | Completed | Failed
-                "selectable": phase == "Completed",
+                "phase": _run_phase(d),  # Active | Completed | Failed
+                "selectable": _run_phase(d) == "Completed",
                 "started": draft_mtime is not None,  # a studio draft exists
-                "drafting": bool(session and session.is_running())
-                or str(work.resolve()) in live_ws,
-                "draft_error": draft_error,
+                "drafting": drafting,
+                # A member that hasn't begun is queued; the pump will start it.
+                "queued": is_member and turn_status is None and not drafting,
+                # Only a terminal failure (genuine error / refusal) is an "issue";
+                # interrupted turns show as "resuming", not failed.
+                "draft_error": state == "failed",
                 "draft_error_message": (turn_status or {}).get("error"),
-                "queued": str(d) in queued,
                 "mtime": max(mtime, draft_mtime or 0.0),
             }
         )
@@ -235,25 +335,6 @@ def list_runs() -> list[dict]:
         )
     )
     return runs
-
-
-def _workspace_turn_status(work: Path, live: bool) -> dict | None:
-    try:
-        status = json.loads((work / TURN_STATUS_NAME).read_text())
-    except (OSError, ValueError, TypeError):
-        return None
-    if not isinstance(status, dict):
-        return None
-    if status.get("state") == "running" and not live:
-        return {
-            **status,
-            "state": "unknown",
-            "error": (
-                "The previous agent turn is no longer running, but this server "
-                "did not observe its exit. Check the transcript and studio_agent.log."
-            ),
-        }
-    return status
 
 
 def _validated_run_dir(spec: str) -> Path:
@@ -298,77 +379,68 @@ def select_run(spec: str) -> dict:
     return state_payload(_resolve(spec))
 
 
+def _stop_all_live() -> None:
+    """Kill every in-flight studio turn (by workspace, so adopted/orphaned
+    supervisors and any we hold are all caught)."""
+    live_ws = live_sandbox_workspaces()
+    for ws in _studio_workspaces():
+        if workspace_running(ws, live_ws) or workspace_resumable(ws, live_ws):
+            _stop_workspace(ws)
+
+
 def reset_all() -> dict:
     """Delete every studio writeup workspace (drafts, figures, conversations).
 
-    Standardized with the blue team's delete-all: this always works — it stops
-    any in-flight writeups (and clears the batch queue) rather than refusing, then
-    wipes. Live sessions are reset in place (workspace re-staged); workspaces
-    with no session this process are removed outright."""
-    _BATCH.stop_all(_stop_draft)
-    with _RESET_BEFORE_DRAFT_LOCK:
-        _RESET_BEFORE_DRAFT.clear()
-    for r in list_runs():
-        if r.get("drafting"):
-            _stop_draft(r["path"])
-    with _SELECT_LOCK:
-        sessions = list(SESSIONS.values())
-    for s in sessions:
-        s.stop()
-    # stop() SIGKILLs; wait briefly for the reaper to clear each turn so reset()
-    # (which refuses while a turn runs) succeeds.
+    Always works — it stops any in-flight writeups and clears the durable batch
+    rather than refusing, then wipes each workspace."""
+    _save_members([])
+    _stop_all_live()
+    # Give the kills a moment so a supervisor doesn't recreate status after wipe.
     deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and any(s.is_running() for s in sessions):
+    while time.monotonic() < deadline and _live_drafts() > 0:
         time.sleep(0.1)
-    known = {str(s.work) for s in sessions}
     deleted = 0
-    if STUDIO_ROOT.is_dir():
-        for d in sorted(STUDIO_ROOT.iterdir()):
-            if not d.is_dir():
-                continue
-            if (d / DOC_NAME).exists() or (d / SESSION_NAME).exists():
-                deleted += 1
-            if str(d) not in known:
-                shutil.rmtree(d, ignore_errors=True)
-    for s in sessions:
-        try:
-            s.reset()
-        except RuntimeError:
-            shutil.rmtree(s.work, ignore_errors=True)  # last resort if still busy
+    for d in _studio_workspaces():
+        if (d / DOC_NAME).exists() or (d / SESSION_NAME).exists():
+            deleted += 1
+        shutil.rmtree(d, ignore_errors=True)
+    with _SELECT_LOCK:
+        SESSIONS.clear()
     return {"deleted": deleted}
 
 
 def run_all(dry: bool) -> dict:
     """Queue a fresh automatic ``/draft`` pipeline for every available Completed
-    run, up to DRAFT_CAP at a time (the rest start as slots free — see the
-    pump). Existing studio workspaces are reset before their queued pipeline
-    starts, matching the blue team's "Run all overwrites saved results" model.
-    ``dry`` only reports the targets so the UI can confirm before spending real
-    agents."""
-    targets = [
-        r
-        for r in list_runs()
-        if r["selectable"] and not r["drafting"] and not r["queued"]
-    ]
+    run. The durable batch records them; the reconcile pump starts up to
+    DRAFT_CAP at once and resumes any that get interrupted, so the batch survives
+    a viewer restart. Each target's workspace is reset first (overwrite). ``dry``
+    only reports the targets so the UI can confirm before spending real agents."""
+    targets = [r for r in list_runs() if r["selectable"] and not r["drafting"]]
     names = [r["name"] for r in targets]
     if dry:
         return {"targets": names, "started": []}
-    paths = [r["path"] for r in targets]
-    with _RESET_BEFORE_DRAFT_LOCK:
-        _RESET_BEFORE_DRAFT.update(str(Path(p).resolve()) for p in paths)
-    _BATCH.start_all(paths)
+    paths = [str(Path(r["path"]).resolve()) for r in targets]
+    # Overwrite: stop + clear each target so the pump re-drafts it from scratch.
+    for rel in paths:
+        try:
+            s = _resolve(rel)
+        except (ValueError, OSError):
+            continue
+        if s is None:
+            continue
+        try:
+            s.reset()
+        except RuntimeError:
+            pass  # still finishing a stop; the pump will start it once status clears
+    _save_members(paths)
     return {"targets": names, "started": names}
 
 
 def stop_all_drafts() -> dict:
     """Stop the whole automatic writeup batch (queued + in-flight)."""
-    result = _BATCH.stop_all(_stop_draft)
-    for r in list_runs():
-        if r.get("drafting"):
-            _stop_draft(r["path"])
-    with _RESET_BEFORE_DRAFT_LOCK:
-        _RESET_BEFORE_DRAFT.clear()
-    return result
+    _save_members([])
+    _stop_all_live()
+    return {"ok": True}
 
 
 def state_payload(s: StudioSession | None) -> dict:
@@ -733,12 +805,14 @@ def export_docx(s: StudioSession) -> bytes:
 
 def _doc_title(run_name: str) -> str:
     """Google Doc name for a run: "Empirical Emergent Collusion" — title-cased,
-    the default multi_phase suffix dropped, other modes kept as a suffix.
+    with the ``_multi_phase`` suffix dropped.
     Stable per run: this is also the key for update-in-place in Drive."""
-    for mode, suffix in (("_multi_phase", ""), ("_goal", " (goal)")):
-        if run_name.endswith(mode):
-            return run_name[: -len(mode)].replace("_", " ").title() + suffix
-    return run_name.replace("_", " ").title()
+    name = (
+        run_name[: -len("_multi_phase")]
+        if run_name.endswith("_multi_phase")
+        else run_name
+    )
+    return name.replace("_", " ").title()
 
 
 def export_gdoc(s: StudioSession) -> dict:
@@ -853,6 +927,7 @@ INDEX_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Blogpost Studio</title>
+<!--__FAVICON__-->
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <style>
 /*__PALETTE__*/
@@ -1323,7 +1398,7 @@ async function stopAllDrafts(){
 }
 
 // ---- run picker ----
-let allRuns=[];   // all runs shown regardless of mode (goal / multi_phase)
+let allRuns=[];   // all runs
 async function loadRuns(){
   if(!allRuns.length){ $("#pickerTabs").innerHTML=""; $("#pickerList").innerHTML='<div class="muted">loading runs…</div>'; }
   try{
@@ -1480,6 +1555,7 @@ init();
 # Shared palette + markdown-editor pieces come from src.theme (single source).
 INDEX_HTML = (
     INDEX_HTML.replace("/*__PALETTE__*/", PALETTE_CSS)
+    .replace("<!--__FAVICON__-->", FAVICON_LINK)
     .replace("/*__CONTROLS_CSS__*/", CONTROLS_CSS)
     .replace("/*__EDITOR_CSS__*/", EDITOR_CSS)
     .replace("/*__PREVIEW_CSS__*/", PREVIEW_CSS)

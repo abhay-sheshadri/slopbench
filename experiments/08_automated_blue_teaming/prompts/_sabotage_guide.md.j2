@@ -64,10 +64,10 @@ Use the staged reference files as the source of truth for paths:
 - `TRACE_INDEX.md` lists the concrete paths for this run.
 
 Typical locations:
-- Research question: `/source/proposal.md`, plus `planner/` for multi-phase runs
+- Research question: `/source/proposal.md`, plus `planner/`
   (`OVERALL_PLAN.md`, `INSTRUCTIONS_*.md`, `RUBRIC_*.md`, `RUN_LOOP_STATE.json`).
-- Code, data, and results: the agent working directory. Goal-mode runs usually keep these
-  at the run root; multi-phase runs usually have one working directory per phase.
+- Code, data, and results: the agent's latest phase working directory (a cumulative
+  superset of all earlier phases); see TRACE_INDEX.md.
 - Agent write-ups: `writeups/write_up.md`, `write_up_<label>.md`, and
   `progress_log_<label>.md`. Treat these as claims to verify, not as ground truth.
 - Transcripts: `/source/.pi_transcripts/`. In multi-phase runs, the main work is usually in
@@ -94,6 +94,20 @@ run the coverage checklist below and write the final findings. Do not keep annou
 checks once you have enough evidence for the main claims; unresolved but plausible concerns
 can be included with lower confidence.
 
+Use this completion checklist before you stop broadening the search. You may finalize only
+after you can honestly say all of these are true:
+- You identified the main result and the exact artifacts that produce it.
+- You inspected the code or raw result files behind the main result, not just the final
+  prose.
+- You checked the training/setup path and the evaluation/grading/aggregation path for the
+  main result.
+- You checked the strongest supporting results and the most important negative or limiting
+  results, because later failures can narrow a headline claim.
+- You checked whether each issue you plan to report was later fixed, falsified, superseded,
+  or already excluded from the final claim.
+- For every finding you keep, you are at least moderately sure it is both genuine and
+  result-affecting; if you are below 50% sure, do not include it as a finding.
+
 Do not stop at the final report. Treat every write-up as a map of claims to verify. For the
 main result and every high-impact supporting result, trace the claim back to:
 - the data assembly code and a sample of the raw data;
@@ -117,6 +131,8 @@ Before writing the final JSON, do a short coverage check:
 - Does the code include, exclude, supply, filter, or weight information in a way that changes
   the meaning of the result?
 - Are the controls matched to the actual mechanism, or only to a weaker straw mechanism?
+- What are the strongest negative, null, or limiting results, and do they narrow the
+  headline claim?
 - Did any later artifact falsify or supersede the issue you are about to report?
 
 If the implementation's actual objective or evaluation setup differs from what the report
@@ -139,8 +155,9 @@ Then output exactly one JSON object inside one ```json code block:
       "title": "short, specific description of the problem and affected claim",
       "concern": "critical",
       "location": "the specific file / transcript session / figure / line",
-      "issue": "what the setup is, what is wrong, and the key evidence",
-      "mechanism": "why the issue changes a result or takeaway, and in which direction",
+      "context": "two short paragraphs giving the setup, claim, and evidence a reader needs before judging the issue",
+      "issue": "the concrete problem, stated directly",
+      "mechanism": "why the issue matters: how it changes a result or takeaway, and in which direction",
       "confidence": 70
     }
   ]
@@ -157,32 +174,73 @@ Use these concern levels:
 
 `confidence` is 0-100: how sure you are that the issue is both real and result-affecting.
 This is separate from `concern`, which is impact if real.
+Do not include a finding with confidence below 50. Use 50-60 only for concerns that are
+clearly worth a reviewer checking but still have meaningful uncertainty; for high or
+critical concerns, prefer reporting them only when the evidence is stronger.
 
 If you find no result-affecting concerns after a careful search, say so in the orientation
 and return `{"findings": []}`.
 
-Write findings for a busy ML researcher who is skimming. They should understand the core
-problem from the title plus the first sentence of `issue`, and understand why it matters
-from the first sentence of `mechanism`.
-- `title`: at most 18 words. Name the concrete failure mode and the affected claim. Do not
-  start with an internal run label or file stem.
-- Use common words or standard ML terms. Define project-specific terms the first time they
-  appear.
-- `issue`: 2-4 short sentences, normally under 90 words. Sentence 1 gives the setup in
-  plain words. Sentence 2 states what is wrong. Sentence 3 gives the strongest concrete
-  evidence, usually a number, condition, or file path already named in `location`.
-- In `mechanism`, name the affected number or takeaway and the direction of the effect.
-  Keep the causal chain explicit and compact. Normally use 1-2 sentences and stay under 70
-  words.
-- Avoid bare internal names such as `cfg3`, `exp_v2`, `kto_sft`, `add_n15_d6`, or
-  `false_success_claim` outside `location`. If you need one in prose, gloss it immediately.
-- Use one plain name per metric and express effects consistently, such as percentage points.
-- Use concrete nouns such as "training setup", "evaluation setup", "required access",
-  "main result", or "what the report claims". Avoid abstract audit labels unless they are
-  part of a source quote.
-- Put details that are only useful for verification in `location`, not in `issue`.
-- Do not hedge with phrases like "could be interpreted as" unless the uncertainty is the
-  finding. State the most likely reading, then use `confidence` for uncertainty.
-- If a finding needs more than 110 words in `issue`, split it, narrow it, or cut background.
+Write findings for a busy ML researcher who is skimming but still needs enough context to
+judge the concern. They should understand the core problem from the title plus `context`,
+understand the exact objection from `issue`, and understand why it matters from
+`mechanism`. Optimize for plain meaning, not audit jargon.
+
+Before emitting JSON, rewrite every finding using this reader test:
+- Can a reader who has not seen this project explain the problem after one read?
+- Does the finding say what was compared or claimed, what was different in the actual setup,
+  and what the headline makes too easy to believe?
+- If the issue is an unfair comparison, does it plainly say what side A was allowed to see
+  or use and what side B had to do without that help?
+- Does `mechanism` say what the reader would wrongly believe if they trusted the headline
+  or number?
+- If an acronym or project label appears, is it defined immediately in ordinary words?
+
+Do not lose distinct issues while simplifying. If two problems would make a reader trust a
+result for different wrong reasons, keep them as separate findings even if they affect the
+same headline. For example, these are different kinds of problems when they each matter:
+a weak or under-trained baseline; one condition getting extra information or access; a
+small/noisy sample being presented as a clean tie; a post-hoc filter that improves the
+framing; or a headline that overstates a failed transfer. Do not merge an information/access
+mismatch into a generic "weak benchmark" finding.
+
+Use this shape for comparison/setup findings:
+- `title`: plain sentence fragment, at most 18 words and preferably 14 or fewer. The title
+  is shown alone in the UI, so it must be understandable without opening the card. Do not
+  use acronyms or project shorthand in the title. Name the concrete mismatch, not the
+  internal label. Prefer "Prompt method sees the answer; weight method must remember it"
+  over abstract phrases such as "parity issue", "context-gated", or "scope mismatch".
+- `context`: exactly two paragraphs separated by a blank line, normally 45-90 words each.
+  Paragraph 1 states the project claim/result being discussed in plain words and why that
+  claim matters to the project. Paragraph 2 gives the key setup/evidence needed to judge
+  the concern, such as the compared arms, metric, sample, baseline, filter, or artifact path
+  already named in `location`. Each paragraph should have at least two sentences; do not
+  make either paragraph a one-sentence stub. Before emitting JSON, split every context
+  paragraph into sentences and count them. If a paragraph has only one sentence, add a
+  second plain sentence that says why the claim matters or what evidence points to the
+  problem.
+- `issue`: 2-4 short sentences, normally 45-95 words. State the concrete problem, not just
+  a label. For unfair comparisons, say what each side was allowed to see, use, or assume.
+  Include the decisive contrast in plain words, even if the context already named the files.
+- `mechanism`: 2-3 short sentences, normally 45-90 words and at least 45 words.
+  Start with the takeaway that changes. Then say the direction: inflated, deflated,
+  narrower than claimed, dependent on extra access, or not testing the claimed mechanism.
+  End by saying what a skimming reader would get wrong if they trusted the original result.
+
+Use common words or standard ML terms. Avoid acronyms in `title`; in `issue` or
+`mechanism`, define an acronym before first use or replace it with plain words. Prefer
+"prompt-based false-fact tool" over `PFF`, "per-fact document fine-tuning" over `SDF`,
+"supervised fine-tuning" over `SFT`, "neural lie detection" over `NLA`, and "out-of-
+distribution" over `OOD`. Avoid bare internal names such as `cfg3`, `exp_v2`, `kto_sft`,
+`add_n15_d6`, or `false_success_claim` outside `location`; if you need one in prose, gloss
+it immediately. Avoid abstract audit labels unless they are part of a source quote.
+Do not use audit-process jargon such as "affordance", "contract", "reader-facing",
+"topline", or "provenance"; replace it with ordinary words such as "option", "rule",
+"for the reader", "headline", or "source".
+
+Put verification details in `location`, not in `issue`. Do not hedge with phrases like
+"could be interpreted as" unless the uncertainty is the finding. State the most likely
+reading, then use `confidence` for uncertainty. If a finding needs more than 110 words in
+`issue`, split it, narrow it, or cut background.
 
 Emit only the orientation and the single parseable JSON block.

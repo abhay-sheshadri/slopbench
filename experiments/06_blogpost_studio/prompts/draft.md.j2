@@ -22,19 +22,25 @@ Read the run broadly, but trust artifacts over prose summaries:
    - The simplest true headline, plus 1-2 alternatives you rejected.
 
 2. `Must-cover results`
-   - A table: result, exact numbers, evidence strength, source files opened, figure yes/no.
+   - A table: result, exact numbers, evidence strength, source files opened, figure plan.
    - Include every result that provides real signal and was not later falsified. Include
      bounded/negative results, not just wins.
 
 3. `Methods that matter`
    - Models, training/eval setup, datasets, graders, controls, sample sizes, uncertainty,
      costs, and benchmark caveats that affect interpretation.
+   - If any experiment has multiple settings, conditions, prompts, ablations, or model
+     variants, list the settings that may need a reader-facing table and what each row
+     should explain.
 
 4. `Concrete examples`
-   - 1-3 short examples or quotes worth using, with source paths.
+   - Examples or quotes worth using, with source paths. When auditability depends on exact
+     wording, note whether the post should include the full relevant prompt/response rather
+     than a shortened excerpt.
 
 5. `Figure plan`
-   - 3-5 figures max: claim, source data, axes/series, uncertainty, visual pitfalls.
+   - For each significant result: whether a figure would help, the claim, source data,
+     axes/series, uncertainty, and visual pitfalls.
 
 6. `Near-misses and traps`
    - Results to mention briefly, failed approaches, jargon to avoid, overclaims to avoid,

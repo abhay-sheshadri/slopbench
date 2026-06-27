@@ -7,20 +7,28 @@ You are in a fresh writable directory at `/workspace`. The completed run is moun
 read-only at `/source`; read from it freely, but write only in your current directory.
 
 Start with the two files staged in your directory:
-- `RUN_DIR_STRUCTURE.md` explains the run layout, the two modes (`goal` and `multi_phase`),
-  the transcript recipes, and how to run Python for plots.
+- `RUN_DIR_STRUCTURE.md` explains the run layout, the transcript recipes, and how to run
+  Python for plots.
 - `TRACE_INDEX.md` gives the actual paths for this run.
 
 When you finish, these should exist:
 1. `./final_writeup.md`
 2. `./final_plots/`, with every cited figure saved as both `.png` and `.pdf`
 
+`final_writeup.md` and the figures it embeds are the ONLY things anyone will read. No other
+file you create — scratch notes, extra `.md` files, analysis dumps, or plots you generate
+but never reference — is ever seen. So put every finding into the writeup itself, and embed
+every figure you want shown with `![caption](final_plots/...)`. An edit that lands anywhere
+else is invisible.
+
 ## Before writing
 
-Read the run broadly before drafting: every phase, not just the last one. The per-phase
-write-ups, progress logs, and rolling `write_up.md` are useful maps, but they are not
-ground truth. They often misstate numbers, describe abandoned experiments as finished, or
-hide the important caveat in the wrong place.
+Read the run before drafting. The latest phase dir (see `TRACE_INDEX.md`) is a cumulative
+superset of the whole run — its `writeups/`, `results/`, and `data/` hold everything, so
+read there rather than hunting through older phases. The per-phase write-ups, progress logs,
+and rolling `write_up.md` are useful maps, but they are not ground truth. They often misstate
+numbers, describe abandoned experiments as finished, or hide the important caveat in the
+wrong place.
 
 Reconstruct the methods from the code and artifacts: datasets, filters, prompts, model
 calls, training or inference settings, judging/probing, statistical tests, ablations,

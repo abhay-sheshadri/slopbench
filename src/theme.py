@@ -14,6 +14,27 @@ existing rules resolve without renaming.
 
 from __future__ import annotations
 
+import base64
+
+# Shared favicon (single source of truth) so every page — Agent Viewer,
+# Proposals, Blue Team, Blogpost Studio — shows the same logo in the tab.
+# A small "transcript lines" mark drawn from the palette accents. Embedded as a
+# data URI so no extra asset/route is needed; pages insert FAVICON_LINK by
+# replacing the <!--__FAVICON__--> token in their <head>.
+FAVICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    '<rect width="32" height="32" rx="7" fill="#13161f"/>'
+    '<rect x="6" y="9" width="20" height="3" rx="1.5" fill="#7aa2f7"/>'
+    '<rect x="6" y="15" width="14" height="3" rx="1.5" fill="#7dcfff"/>'
+    '<rect x="6" y="21" width="17" height="3" rx="1.5" fill="#9ece6a"/>'
+    "</svg>"
+)
+FAVICON_BYTES = FAVICON_SVG.encode("utf-8")
+FAVICON_DATA_URI = "data:image/svg+xml;base64," + base64.b64encode(
+    FAVICON_BYTES
+).decode("ascii")
+FAVICON_LINK = f'<link rel="icon" type="image/svg+xml" href="{FAVICON_DATA_URI}">'
+
 PALETTE_CSS = """:root{
   color-scheme: dark;
   /* surfaces (back -> front) */
@@ -53,7 +74,9 @@ EDITOR_CSS = """/* The edit pane is a transparent <textarea> stacked exactly on 
 #editor,#editorHL{margin:0;border:0;position:absolute;inset:0;
   font-family:var(--mono);font-size:13.5px;line-height:1.75;tab-size:2;
   white-space:pre-wrap;word-break:break-word;overflow-wrap:break-word;
-  padding:32px max(26px,calc((100% - 720px)/2))}
+  padding:32px max(26px,calc((100% - 720px)/2));
+  letter-spacing:0;font-kerning:none;font-variant-ligatures:none;
+  font-feature-settings:"liga" 0,"calt" 0}
 /* Both reserve a scrollbar gutter so they wrap at the same width (the textarea's
    visible scrollbar would otherwise narrow only its text and misalign the layers). */
 #editorHL{overflow-y:scroll;overflow-x:hidden;color:var(--fg);pointer-events:none;z-index:1}
@@ -63,13 +86,13 @@ EDITOR_CSS = """/* The edit pane is a transparent <textarea> stacked exactly on 
 #editor::placeholder{color:var(--faint);-webkit-text-fill-color:var(--faint)}
 #editor::selection{background:rgba(122,162,247,.32)}
 /* markdown token colors in the editor */
-.hl-h{color:var(--accent);font-weight:700}
+.hl-h{color:var(--accent)}
 .hl-h1{color:var(--accent)} .hl-h2{color:var(--accent)} .hl-h3{color:var(--accent2)}
 .hl-h4,.hl-h5,.hl-h6{color:var(--accent2)}
-.hl-b{color:var(--fg);font-weight:700} .hl-i{color:var(--fg);font-style:italic}
-.hl-code{color:var(--user)} .hl-fence{color:var(--user);font-weight:600}
+.hl-b{color:var(--fg)} .hl-i{color:var(--fg)}
+.hl-code{color:var(--user)} .hl-fence{color:var(--user)}
 .hl-link{color:var(--accent2)} .hl-url{color:var(--muted)}
-.hl-quote{color:var(--muted);font-style:italic} .hl-mark{color:var(--tool);font-weight:700}
+.hl-quote{color:var(--muted)} .hl-mark{color:var(--tool)}
 .hl-hr{color:var(--faint)}"""
 
 PREVIEW_CSS = """#preview{font-size:15px;line-height:1.75;padding:32px max(26px,calc((100% - 720px)/2))}
@@ -305,6 +328,10 @@ async function api(url, body, quiet){
 }"""
 
 __all__ = [
+    "FAVICON_SVG",
+    "FAVICON_BYTES",
+    "FAVICON_DATA_URI",
+    "FAVICON_LINK",
     "PALETTE_CSS",
     "CONTROLS_CSS",
     "APP_JS",

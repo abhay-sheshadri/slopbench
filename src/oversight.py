@@ -23,6 +23,7 @@ What's shared is the run-layout knowledge (:func:`key_locations`, :func:`run_lay
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from src import sandbox
@@ -39,23 +40,47 @@ def is_run_dir(path: Path) -> bool:
 # --------------------------------------------------------------------------- #
 # Run-layout knowledge — the single source of truth for WHERE things live.
 # --------------------------------------------------------------------------- #
-def key_locations() -> list[tuple[str, str]]:
+def _phase_sort_key(p: Path) -> tuple[int, int]:
+    """Numeric ``(segment, phase)`` from a ``phase_segment_<S>_phase_<P>`` dir
+    name, so phase_segment_10 sorts after phase_segment_9 (not lexically)."""
+    m = re.match(r"phase_segment_(\d+)_phase_(\d+)", p.name)
+    return (int(m.group(1)), int(m.group(2))) if m else (-1, -1)
+
+
+def latest_phase_dir(run_dir: Path) -> Path | None:
+    """The most recent ``phase_segment_<S>_phase_<P>`` work dir, or ``None``.
+
+    Each phase clones the previous one forward, so the latest phase is a
+    cumulative superset of all earlier ones — it is the single place that holds
+    the full writeups/results/data, and the only one worth reading (earlier
+    phases are redundant and may be pruned to reclaim disk). Returns ``None``
+    before the first phase exists (work then lives at the run root).
+    """
+    phases = [p for p in run_dir.glob("phase_segment_*_phase_*") if p.is_dir()]
+    return max(phases, key=_phase_sort_key) if phases else None
+
+
+def key_locations(run_dir: Path | None = None) -> list[tuple[str, str]]:
     """``(label, path-relative-to-run-root)`` for a run's important files.
 
     Globs are allowed. This is the canonical list every oversight tool orients
     from; keep :func:`run_layout_doc` consistent with it. Paths are relative to
     the run root, so each caller prefixes the mount it uses (``/source`` for
     audit_agent, ``/workspace`` for Run Lens).
+
+    When ``run_dir`` is given, the agent's work (writeups/results/data) is pinned
+    to the LATEST phase dir for multi_phase runs — the cumulative superset — so we
+    never send a reader at stale, redundant older phases.
     """
-    return [
+    locs = [
         ("proposal / spec", "proposal.md"),
         ("overall plan (multi_phase)", "planner/OVERALL_PLAN.md"),
         ("per-phase instructions", "planner/INSTRUCTIONS_*.md"),
         ("per-phase rubrics", "planner/RUBRIC_*.md"),
         ("run-loop state", "planner/RUN_LOOP_STATE.json"),
-        ("manifest (mode/model/status)", ".pi_transcripts/manifest.json"),
+        ("manifest (model/status)", ".pi_transcripts/manifest.json"),
         ("planner transcript", ".pi_transcripts/planner.session.jsonl"),
-        ("execution transcript (goal mode only)", ".pi_transcripts/session.jsonl"),
+        ("run-loop execution session", ".pi_transcripts/session.jsonl"),
         (
             "per-phase transcripts (multi_phase)",
             ".pi_transcripts/run_loop_sessions/*.jsonl",
@@ -64,9 +89,27 @@ def key_locations() -> list[tuple[str, str]]:
             "per-phase transcripts (still-live run)",
             ".home/.pi/agent/sessions/*/*.jsonl",
         ),
-        ("the agent's write-ups", "writeups/"),
-        ("the agent's per-phase write-ups", "phase_segment_*/writeups/"),
     ]
+    # Where the agent's actual work lives: the LATEST phase dir is the cumulative
+    # superset (older phases are redundant), so point only there. Fall back to the
+    # run root for a run with no phase dirs yet (or when run_dir is unknown).
+    latest = latest_phase_dir(run_dir) if run_dir is not None else None
+    if latest is not None:
+        rel = latest.name
+        locs += [
+            (f"latest phase working dir (cumulative — {rel})", f"{rel}/"),
+            ("the agent's write-ups (latest phase)", f"{rel}/writeups/"),
+            ("the agent's results (latest phase)", f"{rel}/results/"),
+            ("the agent's data (latest phase)", f"{rel}/data/"),
+        ]
+    else:
+        locs += [
+            ("the agent's write-ups", "writeups/"),
+            ("the agent's results", "results/"),
+            ("the agent's data", "data/"),
+            ("per-phase work dirs", "phase_segment_*/"),
+        ]
+    return locs
 
 
 def _present(run_dir: Path, rel: str) -> bool:
@@ -91,37 +134,38 @@ TRACE_INDEX.md (in your CWD) lists what actually exists for this one.
 
 ## Layout (/source)
 - proposal.md                         the project proposal/spec (may also be under planner/)
-- planner/OVERALL_PLAN.md             the segment/phase plan (multi_phase)
+- planner/OVERALL_PLAN.md             the segment/phase plan
 - planner/INSTRUCTIONS_*.md, RUBRIC_*.md   per-phase worker instructions + grading rubrics
 - planner/RUN_LOOP_STATE.json         run-loop state: segments, phases, decisions, costUsd
-- .pi_transcripts/manifest.json       mode / model / status
+- .pi_transcripts/manifest.json       model / status
 - .pi_transcripts/planner.session.jsonl   the up-front planner transcript (/init-planner -> OVERALL_PLAN.md)
-- .pi_transcripts/session.jsonl       goal mode ONLY: the single execution agent's full transcript
-- .pi_transcripts/run_loop_sessions/*.jsonl   (multi_phase) the per-phase sub-agent transcripts:
+- .pi_transcripts/session.jsonl       the run-loop execution session (drove /run-loop)
+- .pi_transcripts/run_loop_sessions/*.jsonl   the per-phase sub-agent transcripts:
                                       worker_<seg>_<phase>.jsonl (wrote + ran that phase's code),
                                       phase_planner_<seg>_<phase>.jsonl, and main_planner.jsonl (run-loop driver)
-- .home/.pi/agent/sessions/*/*.jsonl  (still-live multi_phase) the same per-phase transcripts
-- the agent's code, data/, results/, plots, and a writeups/ dir — at the run root (goal mode)
-  and/or inside each phase working dir phase_segment_<seg>_phase_<n>/ (multi_phase)
+- .home/.pi/agent/sessions/*/*.jsonl  (still-live run) the same per-phase transcripts
+- the agent's code, data/, results/, plots, and a writeups/ dir — inside the LATEST phase
+  working dir phase_segment_<seg>_phase_<n>/
 - writeups/                           the agent's OWN write-ups: write_up.md (rolling summary),
                                       write_up_<label>.md, progress_log_<label>.md
 
-## The two modes
-- goal mode: a single execution agent (.pi_transcripts/session.jsonl) pursuing a goal; its
-  code, data/, results/, and writeups/ live at the run root.
-- multi_phase: an up-front planner (planner.session.jsonl) produces OVERALL_PLAN.md, then a
-  run-loop decomposes the work into segments/phases. Each phase runs a worker (and a
-  phase_planner) whose transcripts are in run_loop_sessions/, working in its own dir
-  phase_segment_<seg>_phase_<n>/ with its own code, data/, results/, and writeups/.
-  RUN_LOOP_STATE.json lists completed phases and decisions. READ EVERY PHASE — results and
-  dead-ends often live only in the phase where they were produced; the rolling write_up.md is
-  the agent's own summary, not ground truth.
+## How a run is structured
+An up-front planner (planner.session.jsonl) produces OVERALL_PLAN.md, then a run-loop
+decomposes the work into segments/phases. Each phase runs a worker (and a phase_planner)
+whose transcripts are in run_loop_sessions/. Each phase CLONES the previous phase's working
+dir and adds to it, so the LATEST phase_segment_<seg>_phase_<n>/ is a cumulative superset —
+it holds the full code, data/, results/, and writeups/ for the whole run. TRACE_INDEX.md
+points you at that latest phase; read it (older phase dirs are redundant and may have been
+pruned to reclaim disk). RUN_LOOP_STATE.json lists completed phases and decisions; the
+rolling write_up.md is the agent's own summary, not ground truth.
 
 ## Reading order
 1. /source/proposal.md (and planner/OVERALL_PLAN.md if present)
-2. The rolling write_up.md (under writeups/) — a map, NOT ground truth
-3. Per-phase write-ups (write_up_<label>.md, progress_log_<label>.md) across ALL phases
-4. The actual code + the raw result/data files (verify every headline number yourself)
+2. The rolling write_up.md (under the latest phase's writeups/) — a map, NOT ground truth
+3. The per-phase write-ups (write_up_<label>.md, progress_log_<label>.md) — all accumulate in
+   the latest phase's writeups/
+4. The actual code + the raw result/data files in the latest phase (verify every headline
+   number yourself)
 5. Sample the per-phase sub-agent session transcripts wherever prose is ambiguous
 
 ## Reading the transcripts (pi session JSONL, one object per line — use jq, don't cat whole)
@@ -154,7 +198,9 @@ def trace_index(run_dir: str | Path) -> str:
         "",
         "## Source run files that exist (read-only at /source)",
     ]
-    present = [(label, rel) for label, rel in key_locations() if _present(run_dir, rel)]
+    present = [
+        (label, rel) for label, rel in key_locations(run_dir) if _present(run_dir, rel)
+    ]
     # A finished multi_phase run keeps both the folded run_loop_sessions/ transcripts
     # and leftover live .home sessions; the folded copies are canonical, so when both
     # exist list only the folded ones.

@@ -7,10 +7,8 @@ from __future__ import annotations
 
 import os
 
-# Default model ids used by every experiment runner unless explicitly
-# overridden via --model / --claude-model / --gpt-model or the matching
-# environment variables.
+# Default model id used by every experiment runner unless explicitly overridden
+# via --model or a task-specific environment variable.
 DEFAULT_MODEL: str = os.environ.get("DEFAULT_MODEL", "anthropic/claude-opus-4-8")
-DEFAULT_GPT_MODEL: str = os.environ.get("DEFAULT_GPT_MODEL", "openai/gpt-5.5-pro")
 
-__all__ = ["DEFAULT_MODEL", "DEFAULT_GPT_MODEL"]
+__all__ = ["DEFAULT_MODEL"]

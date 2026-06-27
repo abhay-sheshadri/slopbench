@@ -32,7 +32,8 @@ if str(ROOT) not in sys.path:
 
 from src import audit_agent  # noqa: E402
 
-# Figure design/plotting task -> GPT model by default; override with FIGURES_MODEL.
+# Figure design/plotting uses the shared pipeline model by default.
+# Override with FIGURES_MODEL only when deliberately testing a variant.
 FIGURES_MODEL = os.environ.get("FIGURES_MODEL", audit_agent.DEFAULT_MODEL)
 
 PROMPT = """# Audit a run and make a small set of clear figures of its main results
@@ -45,8 +46,8 @@ source run is mounted READ-ONLY at /source — read from there freely, but never
 outside your CWD.
 
 Two reference files are in your CWD — READ BOTH before doing anything else:
-- RUN_DIR_STRUCTURE.md — the run-dir layout, the two modes (goal / multi_phase),
-  how to read transcripts (jq), and how to run python for plots.
+- RUN_DIR_STRUCTURE.md — the run-dir layout, how to read transcripts (jq), and how to run
+  python for plots.
 - TRACE_INDEX.md — the concrete paths for THIS run.
 
 ## Read the run first — don't plot until you understand it

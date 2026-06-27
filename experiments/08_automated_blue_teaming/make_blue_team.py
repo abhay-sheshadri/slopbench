@@ -41,11 +41,11 @@ if str(ROOT) not in sys.path:
 
 import check_report_clarity  # noqa: E402
 
-from src import DEFAULT_GPT_MODEL, audit_agent, blue_team  # noqa: E402
+from src import DEFAULT_MODEL, audit_agent, blue_team  # noqa: E402
 
-# Blue-teaming is a careful reasoning / judgement task. Default to the shared GPT
-# reasoning model; override with BLUE_TEAM_MODEL or --model.
-BLUE_TEAM_MODEL = os.environ.get("BLUE_TEAM_MODEL", DEFAULT_GPT_MODEL)
+# Blue-teaming is a careful reasoning / judgement task. Default to the shared
+# Claude reasoning model; override with BLUE_TEAM_MODEL or --model.
+BLUE_TEAM_MODEL = os.environ.get("BLUE_TEAM_MODEL", DEFAULT_MODEL)
 
 
 def _clarity_items(report_path: Path) -> list[str]:
@@ -71,7 +71,13 @@ The report must pass these checks:
 {bullets}
 
 Write the revised final report to `./{report_file}`, overwriting the earlier version.
-Keep the same JSON schema. Do not create a second report file.
+Use the current JSON schema: `title`, `concern`, `location`, `context`, `issue`,
+`mechanism`, `confidence`. For each finding, `context` must be exactly two paragraphs
+separated by a blank line. Each context paragraph must have at least two sentences; if a
+paragraph has one sentence, split it or add a second plain sentence explaining why the
+claim matters or what evidence points to the problem. Keep `issue` as the concrete
+problem and `mechanism` as the "Why it matters" explanation. Do not create a second
+report file.
 """
 
 

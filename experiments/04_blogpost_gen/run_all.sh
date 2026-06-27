@@ -16,7 +16,6 @@ CONCURRENCY="${CONCURRENCY:-50}"   # max blogpost agents running at once
 
 for run in outputs/03_run_agents/*/; do
   name="$(basename "$run")"
-  [[ "$name" == *_goal ]] && continue                                            # skip goal-mode runs
   [ -f "$run/.pi_transcripts/RUNNING" ] && continue                              # skip live runs
   grep -q '"status": "completed"' "$run/.pi_transcripts/manifest.json" 2>/dev/null || continue
   (
